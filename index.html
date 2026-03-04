@@ -839,11 +839,14 @@ const CameraEngine = {
 
   captureFrame(videoEl) {
     if (!videoEl || !videoEl.videoWidth) return null;
+    const MAX_W = 1024;
+    let w = videoEl.videoWidth, h = videoEl.videoHeight;
+    if (w > MAX_W) { h = Math.round(h * MAX_W / w); w = MAX_W; }
     const canvas = document.createElement('canvas');
-    canvas.width = videoEl.videoWidth;
-    canvas.height = videoEl.videoHeight;
-    canvas.getContext('2d').drawImage(videoEl, 0, 0);
-    return canvas.toDataURL('image/jpeg', 0.85);
+    canvas.width = w;
+    canvas.height = h;
+    canvas.getContext('2d').drawImage(videoEl, 0, 0, w, h);
+    return canvas.toDataURL('image/jpeg', 0.7);
   }
 };
 
