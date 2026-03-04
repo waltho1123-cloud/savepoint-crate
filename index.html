@@ -1,0 +1,1335 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IPAS 庫存盤點裝箱系統</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --primary: #3ab5ec;
+  --primary-light: #65c9f2;
+  --primary-dark: #1a9fd8;
+  --primary-glow: rgba(58,181,236,.23);
+  --danger: #f43f5e;
+  --danger-hover: #e11d48;
+  --success: #10b981;
+  --success-hover: #059669;
+  --bg: #eef5fa;
+  --card: rgba(255,255,255,.62);
+  --card-solid: #ffffff;
+  --text: #0c1e2e;
+  --text-muted: #5e7d94;
+  --border: rgba(255,255,255,.45);
+  --border-subtle: rgba(0,0,0,.06);
+  --radius: 16px;
+  --radius-sm: 10px;
+  --glass-bg: rgba(255,255,255,.48);
+  --glass-border: rgba(255,255,255,.55);
+  --glass-shadow: 0 8px 32px rgba(14,120,180,.08);
+  --neu-shadow: 6px 6px 14px rgba(0,0,0,.06), -4px -4px 12px rgba(255,255,255,.8);
+  --neu-shadow-sm: 3px 3px 8px rgba(0,0,0,.05), -2px -2px 6px rgba(255,255,255,.7);
+  --neu-inset: inset 2px 2px 5px rgba(0,0,0,.06), inset -2px -2px 5px rgba(255,255,255,.7);
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg);
+  background-image:
+    radial-gradient(ellipse at 15% 10%, rgba(101,201,242,.19) 0%, transparent 55%),
+    radial-gradient(ellipse at 85% 90%, rgba(58,181,236,.13) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(162,225,250,.11) 0%, transparent 60%);
+  background-attachment: fixed;
+  color: var(--text);
+  line-height: 1.6;
+  min-height: 100dvh;
+}
+
+/* ===== Header — Glassmorphism ===== */
+.header {
+  background: rgba(58,181,236,.75);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
+  color: #fff;
+  padding: 16px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  border-bottom: 1px solid rgba(255,255,255,.2);
+}
+.header h1 {
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: .3px;
+}
+.header-actions { display: flex; gap: 8px; }
+
+/* ===== Buttons — Soft UI ===== */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-size: .9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .2s ease;
+  white-space: nowrap;
+  letter-spacing: .2px;
+}
+.btn:active { transform: scale(.96); }
+.btn-primary {
+  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+  color: #fff;
+  box-shadow: 0 4px 14px var(--primary-glow);
+}
+.btn-primary:hover {
+  box-shadow: 0 6px 20px rgba(99,102,241,.35);
+  transform: translateY(-1px);
+}
+.btn-danger {
+  background: linear-gradient(135deg, var(--danger), var(--danger-hover));
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(244,63,94,.2);
+}
+.btn-danger:hover { box-shadow: 0 6px 20px rgba(244,63,94,.3); transform: translateY(-1px); }
+.btn-success {
+  background: linear-gradient(135deg, var(--success), var(--success-hover));
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(16,185,129,.2);
+}
+.btn-success:hover { box-shadow: 0 6px 20px rgba(16,185,129,.3); transform: translateY(-1px); }
+.btn-outline {
+  background: var(--glass-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--glass-border);
+  color: var(--text);
+}
+.btn-outline:hover { background: rgba(255,255,255,.7); }
+.btn-sm { padding: 7px 14px; font-size: .82rem; }
+.btn:disabled { opacity: .4; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+
+/* ===== Cards — Glass + Neumorphism ===== */
+.card {
+  background: var(--card);
+  backdrop-filter: blur(18px) saturate(1.3);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  box-shadow: var(--glass-shadow);
+  padding: 22px;
+  margin-bottom: 16px;
+  transition: box-shadow .25s ease;
+}
+.card:hover { box-shadow: 0 10px 40px rgba(14,120,180,.1); }
+.card-title {
+  font-size: .95rem;
+  font-weight: 700;
+  margin-bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  letter-spacing: .2px;
+}
+
+/* Main layout */
+.main { max-width: 920px; margin: 0 auto; padding: 20px 16px; }
+
+/* ===== Inputs — Neumorphism inset ===== */
+.box-create-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.box-create-row input,
+.manual-input-row input {
+  flex: 1;
+  min-width: 140px;
+  padding: 11px 16px;
+  border: 1px solid rgba(0,0,0,.06);
+  border-radius: var(--radius-sm);
+  font-size: .9rem;
+  outline: none;
+  background: rgba(255,255,255,.5);
+  box-shadow: var(--neu-inset);
+  transition: all .2s;
+  color: var(--text);
+}
+.box-create-row input:focus,
+.manual-input-row input:focus {
+  border-color: var(--primary-light);
+  box-shadow: var(--neu-inset), 0 0 0 3px var(--primary-glow);
+}
+.manual-input-row input { font-family: 'SF Mono', 'Fira Code', monospace; }
+
+/* ===== Current box banner — Glassmorphism ===== */
+.current-box-banner {
+  background: rgba(228,244,253,.58);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(155,220,250,.35);
+  border-radius: var(--radius);
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.current-box-banner .box-id {
+  font-size: 1.15rem;
+  font-weight: 800;
+  color: var(--primary-dark);
+}
+.current-box-banner .box-status {
+  font-size: .78rem;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-weight: 600;
+  letter-spacing: .3px;
+  text-transform: uppercase;
+}
+.status-open {
+  background: rgba(16,185,129,.12);
+  color: #059669;
+  border: 1px solid rgba(16,185,129,.2);
+}
+.status-closed {
+  background: rgba(244,63,94,.1);
+  color: #e11d48;
+  border: 1px solid rgba(244,63,94,.18);
+}
+
+/* ===== Scanner ===== */
+.scanner-area {
+  position: relative;
+  background: #0f0f1a;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  aspect-ratio: 4/3;
+  max-height: 340px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.scanner-area video { width: 100%; height: 100%; object-fit: cover; }
+.scanner-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.scanner-crosshair {
+  width: 190px;
+  height: 190px;
+  border: 2.5px solid rgba(255,255,255,.65);
+  border-radius: 14px;
+  box-shadow: 0 0 0 9999px rgba(0,0,0,.4),
+              inset 0 0 30px rgba(58,181,236,.13);
+}
+.scanner-placeholder {
+  color: #64668a;
+  text-align: center;
+  padding: 40px 20px;
+}
+.scanner-placeholder .icon {
+  font-size: 2.2rem;
+  margin-bottom: 10px;
+  opacity: .7;
+}
+
+/* ===== Scan list ===== */
+.scan-list { list-style: none; }
+.scan-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 11px 12px;
+  margin-bottom: 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,.4);
+  box-shadow: var(--neu-shadow-sm);
+  gap: 10px;
+  transition: all .15s;
+}
+.scan-list li:hover { background: rgba(255,255,255,.65); }
+.scan-item-info { flex: 1; min-width: 0; }
+.scan-item-barcode {
+  font-weight: 700;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: .9rem;
+  color: var(--text);
+}
+.scan-item-name { color: var(--text-muted); font-size: .82rem; margin-top: 1px; }
+.scan-item-time { color: var(--text-muted); font-size: .78rem; white-space: nowrap; }
+.scan-list .empty {
+  color: var(--text-muted);
+  text-align: center;
+  padding: 28px;
+  background: none;
+  box-shadow: none;
+}
+
+/* ===== Box tabs — Soft pills ===== */
+.box-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.box-tab {
+  padding: 7px 16px;
+  border-radius: 24px;
+  font-size: .82rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border-subtle);
+  background: rgba(255,255,255,.5);
+  box-shadow: var(--neu-shadow-sm);
+  transition: all .2s;
+  color: var(--text);
+}
+.box-tab:hover { background: rgba(255,255,255,.75); }
+.box-tab.active {
+  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 4px 14px var(--primary-glow);
+}
+.box-tab.closed { opacity: .55; }
+.box-tab-wrapper {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  position: relative;
+}
+.box-tab-actions {
+  display: none;
+  gap: 3px;
+  margin-left: 4px;
+}
+.box-tab-wrapper:hover .box-tab-actions,
+.box-tab-wrapper.active .box-tab-actions { display: inline-flex; }
+.box-action-btn {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 50%;
+  font-size: .68rem;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0,0,0,.06);
+  color: var(--text-muted);
+  transition: all .2s;
+  padding: 0;
+  line-height: 1;
+}
+.box-action-btn:hover { background: rgba(0,0,0,.12); color: var(--text); }
+.box-action-btn.delete:hover {
+  background: var(--danger);
+  color: #fff;
+  box-shadow: 0 2px 8px rgba(244,63,94,.3);
+}
+
+/* Inline edit input */
+.box-edit-input {
+  padding: 5px 10px;
+  border: 2px solid var(--primary-light);
+  border-radius: 8px;
+  font-size: .82rem;
+  font-weight: 600;
+  outline: none;
+  width: 120px;
+  box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+/* ===== Stats table — Clean minimal ===== */
+.stats-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .88rem; }
+.stats-table th {
+  background: rgba(241,243,248,.8);
+  text-align: left;
+  padding: 11px 14px;
+  font-weight: 700;
+  font-size: .8rem;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.stats-table th:first-child { border-radius: var(--radius-sm) 0 0 0; }
+.stats-table th:last-child { border-radius: 0 var(--radius-sm) 0 0; }
+.stats-table td {
+  padding: 11px 14px;
+  border-bottom: 1px solid rgba(0,0,0,.04);
+}
+.stats-table tr:hover td { background: rgba(58,181,236,.05); }
+.stats-table .mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: .85rem; }
+.stats-table .qty {
+  font-weight: 800;
+  text-align: center;
+  color: var(--primary-dark);
+}
+.stats-empty { text-align: center; color: var(--text-muted); padding: 36px; }
+
+/* ===== Toast — Glass pill ===== */
+.toast-container {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}
+.toast {
+  background: rgba(12,30,46,.85);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  color: #fff;
+  padding: 11px 24px;
+  border-radius: 28px;
+  font-size: .88rem;
+  font-weight: 500;
+  box-shadow: 0 8px 28px rgba(0,0,0,.2);
+  animation: toastIn .35s cubic-bezier(.22,1,.36,1);
+  border: 1px solid rgba(255,255,255,.1);
+}
+.toast.success {
+  background: rgba(16,185,129,.88);
+  border-color: rgba(255,255,255,.15);
+}
+.toast.error {
+  background: rgba(244,63,94,.88);
+  border-color: rgba(255,255,255,.15);
+}
+@keyframes toastIn {
+  from { opacity: 0; transform: translateY(14px) scale(.95); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+/* Print header (hidden on screen) */
+.print-header { display: none; }
+
+/* Box label print area (hidden on screen) */
+.box-label-print { display: none; }
+.box-label-header { text-align: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #000; }
+.box-label-header h2 { font-size: 1.4rem; margin-bottom: 4px; }
+.box-label-meta { font-size: .85rem; color: #555; }
+.box-label-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
+.box-label-table th { background: #eee; text-align: left; padding: 8px 10px; font-weight: 700; border-bottom: 2px solid #333; }
+.box-label-table td { padding: 8px 10px; border-bottom: 1px solid #ddd; }
+.box-label-table .mono { font-family: monospace; }
+.box-label-table .qty { font-weight: 700; text-align: center; }
+.box-label-footer { margin-top: 16px; padding-top: 10px; border-top: 1px solid #ccc; font-size: .85rem; color: #555; text-align: right; }
+
+/* Sections visibility */
+.section { display: none; }
+.section.active { display: block; animation: fadeSection .3s ease; }
+@keyframes fadeSection {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ===== Nav tabs — Glass pill bar ===== */
+.nav-tabs {
+  display: flex;
+  gap: 0;
+  background: var(--glass-bg);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  box-shadow: var(--neu-shadow-sm);
+  margin-bottom: 20px;
+  overflow: hidden;
+  padding: 4px;
+}
+.nav-tab {
+  flex: 1;
+  padding: 11px 8px;
+  text-align: center;
+  font-size: .88rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  transition: all .2s;
+  border-radius: calc(var(--radius) - 4px);
+}
+.nav-tab:hover { color: var(--text); }
+.nav-tab.active {
+  color: #fff;
+  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+  box-shadow: 0 4px 14px var(--primary-glow);
+}
+
+/* ===== Dialog — Glassmorphism ===== */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(12,30,46,.3);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 300;
+  animation: fadeIn .2s ease;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.dialog {
+  background: rgba(255,255,255,.82);
+  backdrop-filter: blur(20px) saturate(1.3);
+  -webkit-backdrop-filter: blur(20px) saturate(1.3);
+  border: 1px solid rgba(255,255,255,.5);
+  border-radius: var(--radius);
+  padding: 28px;
+  max-width: 380px;
+  width: 90%;
+  box-shadow: 0 20px 60px rgba(14,120,180,.12);
+  animation: dialogIn .25s cubic-bezier(.22,1,.36,1);
+}
+@keyframes dialogIn {
+  from { opacity: 0; transform: scale(.95) translateY(10px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+.dialog h3 { margin-bottom: 8px; font-size: 1.05rem; }
+.dialog p { color: var(--text-muted); margin-bottom: 20px; font-size: .9rem; line-height: 1.5; }
+.dialog-actions { display: flex; gap: 10px; justify-content: flex-end; }
+
+/* Manual barcode input row */
+.manual-input-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* ===== Responsive ===== */
+@media (max-width: 600px) {
+  .header h1 { font-size: .95rem; }
+  .header { padding: 14px 16px; }
+  .btn { padding: 10px 16px; font-size: .88rem; }
+  .scanner-crosshair { width: 140px; height: 140px; }
+  .main { padding: 14px 10px; }
+  .card { padding: 18px 16px; }
+}
+
+/* ===== Print styles ===== */
+@media print {
+  body { background: #fff !important; background-image: none !important; }
+  .header, .nav-tabs, .toast-container, .no-print, .btn { display: none !important; }
+  .main { max-width: 100%; padding: 0; }
+  .card { box-shadow: none; padding: 0; background: #fff; backdrop-filter: none; border: none; }
+
+  .section { display: none !important; }
+  .box-label-print { display: none !important; }
+
+  body.print-mode-stats #section-stats { display: block !important; }
+  body.print-mode-stats .print-header {
+    display: block;
+    text-align: center;
+    margin-bottom: 20px;
+    padding-bottom: 14px;
+    border-bottom: 2px solid #000;
+  }
+  body.print-mode-stats .print-header h2 { font-size: 1.3rem; margin-bottom: 4px; }
+  body.print-mode-stats .print-header .print-meta { font-size: .85rem; color: #555; }
+  body.print-mode-stats .stats-table { font-size: .85rem; border-collapse: collapse; }
+  body.print-mode-stats .stats-table th {
+    background: #eee;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  body.print-mode-box .box-label-print { display: block !important; }
+  body.print-mode-box .box-label-table th {
+    background: #eee;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <h1>IPAS 庫存盤點裝箱系統</h1>
+  <div class="header-actions">
+    <button class="btn btn-sm btn-outline" style="color:#fff;border-color:rgba(255,255,255,.4)" onclick="confirmClearAll()">清除資料</button>
+  </div>
+</header>
+
+<nav class="nav-tabs no-print">
+  <button class="nav-tab active" data-tab="packing">裝箱作業</button>
+  <button class="nav-tab" data-tab="stats">統計報表</button>
+</nav>
+
+<main class="main">
+  <!-- Section: Packing -->
+  <div id="section-packing" class="section active">
+
+    <!-- Box creation -->
+    <div class="card">
+      <div class="card-title">📦 箱號管理</div>
+      <div class="box-create-row">
+        <input type="text" id="input-box-id" placeholder="輸入箱號（留空自動產生）" maxlength="20">
+        <button class="btn btn-primary" id="btn-new-box">新增箱號</button>
+      </div>
+      <!-- Box tabs -->
+      <div class="box-tabs" id="box-tabs" style="margin-top:14px"></div>
+    </div>
+
+    <!-- Current box banner -->
+    <div class="current-box-banner" id="current-box-banner" style="display:none">
+      <div>
+        <span>目前箱號：</span>
+        <span class="box-id" id="current-box-id"></span>
+        <span class="box-status status-open" id="current-box-status">開放中</span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-outline btn-sm" id="btn-print-box">列印標籤單</button>
+        <button class="btn btn-success btn-sm" id="btn-close-box">完成此箱</button>
+      </div>
+    </div>
+
+    <!-- Scanner -->
+    <div class="card" id="scanner-card" style="display:none">
+      <div class="card-title">📷 條碼掃描</div>
+      <div class="scanner-area" id="scanner-area">
+        <div class="scanner-placeholder" id="scanner-placeholder">
+          <div class="icon">📷</div>
+          <div>點擊下方按鈕開啟相機掃描</div>
+        </div>
+        <video id="scanner-video" autoplay playsinline style="display:none"></video>
+        <div class="scanner-overlay" id="scanner-overlay" style="display:none">
+          <div class="scanner-crosshair"></div>
+        </div>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-primary" id="btn-start-scan">開始掃描</button>
+        <button class="btn btn-outline" id="btn-stop-scan" style="display:none">停止掃描</button>
+      </div>
+      <div class="manual-input-row">
+        <input type="text" id="input-manual-barcode" placeholder="手動輸入條碼">
+        <button class="btn btn-primary btn-sm" id="btn-add-manual">加入</button>
+      </div>
+    </div>
+
+    <!-- Current box item list -->
+    <div class="card" id="item-list-card" style="display:none">
+      <div class="card-title">📋 本箱掃描清單 (<span id="item-count">0</span> 筆)</div>
+      <ul class="scan-list" id="scan-list">
+        <li class="empty">尚無掃描記錄</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Section: Stats -->
+  <div id="section-stats" class="section">
+    <div class="print-header">
+      <h2>庫存盤點統計報表</h2>
+      <div class="print-meta" id="print-meta"></div>
+    </div>
+    <div class="card">
+      <div class="card-title" style="justify-content:space-between;flex-wrap:wrap">
+        <span>📊 統計報表</span>
+        <button class="btn btn-primary btn-sm no-print" id="btn-print">列印統計表</button>
+      </div>
+      <div id="stats-summary" style="margin-bottom:14px;font-size:.9rem;color:var(--text-muted)"></div>
+      <div style="overflow-x:auto">
+        <table class="stats-table" id="stats-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>條碼</th>
+              <th>商品名稱</th>
+              <th>數量</th>
+              <th>所在箱號</th>
+            </tr>
+          </thead>
+          <tbody id="stats-tbody">
+            <tr><td colspan="5" class="stats-empty">尚無盤點資料</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</main>
+
+<!-- Box label print area (hidden on screen, shown only when printing box label) -->
+<div id="box-label-print" class="box-label-print">
+  <div class="box-label-header">
+    <h2 id="box-label-title"></h2>
+    <div class="box-label-meta" id="box-label-meta"></div>
+  </div>
+  <table class="box-label-table">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>條碼</th>
+        <th>商品名稱</th>
+        <th>數量</th>
+      </tr>
+    </thead>
+    <tbody id="box-label-tbody"></tbody>
+  </table>
+  <div class="box-label-footer" id="box-label-footer"></div>
+</div>
+
+<div class="toast-container" id="toast-container"></div>
+
+<script>
+// ========== Store ==========
+const Store = {
+  KEY: 'ipas-state',
+  saveState(state) {
+    try { localStorage.setItem(this.KEY, JSON.stringify(state)); } catch(e) {}
+  },
+  loadState() {
+    try {
+      const d = localStorage.getItem(this.KEY);
+      return d ? JSON.parse(d) : null;
+    } catch(e) { return null; }
+  },
+  clearState() { localStorage.removeItem(this.KEY); }
+};
+
+// ========== App State ==========
+let state = Store.loadState() || { boxes: [], currentBoxId: null, lastBoxSeq: 0 };
+
+function persist() { Store.saveState(state); }
+
+// ========== BoxManager ==========
+const BoxManager = {
+  createBox(customId) {
+    let id;
+    if (customId && customId.trim()) {
+      id = customId.trim();
+    } else {
+      state.lastBoxSeq++;
+      id = 'BOX-' + String(state.lastBoxSeq).padStart(3, '0');
+    }
+    if (state.boxes.find(b => b.id === id)) {
+      showToast('箱號已存在：' + id, 'error');
+      return null;
+    }
+    const box = { id, createdAt: new Date().toISOString(), status: 'open', items: [] };
+    state.boxes.push(box);
+    state.currentBoxId = id;
+    persist();
+    return box;
+  },
+  closeBox(boxId) {
+    const box = state.boxes.find(b => b.id === boxId);
+    if (!box) return;
+    box.status = 'closed';
+    if (state.currentBoxId === boxId) state.currentBoxId = null;
+    persist();
+  },
+  addItem(boxId, barcode, productName) {
+    const box = state.boxes.find(b => b.id === boxId);
+    if (!box || box.status === 'closed') return null;
+    const item = {
+      scanId: crypto.randomUUID(),
+      barcode: barcode.trim(),
+      productName: productName || '',
+      scannedAt: new Date().toISOString()
+    };
+    box.items.push(item);
+    persist();
+    return item;
+  },
+  removeItem(boxId, scanId) {
+    const box = state.boxes.find(b => b.id === boxId);
+    if (!box) return;
+    box.items = box.items.filter(i => i.scanId !== scanId);
+    persist();
+  },
+  renameBox(boxId, newId) {
+    newId = newId.trim();
+    if (!newId) return false;
+    if (newId === boxId) return true;
+    if (state.boxes.find(b => b.id === newId)) {
+      showToast('箱號已存在：' + newId, 'error');
+      return false;
+    }
+    const box = state.boxes.find(b => b.id === boxId);
+    if (!box) return false;
+    box.id = newId;
+    if (state.currentBoxId === boxId) state.currentBoxId = newId;
+    persist();
+    return true;
+  },
+  deleteBox(boxId) {
+    state.boxes = state.boxes.filter(b => b.id !== boxId);
+    if (state.currentBoxId === boxId) state.currentBoxId = null;
+    persist();
+  },
+  getBox(boxId) { return state.boxes.find(b => b.id === boxId) || null; },
+  getCurrentBox() { return state.currentBoxId ? this.getBox(state.currentBoxId) : null; }
+};
+
+// ========== AggregationEngine ==========
+const AggregationEngine = {
+  aggregate(boxes) {
+    const map = new Map();
+    for (const box of boxes) {
+      for (const item of box.items) {
+        if (!map.has(item.barcode)) {
+          map.set(item.barcode, { barcode: item.barcode, productName: item.productName, totalQty: 0, boxes: [] });
+        }
+        const agg = map.get(item.barcode);
+        agg.totalQty += 1;
+        if (!agg.productName && item.productName) agg.productName = item.productName;
+        if (!agg.boxes.includes(box.id)) agg.boxes.push(box.id);
+      }
+    }
+    return Array.from(map.values()).sort((a, b) => a.barcode.localeCompare(b.barcode));
+  }
+};
+
+// ========== BarcodeEngine ==========
+const BarcodeEngine = {
+  _stream: null,
+  _interval: null,
+  _callback: null,
+  _lastBarcode: '',
+  _lastTime: 0,
+  _detector: null,
+  _canvas: null,
+  _ctx: null,
+  COOLDOWN: 1000,
+  SCAN_INTERVAL: 300,
+
+  onBarcode(cb) { this._callback = cb; },
+  offBarcode() { this._callback = null; },
+
+  async startScan(videoEl) {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
+    });
+    videoEl.srcObject = stream;
+    this._stream = stream;
+
+    this._canvas = document.createElement('canvas');
+    this._ctx = this._canvas.getContext('2d');
+
+    // Detect if BarcodeDetector is available
+    if ('BarcodeDetector' in window) {
+      this._detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'qr_code', 'code_128', 'code_39'] });
+    }
+
+    this._interval = setInterval(() => this._scanFrame(videoEl), this.SCAN_INTERVAL);
+  },
+
+  stopScan() {
+    if (this._interval) { clearInterval(this._interval); this._interval = null; }
+    if (this._stream) {
+      this._stream.getTracks().forEach(t => t.stop());
+      this._stream = null;
+    }
+  },
+
+  async _scanFrame(videoEl) {
+    if (!videoEl.videoWidth) return;
+    this._canvas.width = videoEl.videoWidth;
+    this._canvas.height = videoEl.videoHeight;
+    this._ctx.drawImage(videoEl, 0, 0);
+
+    try {
+      let results = [];
+      if (this._detector) {
+        results = await this._detector.detect(this._canvas);
+      }
+      for (const r of results) {
+        const val = r.rawValue;
+        const now = Date.now();
+        if (val && (val !== this._lastBarcode || now - this._lastTime > this.COOLDOWN)) {
+          this._lastBarcode = val;
+          this._lastTime = now;
+          if (this._callback) this._callback(val);
+        }
+      }
+    } catch(e) {}
+  }
+};
+
+// ========== PrintManager ==========
+const PrintManager = {
+  _setPrintMode(mode) {
+    document.body.classList.remove('print-mode-stats', 'print-mode-box');
+    if (mode) document.body.classList.add('print-mode-' + mode);
+  },
+  printStats() {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('zh-TW') + ' ' + now.toLocaleTimeString('zh-TW');
+    const boxCount = state.boxes.length;
+    const closedCount = state.boxes.filter(b => b.status === 'closed').length;
+    document.getElementById('print-meta').textContent =
+      `列印日期：${dateStr}　|　總箱數：${boxCount}　|　已完成：${closedCount}`;
+    this._setPrintMode('stats');
+    window.print();
+    this._setPrintMode(null);
+  },
+  printBoxLabel(boxId) {
+    const box = BoxManager.getBox(boxId);
+    if (!box) return;
+
+    // Aggregate items within this box
+    const map = new Map();
+    for (const item of box.items) {
+      if (!map.has(item.barcode)) {
+        map.set(item.barcode, { barcode: item.barcode, productName: item.productName, qty: 0 });
+      }
+      const agg = map.get(item.barcode);
+      agg.qty += 1;
+      if (!agg.productName && item.productName) agg.productName = item.productName;
+    }
+    const aggItems = Array.from(map.values()).sort((a, b) => a.barcode.localeCompare(b.barcode));
+    const totalQty = aggItems.reduce((s, a) => s + a.qty, 0);
+
+    // Fill print area
+    const now = new Date();
+    const dateStr = now.toLocaleDateString('zh-TW') + ' ' + now.toLocaleTimeString('zh-TW');
+    document.getElementById('box-label-title').textContent = `裝箱標籤單 — ${box.id}`;
+    document.getElementById('box-label-meta').textContent =
+      `狀態：${box.status === 'closed' ? '已完成' : '開放中'}　|　建立時間：${new Date(box.createdAt).toLocaleString('zh-TW')}　|　列印時間：${dateStr}`;
+
+    const tbody = document.getElementById('box-label-tbody');
+    tbody.innerHTML = '';
+    aggItems.forEach((item, idx) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${idx + 1}</td>
+        <td class="mono">${escHtml(item.barcode)}</td>
+        <td>${escHtml(item.productName) || '—'}</td>
+        <td class="qty">${item.qty}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+
+    document.getElementById('box-label-footer').textContent =
+      `共 ${aggItems.length} 種商品，合計 ${totalQty} 件`;
+
+    this._setPrintMode('box');
+    window.print();
+    this._setPrintMode(null);
+  }
+};
+
+// ========== UI Logic ==========
+
+// Toast
+function showToast(msg, type = '') {
+  const c = document.getElementById('toast-container');
+  const t = document.createElement('div');
+  t.className = 'toast' + (type ? ' ' + type : '');
+  t.textContent = msg;
+  c.appendChild(t);
+  setTimeout(() => { t.remove(); }, 2500);
+}
+
+// Nav tabs
+document.querySelectorAll('.nav-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+    tab.classList.add('active');
+    document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+    document.getElementById('section-' + tab.dataset.tab).classList.add('active');
+    if (tab.dataset.tab === 'stats') renderStats();
+  });
+});
+
+// Create box
+document.getElementById('btn-new-box').addEventListener('click', () => {
+  const input = document.getElementById('input-box-id');
+  const box = BoxManager.createBox(input.value);
+  if (box) {
+    input.value = '';
+    showToast('已建立箱號：' + box.id, 'success');
+    renderAll();
+  }
+});
+document.getElementById('input-box-id').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('btn-new-box').click();
+});
+
+// Close box
+document.getElementById('btn-close-box').addEventListener('click', () => {
+  const box = BoxManager.getCurrentBox();
+  if (!box) return;
+  showDialog('完成裝箱確認', `確定要完成箱號 ${box.id} 嗎？完成後將無法修改。`, () => {
+    BarcodeEngine.stopScan();
+    BoxManager.closeBox(box.id);
+    showToast('箱號 ' + box.id + ' 已完成', 'success');
+    renderAll();
+  });
+});
+
+// Scanner
+document.getElementById('btn-start-scan').addEventListener('click', async () => {
+  const video = document.getElementById('scanner-video');
+  const placeholder = document.getElementById('scanner-placeholder');
+  const overlay = document.getElementById('scanner-overlay');
+  try {
+    await BarcodeEngine.startScan(video);
+    video.style.display = 'block';
+    placeholder.style.display = 'none';
+    overlay.style.display = 'flex';
+    document.getElementById('btn-start-scan').style.display = 'none';
+    document.getElementById('btn-stop-scan').style.display = '';
+  } catch(e) {
+    showToast('無法開啟相機：' + e.message, 'error');
+  }
+});
+
+document.getElementById('btn-stop-scan').addEventListener('click', () => {
+  BarcodeEngine.stopScan();
+  const video = document.getElementById('scanner-video');
+  video.style.display = 'none';
+  video.srcObject = null;
+  document.getElementById('scanner-placeholder').style.display = '';
+  document.getElementById('scanner-overlay').style.display = 'none';
+  document.getElementById('btn-start-scan').style.display = '';
+  document.getElementById('btn-stop-scan').style.display = 'none';
+});
+
+BarcodeEngine.onBarcode((barcode) => {
+  const box = BoxManager.getCurrentBox();
+  if (!box || box.status === 'closed') return;
+  BoxManager.addItem(box.id, barcode);
+  try { navigator.vibrate?.(100); } catch(e) {}
+  showToast('掃描成功：' + barcode, 'success');
+  renderScanList();
+});
+
+// Manual barcode input
+document.getElementById('btn-add-manual').addEventListener('click', () => {
+  const input = document.getElementById('input-manual-barcode');
+  const val = input.value.trim();
+  if (!val) return;
+  const box = BoxManager.getCurrentBox();
+  if (!box || box.status === 'closed') {
+    showToast('請先建立或選擇一個開放中的箱號', 'error');
+    return;
+  }
+  BoxManager.addItem(box.id, val);
+  showToast('已加入：' + val, 'success');
+  input.value = '';
+  renderScanList();
+});
+document.getElementById('input-manual-barcode').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('btn-add-manual').click();
+});
+
+// Print stats
+document.getElementById('btn-print').addEventListener('click', () => PrintManager.printStats());
+
+// Print box label
+document.getElementById('btn-print-box').addEventListener('click', () => {
+  const box = BoxManager.getCurrentBox();
+  if (!box) return;
+  if (box.items.length === 0) {
+    showToast('本箱尚無掃描記錄，無法列印', 'error');
+    return;
+  }
+  PrintManager.printBoxLabel(box.id);
+});
+
+// ========== Render Functions ==========
+
+function renderAll() {
+  renderBoxTabs();
+  renderCurrentBox();
+  renderScanList();
+}
+
+function renderBoxTabs() {
+  const container = document.getElementById('box-tabs');
+  container.innerHTML = '';
+  for (const box of state.boxes) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'box-tab-wrapper' + (state.currentBoxId === box.id ? ' active' : '');
+
+    const tab = document.createElement('div');
+    tab.className = 'box-tab' +
+      (state.currentBoxId === box.id ? ' active' : '') +
+      (box.status === 'closed' ? ' closed' : '');
+    tab.textContent = box.id + (box.status === 'closed' ? ' ✓' : ` (${box.items.length})`);
+    tab.addEventListener('click', () => {
+      state.currentBoxId = box.id;
+      persist();
+      renderAll();
+    });
+    wrapper.appendChild(tab);
+
+    const actions = document.createElement('div');
+    actions.className = 'box-tab-actions';
+
+    // Edit button
+    const editBtn = document.createElement('button');
+    editBtn.className = 'box-action-btn';
+    editBtn.title = '編輯箱號';
+    editBtn.textContent = '✎';
+    editBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      startEditBox(box.id, wrapper, tab);
+    });
+    actions.appendChild(editBtn);
+
+    // Delete button
+    const delBtn = document.createElement('button');
+    delBtn.className = 'box-action-btn delete';
+    delBtn.title = '刪除箱號';
+    delBtn.textContent = '✕';
+    delBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const itemCount = box.items.length;
+      const msg = itemCount > 0
+        ? `確定要刪除箱號 ${box.id} 嗎？箱內有 ${itemCount} 筆掃描記錄將一併刪除。`
+        : `確定要刪除箱號 ${box.id} 嗎？`;
+      showDialog('刪除箱號', msg, () => {
+        if (state.currentBoxId === box.id) {
+          BarcodeEngine.stopScan();
+          resetScannerUI();
+        }
+        BoxManager.deleteBox(box.id);
+        showToast('已刪除箱號：' + box.id, '');
+        renderAll();
+      });
+    });
+    actions.appendChild(delBtn);
+
+    wrapper.appendChild(actions);
+    container.appendChild(wrapper);
+  }
+}
+
+function startEditBox(boxId, wrapper, tabEl) {
+  const input = document.createElement('input');
+  input.className = 'box-edit-input';
+  input.value = boxId;
+  input.maxLength = 20;
+
+  tabEl.style.display = 'none';
+  const actions = wrapper.querySelector('.box-tab-actions');
+  if (actions) actions.style.display = 'none';
+  wrapper.insertBefore(input, tabEl);
+  input.focus();
+  input.select();
+
+  function finish() {
+    const newId = input.value.trim();
+    if (newId && newId !== boxId) {
+      if (BoxManager.renameBox(boxId, newId)) {
+        showToast(`箱號已更名：${boxId} → ${newId}`, 'success');
+      }
+    }
+    renderAll();
+  }
+  input.addEventListener('blur', finish);
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') input.blur();
+    if (e.key === 'Escape') { input.value = boxId; input.blur(); }
+  });
+}
+
+function renderCurrentBox() {
+  const banner = document.getElementById('current-box-banner');
+  const scannerCard = document.getElementById('scanner-card');
+  const itemListCard = document.getElementById('item-list-card');
+  const box = BoxManager.getCurrentBox();
+
+  if (!box) {
+    banner.style.display = 'none';
+    scannerCard.style.display = 'none';
+    itemListCard.style.display = 'none';
+    BarcodeEngine.stopScan();
+    resetScannerUI();
+    return;
+  }
+
+  banner.style.display = '';
+  document.getElementById('current-box-id').textContent = box.id;
+  const statusEl = document.getElementById('current-box-status');
+  if (box.status === 'open') {
+    statusEl.textContent = '開放中';
+    statusEl.className = 'box-status status-open';
+    scannerCard.style.display = '';
+    document.getElementById('btn-close-box').style.display = '';
+  } else {
+    statusEl.textContent = '已完成';
+    statusEl.className = 'box-status status-closed';
+    scannerCard.style.display = 'none';
+    document.getElementById('btn-close-box').style.display = 'none';
+    BarcodeEngine.stopScan();
+    resetScannerUI();
+  }
+  itemListCard.style.display = '';
+}
+
+function resetScannerUI() {
+  const video = document.getElementById('scanner-video');
+  video.style.display = 'none';
+  if (video.srcObject) {
+    video.srcObject.getTracks().forEach(t => t.stop());
+    video.srcObject = null;
+  }
+  document.getElementById('scanner-placeholder').style.display = '';
+  document.getElementById('scanner-overlay').style.display = 'none';
+  document.getElementById('btn-start-scan').style.display = '';
+  document.getElementById('btn-stop-scan').style.display = 'none';
+}
+
+function renderScanList() {
+  const box = BoxManager.getCurrentBox();
+  const list = document.getElementById('scan-list');
+  const count = document.getElementById('item-count');
+
+  if (!box || box.items.length === 0) {
+    list.innerHTML = '<li class="empty">尚無掃描記錄</li>';
+    count.textContent = '0';
+    return;
+  }
+
+  count.textContent = box.items.length;
+  list.innerHTML = '';
+
+  // Show in reverse order (newest first)
+  for (let i = box.items.length - 1; i >= 0; i--) {
+    const item = box.items[i];
+    const li = document.createElement('li');
+    const canDelete = box.status === 'open';
+    li.innerHTML = `
+      <div class="scan-item-info">
+        <div class="scan-item-barcode">${escHtml(item.barcode)}</div>
+        ${item.productName ? `<div class="scan-item-name">${escHtml(item.productName)}</div>` : ''}
+      </div>
+      <span class="scan-item-time">${new Date(item.scannedAt).toLocaleTimeString('zh-TW')}</span>
+      ${canDelete ? `<button class="btn btn-danger btn-sm btn-delete-item" data-scan-id="${item.scanId}">刪除</button>` : ''}
+    `;
+    list.appendChild(li);
+  }
+
+  // Bind delete buttons
+  list.querySelectorAll('.btn-delete-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const scanId = btn.dataset.scanId;
+      BoxManager.removeItem(box.id, scanId);
+      showToast('已刪除條目', '');
+      renderScanList();
+    });
+  });
+}
+
+function renderStats() {
+  const tbody = document.getElementById('stats-tbody');
+  const summary = document.getElementById('stats-summary');
+
+  if (state.boxes.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="stats-empty">尚無盤點資料</td></tr>';
+    summary.textContent = '';
+    return;
+  }
+
+  const aggItems = AggregationEngine.aggregate(state.boxes);
+  const totalItems = aggItems.reduce((s, a) => s + a.totalQty, 0);
+  const closedBoxes = state.boxes.filter(b => b.status === 'closed').length;
+  summary.textContent = `共 ${state.boxes.length} 箱（已完成 ${closedBoxes} 箱）、${aggItems.length} 種商品、${totalItems} 筆掃描`;
+
+  if (aggItems.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="stats-empty">尚無掃描記錄</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = '';
+  aggItems.forEach((item, idx) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${idx + 1}</td>
+      <td class="mono">${escHtml(item.barcode)}</td>
+      <td>${escHtml(item.productName) || '—'}</td>
+      <td class="qty">${item.totalQty}</td>
+      <td>${item.boxes.map(escHtml).join(', ')}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+// ========== Dialog ==========
+function showDialog(title, message, onConfirm) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'dialog-backdrop';
+  backdrop.innerHTML = `
+    <div class="dialog">
+      <h3>${escHtml(title)}</h3>
+      <p>${escHtml(message)}</p>
+      <div class="dialog-actions">
+        <button class="btn btn-outline btn-sm dialog-cancel">取消</button>
+        <button class="btn btn-primary btn-sm dialog-confirm">確認</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  backdrop.querySelector('.dialog-cancel').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('.dialog-confirm').addEventListener('click', () => {
+    backdrop.remove();
+    onConfirm();
+  });
+  backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
+}
+
+function confirmClearAll() {
+  showDialog('清除所有資料', '確定要清除所有盤點資料嗎？此操作無法復原。', () => {
+    BarcodeEngine.stopScan();
+    resetScannerUI();
+    Store.clearState();
+    state = { boxes: [], currentBoxId: null, lastBoxSeq: 0 };
+    showToast('資料已清除', '');
+    renderAll();
+    renderStats();
+  });
+}
+
+// ========== Helpers ==========
+function escHtml(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ========== Init ==========
+renderAll();
+
+// Fix lastBoxSeq from existing boxes
+if (state.boxes.length > 0) {
+  for (const box of state.boxes) {
+    const m = box.id.match(/^BOX-(\d+)$/);
+    if (m) {
+      const n = parseInt(m[1], 10);
+      if (n > state.lastBoxSeq) state.lastBoxSeq = n;
+    }
+  }
+  persist();
+}
+</script>
+</body>
+</html>
