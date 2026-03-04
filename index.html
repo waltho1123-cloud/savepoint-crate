@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>IPAS 庫存盤點裝箱系統</title>
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -881,26 +880,9 @@ const BarcodeEngine = {
   }
 };
 
-// ========== OCREngine ==========
+// ========== OCREngine (n8n + OpenAI Vision) ==========
 const OCREngine = {
-  _worker: null,
-  _ready: false,
-  _initializing: false,
-
-  async _ensureWorker() {
-    if (this._ready) return true;
-    if (this._initializing) {
-      while (this._initializing) await new Promise(r => setTimeout(r, 100));
-      return this._ready;
-    }
-    this._initializing = true;
-    try {
-      this._worker = await Tesseract.createWorker('chi_tra');
-      this._ready = true;
-    } catch(e) { console.error('OCR init failed:', e); }
-    this._initializing = false;
-    return this._ready;
-  },
+  WEBHOOK_URL: 'https://waltho1123.zeabur.app/webhook/barcode-label-ocr',
 
   captureFrame() {
     const video = document.querySelector('#scanner-reader video');
@@ -909,40 +891,25 @@ const OCREngine = {
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     canvas.getContext('2d').drawImage(video, 0, 0);
-    return canvas;
+    return canvas.toDataURL('image/jpeg', 0.85);
   },
 
-  async recognize(canvas, barcode) {
-    if (!canvas) return null;
-    const ok = await this._ensureWorker();
-    if (!ok) return null;
+  async recognize(imageDataUrl, barcode, boxId) {
+    if (!imageDataUrl) return null;
     try {
-      const { data } = await this._worker.recognize(canvas);
-      return this._parseLabel(data.text, barcode);
-    } catch(e) { return null; }
-  },
-
-  _parseLabel(text, barcode) {
-    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-    let bIdx = -1;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].replace(/\s/g, '').includes(barcode)) { bIdx = i; break; }
+      const resp = await fetch(this.WEBHOOK_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ barcode, boxId: boxId || '', image: imageDataUrl })
+      });
+      if (!resp.ok) return null;
+      const result = await resp.json();
+      if (result.success && result.data) return result.data;
+      return null;
+    } catch(e) {
+      console.error('OCR API error:', e);
+      return null;
     }
-    if (bIdx === -1) return null;
-
-    let productName = '', gender = '', color = '', size = '';
-    if (bIdx + 1 < lines.length) productName = lines[bIdx + 1];
-    if (bIdx + 2 < lines.length) {
-      const info = lines[bIdx + 2];
-      if (info.includes('女')) gender = '女';
-      else if (info.includes('男')) gender = '男';
-      else if (info.includes('中性')) gender = '中性';
-      let rest = info.replace(/男|女|中性/g, '').trim();
-      const sm = rest.match(/(XXS|XS|XXXL|XXL|XL|2XL|3XL|4XL|5XL|[SMLF])$/i);
-      if (sm) { size = sm[1].toUpperCase(); color = rest.slice(0, rest.length - sm[1].length).trim(); }
-      else color = rest;
-    }
-    return { productName, gender, color, size };
   }
 };
 
@@ -1178,7 +1145,8 @@ function showProductDialog(barcode, onConfirm, frame) {
   if (frame) {
     const status = backdrop.querySelector('#dlg-ocr-status');
     status.textContent = '文字辨識中…';
-    OCREngine.recognize(frame, barcode).then(info => {
+    const currentBox = BoxManager.getCurrentBox();
+    OCREngine.recognize(frame, barcode, currentBox ? currentBox.id : '').then(info => {
       if (!info || !document.body.contains(backdrop)) return;
       status.textContent = '✓ 已辨識';
       setTimeout(() => status.textContent = '', 2000);
