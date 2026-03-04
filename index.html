@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>IPAS 庫存盤點裝箱系統</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -222,23 +223,10 @@ body {
   align-items: center;
   justify-content: center;
 }
-.scanner-area video { width: 100%; height: 100%; object-fit: cover; }
-.scanner-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-}
-.scanner-crosshair {
-  width: 190px;
-  height: 190px;
-  border: 2.5px solid rgba(255,255,255,.65);
-  border-radius: 14px;
-  box-shadow: 0 0 0 9999px rgba(0,0,0,.4),
-              inset 0 0 30px rgba(58,181,236,.13);
-}
+#scanner-reader { position: relative; }
+#scanner-reader video { width: 100% !important; height: 100% !important; object-fit: cover !important; border-radius: var(--radius-sm); }
+#scanner-reader img[alt="Info icon"] { display: none !important; }
+#qr-shaded-region { border-radius: 10px !important; }
 .scanner-placeholder {
   color: #64668a;
   text-align: center;
@@ -538,7 +526,6 @@ body {
   .header h1 { font-size: .95rem; }
   .header { padding: 14px 16px; }
   .btn { padding: 10px 16px; font-size: .88rem; }
-  .scanner-crosshair { width: 140px; height: 140px; }
   .main { padding: 14px 10px; }
   .card { padding: 18px 16px; }
 }
@@ -629,10 +616,7 @@ body {
           <div class="icon">📷</div>
           <div>點擊下方按鈕開啟相機掃描</div>
         </div>
-        <video id="scanner-video" autoplay playsinline style="display:none"></video>
-        <div class="scanner-overlay" id="scanner-overlay" style="display:none">
-          <div class="scanner-crosshair"></div>
-        </div>
+        <div id="scanner-reader" style="display:none;width:100%;height:100%"></div>
       </div>
       <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-primary" id="btn-start-scan">開始掃描</button>
@@ -833,67 +817,59 @@ const AggregationEngine = {
 
 // ========== BarcodeEngine ==========
 const BarcodeEngine = {
-  _stream: null,
-  _interval: null,
+  _scanner: null,
   _callback: null,
+  _scanning: false,
   _lastBarcode: '',
   _lastTime: 0,
-  _detector: null,
-  _canvas: null,
-  _ctx: null,
-  COOLDOWN: 1000,
-  SCAN_INTERVAL: 300,
+  COOLDOWN: 1500,
 
   onBarcode(cb) { this._callback = cb; },
   offBarcode() { this._callback = null; },
 
-  async startScan(videoEl) {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 }, height: { ideal: 720 } }
-    });
-    videoEl.srcObject = stream;
-    this._stream = stream;
-
-    this._canvas = document.createElement('canvas');
-    this._ctx = this._canvas.getContext('2d');
-
-    // Detect if BarcodeDetector is available
-    if ('BarcodeDetector' in window) {
-      this._detector = new BarcodeDetector({ formats: ['ean_13', 'ean_8', 'qr_code', 'code_128', 'code_39'] });
+  async startScan() {
+    if (this._scanning) return;
+    if (!this._scanner) {
+      this._scanner = new Html5Qrcode('scanner-reader');
     }
-
-    this._interval = setInterval(() => this._scanFrame(videoEl), this.SCAN_INTERVAL);
-  },
-
-  stopScan() {
-    if (this._interval) { clearInterval(this._interval); this._interval = null; }
-    if (this._stream) {
-      this._stream.getTracks().forEach(t => t.stop());
-      this._stream = null;
-    }
-  },
-
-  async _scanFrame(videoEl) {
-    if (!videoEl.videoWidth) return;
-    this._canvas.width = videoEl.videoWidth;
-    this._canvas.height = videoEl.videoHeight;
-    this._ctx.drawImage(videoEl, 0, 0);
-
-    try {
-      let results = [];
-      if (this._detector) {
-        results = await this._detector.detect(this._canvas);
-      }
-      for (const r of results) {
-        const val = r.rawValue;
+    const config = {
+      fps: 15,
+      qrbox: { width: 280, height: 160 },
+      aspectRatio: 1.333,
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.CODE_39,
+        Html5QrcodeSupportedFormats.CODE_93,
+        Html5QrcodeSupportedFormats.EAN_13,
+        Html5QrcodeSupportedFormats.EAN_8,
+        Html5QrcodeSupportedFormats.ITF,
+        Html5QrcodeSupportedFormats.UPC_A,
+        Html5QrcodeSupportedFormats.UPC_E,
+        Html5QrcodeSupportedFormats.CODABAR,
+        Html5QrcodeSupportedFormats.QR_CODE,
+        Html5QrcodeSupportedFormats.DATA_MATRIX
+      ]
+    };
+    await this._scanner.start(
+      { facingMode: 'environment' },
+      config,
+      (decodedText) => {
         const now = Date.now();
-        if (val && (val !== this._lastBarcode || now - this._lastTime > this.COOLDOWN)) {
-          this._lastBarcode = val;
+        if (decodedText && (decodedText !== this._lastBarcode || now - this._lastTime > this.COOLDOWN)) {
+          this._lastBarcode = decodedText;
           this._lastTime = now;
-          if (this._callback) this._callback(val);
+          if (this._callback) this._callback(decodedText);
         }
-      }
-    } catch(e) {}
+      },
+      () => {} // ignore scan errors (no barcode found in frame)
+    );
+    this._scanning = true;
+  },
+
+  async stopScan() {
+    if (!this._scanning || !this._scanner) return;
+    try { await this._scanner.stop(); } catch(e) {}
+    this._scanning = false;
   }
 };
 
@@ -1017,28 +993,23 @@ document.getElementById('btn-close-box').addEventListener('click', () => {
 
 // Scanner
 document.getElementById('btn-start-scan').addEventListener('click', async () => {
-  const video = document.getElementById('scanner-video');
-  const placeholder = document.getElementById('scanner-placeholder');
-  const overlay = document.getElementById('scanner-overlay');
   try {
-    await BarcodeEngine.startScan(video);
-    video.style.display = 'block';
-    placeholder.style.display = 'none';
-    overlay.style.display = 'flex';
+    document.getElementById('scanner-placeholder').style.display = 'none';
+    document.getElementById('scanner-reader').style.display = 'block';
+    await BarcodeEngine.startScan();
     document.getElementById('btn-start-scan').style.display = 'none';
     document.getElementById('btn-stop-scan').style.display = '';
   } catch(e) {
+    document.getElementById('scanner-placeholder').style.display = '';
+    document.getElementById('scanner-reader').style.display = 'none';
     showToast('無法開啟相機：' + e.message, 'error');
   }
 });
 
-document.getElementById('btn-stop-scan').addEventListener('click', () => {
-  BarcodeEngine.stopScan();
-  const video = document.getElementById('scanner-video');
-  video.style.display = 'none';
-  video.srcObject = null;
+document.getElementById('btn-stop-scan').addEventListener('click', async () => {
+  await BarcodeEngine.stopScan();
+  document.getElementById('scanner-reader').style.display = 'none';
   document.getElementById('scanner-placeholder').style.display = '';
-  document.getElementById('scanner-overlay').style.display = 'none';
   document.getElementById('btn-start-scan').style.display = '';
   document.getElementById('btn-stop-scan').style.display = 'none';
 });
@@ -1288,15 +1259,10 @@ function renderCurrentBox() {
   itemListCard.style.display = '';
 }
 
-function resetScannerUI() {
-  const video = document.getElementById('scanner-video');
-  video.style.display = 'none';
-  if (video.srcObject) {
-    video.srcObject.getTracks().forEach(t => t.stop());
-    video.srcObject = null;
-  }
+async function resetScannerUI() {
+  await BarcodeEngine.stopScan();
+  document.getElementById('scanner-reader').style.display = 'none';
   document.getElementById('scanner-placeholder').style.display = '';
-  document.getElementById('scanner-overlay').style.display = 'none';
   document.getElementById('btn-start-scan').style.display = '';
   document.getElementById('btn-stop-scan').style.display = 'none';
 }
