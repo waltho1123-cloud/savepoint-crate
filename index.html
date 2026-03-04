@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>IPAS 庫存盤點裝箱系統</title>
 <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -511,8 +512,10 @@ body {
   color: var(--text); transition: border-color .2s;
 }
 .dialog-form input:focus, .dialog-form select:focus { border-color: var(--primary-light); }
-.dialog-form .form-row { display: flex; gap: 8px; }
-.dialog-form .form-row > div { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+.dialog-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.dialog-form .form-row > div { display: flex; flex-direction: column; gap: 4px; }
+.dlg-ocr-status { font-size: .78rem; color: var(--primary); margin-left: 8px; }
+@keyframes dotPulse { 0%,20% { opacity: .2; } 50% { opacity: 1; } 80%,100% { opacity: .2; } }
 
 /* Manual barcode input row */
 .manual-input-row {
@@ -878,6 +881,71 @@ const BarcodeEngine = {
   }
 };
 
+// ========== OCREngine ==========
+const OCREngine = {
+  _worker: null,
+  _ready: false,
+  _initializing: false,
+
+  async _ensureWorker() {
+    if (this._ready) return true;
+    if (this._initializing) {
+      while (this._initializing) await new Promise(r => setTimeout(r, 100));
+      return this._ready;
+    }
+    this._initializing = true;
+    try {
+      this._worker = await Tesseract.createWorker('chi_tra');
+      this._ready = true;
+    } catch(e) { console.error('OCR init failed:', e); }
+    this._initializing = false;
+    return this._ready;
+  },
+
+  captureFrame() {
+    const video = document.querySelector('#scanner-reader video');
+    if (!video || !video.videoWidth) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    return canvas;
+  },
+
+  async recognize(canvas, barcode) {
+    if (!canvas) return null;
+    const ok = await this._ensureWorker();
+    if (!ok) return null;
+    try {
+      const { data } = await this._worker.recognize(canvas);
+      return this._parseLabel(data.text, barcode);
+    } catch(e) { return null; }
+  },
+
+  _parseLabel(text, barcode) {
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    let bIdx = -1;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].replace(/\s/g, '').includes(barcode)) { bIdx = i; break; }
+    }
+    if (bIdx === -1) return null;
+
+    let productName = '', gender = '', color = '', size = '';
+    if (bIdx + 1 < lines.length) productName = lines[bIdx + 1];
+    if (bIdx + 2 < lines.length) {
+      const info = lines[bIdx + 2];
+      if (info.includes('女')) gender = '女';
+      else if (info.includes('男')) gender = '男';
+      else if (info.includes('中性')) gender = '中性';
+      let rest = info.replace(/男|女|中性/g, '').trim();
+      const sm = rest.match(/(XXS|XS|XXXL|XXL|XL|2XL|3XL|4XL|5XL|[SMLF])$/i);
+      if (sm) { size = sm[1].toUpperCase(); color = rest.slice(0, rest.length - sm[1].length).trim(); }
+      else color = rest;
+    }
+    return { productName, gender, color, size };
+  }
+};
+
 // ========== PrintManager ==========
 const PrintManager = {
   _setPrintMode(mode) {
@@ -1038,6 +1106,9 @@ function addBarcodeWithInfo(barcode, source) {
     return;
   }
 
+  // Capture frame for OCR before showing dialog
+  const frame = OCREngine.captureFrame();
+
   showProductDialog(barcode, (info) => {
     state.productCache[barcode] = info;
     persist();
@@ -1045,16 +1116,18 @@ function addBarcodeWithInfo(barcode, source) {
     try { navigator.vibrate?.(100); } catch(e) {}
     showToast('已加入：' + barcode, 'success');
     renderScanList();
-  });
+  }, frame);
 }
 
-function showProductDialog(barcode, onConfirm) {
+function showProductDialog(barcode, onConfirm, frame) {
   const backdrop = document.createElement('div');
   backdrop.className = 'dialog-backdrop';
   backdrop.innerHTML = `
-    <div class="dialog" style="max-width:400px">
+    <div class="dialog">
       <h3>商品資訊</h3>
-      <p style="margin-bottom:12px">商品編號：<strong style="font-family:'SF Mono','Fira Code',monospace">${escHtml(barcode)}</strong></p>
+      <p style="margin-bottom:12px">商品編號：<strong style="font-family:'SF Mono','Fira Code',monospace">${escHtml(barcode)}</strong>
+        <span id="dlg-ocr-status" class="dlg-ocr-status"></span>
+      </p>
       <div class="dialog-form">
         <div>
           <label>品名</label>
@@ -1074,10 +1147,10 @@ function showProductDialog(barcode, onConfirm) {
             <label>顏色</label>
             <input type="text" id="dlg-color" placeholder="例：經典黑">
           </div>
-          <div>
-            <label>尺寸</label>
-            <input type="text" id="dlg-size" placeholder="例：L">
-          </div>
+        </div>
+        <div>
+          <label>尺寸</label>
+          <input type="text" id="dlg-size" placeholder="例：L、XL、XXL">
         </div>
       </div>
       <div class="dialog-actions">
@@ -1100,6 +1173,25 @@ function showProductDialog(barcode, onConfirm) {
     onConfirm(info);
   });
   backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
+
+  // Run OCR in background to pre-fill fields
+  if (frame) {
+    const status = backdrop.querySelector('#dlg-ocr-status');
+    status.textContent = '文字辨識中…';
+    OCREngine.recognize(frame, barcode).then(info => {
+      if (!info || !document.body.contains(backdrop)) return;
+      status.textContent = '✓ 已辨識';
+      setTimeout(() => status.textContent = '', 2000);
+      const n = backdrop.querySelector('#dlg-product-name');
+      const g = backdrop.querySelector('#dlg-gender');
+      const c = backdrop.querySelector('#dlg-color');
+      const s = backdrop.querySelector('#dlg-size');
+      if (!n.value && info.productName) n.value = info.productName;
+      if (!g.value && info.gender) g.value = info.gender;
+      if (!c.value && info.color) c.value = info.color;
+      if (!s.value && info.size) s.value = info.size;
+    }).catch(() => { status.textContent = ''; });
+  }
 }
 
 BarcodeEngine.onBarcode((barcode) => {
