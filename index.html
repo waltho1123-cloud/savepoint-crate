@@ -830,25 +830,29 @@ const BarcodeEngine = {
   async startScan() {
     if (this._scanning) return;
     if (!this._scanner) {
-      this._scanner = new Html5Qrcode('scanner-reader');
+      this._scanner = new Html5Qrcode('scanner-reader', {
+        formatsToSupport: [
+          Html5QrcodeSupportedFormats.CODE_128,
+          Html5QrcodeSupportedFormats.CODE_39,
+          Html5QrcodeSupportedFormats.CODE_93,
+          Html5QrcodeSupportedFormats.EAN_13,
+          Html5QrcodeSupportedFormats.EAN_8,
+          Html5QrcodeSupportedFormats.ITF,
+          Html5QrcodeSupportedFormats.UPC_A,
+          Html5QrcodeSupportedFormats.UPC_E,
+          Html5QrcodeSupportedFormats.CODABAR,
+          Html5QrcodeSupportedFormats.QR_CODE,
+          Html5QrcodeSupportedFormats.DATA_MATRIX
+        ],
+        useBarCodeDetectorIfSupported: true
+      });
     }
     const config = {
-      fps: 15,
-      qrbox: { width: 280, height: 160 },
-      aspectRatio: 1.333,
-      formatsToSupport: [
-        Html5QrcodeSupportedFormats.CODE_128,
-        Html5QrcodeSupportedFormats.CODE_39,
-        Html5QrcodeSupportedFormats.CODE_93,
-        Html5QrcodeSupportedFormats.EAN_13,
-        Html5QrcodeSupportedFormats.EAN_8,
-        Html5QrcodeSupportedFormats.ITF,
-        Html5QrcodeSupportedFormats.UPC_A,
-        Html5QrcodeSupportedFormats.UPC_E,
-        Html5QrcodeSupportedFormats.CODABAR,
-        Html5QrcodeSupportedFormats.QR_CODE,
-        Html5QrcodeSupportedFormats.DATA_MATRIX
-      ]
+      fps: 20,
+      qrbox: function(viewfinderWidth, viewfinderHeight) {
+        return { width: Math.floor(viewfinderWidth * 0.85), height: Math.floor(viewfinderHeight * 0.45) };
+      },
+      experimentalFeatures: { useBarCodeDetectorIfSupported: true }
     };
     await this._scanner.start(
       { facingMode: 'environment' },
@@ -869,6 +873,7 @@ const BarcodeEngine = {
   async stopScan() {
     if (!this._scanning || !this._scanner) return;
     try { await this._scanner.stop(); } catch(e) {}
+    this._scanner = null;
     this._scanning = false;
   }
 };
