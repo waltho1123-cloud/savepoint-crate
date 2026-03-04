@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>IPAS 庫存盤點裝箱系統</title>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -223,10 +222,9 @@ body {
   align-items: center;
   justify-content: center;
 }
-#scanner-reader { position: relative; }
-#scanner-reader video { width: 100% !important; height: 100% !important; object-fit: cover !important; border-radius: var(--radius-sm); }
-#scanner-reader img[alt="Info icon"] { display: none !important; }
-#qr-shaded-region { border-radius: 10px !important; }
+.scanner-area video { width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm); }
+.btn-capture { background: linear-gradient(135deg, #10b981, #059669); color: #fff; font-size: 1rem; font-weight: 700; padding: 14px 28px; border: none; border-radius: var(--radius-sm); cursor: pointer; width: 100%; }
+.btn-capture:disabled { opacity: .5; cursor: not-allowed; }
 .scanner-placeholder {
   color: #64668a;
   text-align: center;
@@ -513,7 +511,7 @@ body {
 .dialog-form input:focus, .dialog-form select:focus { border-color: var(--primary-light); }
 .dialog-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .dialog-form .form-row > div { display: flex; flex-direction: column; gap: 4px; }
-.dlg-ocr-status { font-size: .78rem; color: var(--primary); margin-left: 8px; }
+
 @keyframes dotPulse { 0%,20% { opacity: .2; } 50% { opacity: 1; } 80%,100% { opacity: .2; } }
 
 /* Manual barcode input row */
@@ -610,20 +608,22 @@ body {
       </div>
     </div>
 
-    <!-- Scanner -->
+    <!-- Camera OCR -->
     <div class="card" id="scanner-card" style="display:none">
-      <div class="card-title">📷 條碼掃描</div>
+      <div class="card-title">📷 拍照辨識</div>
       <div class="scanner-area" id="scanner-area">
         <div class="scanner-placeholder" id="scanner-placeholder">
           <div class="icon">📷</div>
-          <div>點擊下方按鈕開啟相機掃描</div>
+          <div>點擊下方按鈕開啟相機</div>
         </div>
-        <div id="scanner-reader" style="display:none;width:100%;height:100%"></div>
+        <video id="camera-video" autoplay playsinline style="display:none"></video>
       </div>
       <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
-        <button class="btn btn-primary" id="btn-start-scan">開始掃描</button>
-        <button class="btn btn-outline" id="btn-stop-scan" style="display:none">停止掃描</button>
+        <button class="btn btn-primary" id="btn-start-scan">開啟相機</button>
+        <button class="btn btn-outline" id="btn-stop-scan" style="display:none">關閉相機</button>
       </div>
+      <button class="btn-capture" id="btn-capture" style="display:none;margin-top:10px" disabled>📸 拍照辨識</button>
+      <div id="ocr-status" style="margin-top:8px;font-size:.85rem;color:var(--primary);text-align:center;display:none"></div>
       <div class="manual-input-row">
         <input type="text" id="input-manual-barcode" placeholder="手動輸入條碼">
         <button class="btn btn-primary btn-sm" id="btn-add-manual">加入</button>
@@ -817,66 +817,33 @@ const AggregationEngine = {
   }
 };
 
-// ========== BarcodeEngine ==========
-const BarcodeEngine = {
-  _scanner: null,
-  _callback: null,
-  _scanning: false,
-  _lastBarcode: '',
-  _lastTime: 0,
-  COOLDOWN: 1500,
+// ========== CameraEngine ==========
+const CameraEngine = {
+  _stream: null,
 
-  onBarcode(cb) { this._callback = cb; },
-  offBarcode() { this._callback = null; },
-
-  async startScan() {
-    if (this._scanning) return;
-    if (!this._scanner) {
-      this._scanner = new Html5Qrcode('scanner-reader', {
-        formatsToSupport: [
-          Html5QrcodeSupportedFormats.CODE_128,
-          Html5QrcodeSupportedFormats.CODE_39,
-          Html5QrcodeSupportedFormats.CODE_93,
-          Html5QrcodeSupportedFormats.EAN_13,
-          Html5QrcodeSupportedFormats.EAN_8,
-          Html5QrcodeSupportedFormats.ITF,
-          Html5QrcodeSupportedFormats.UPC_A,
-          Html5QrcodeSupportedFormats.UPC_E,
-          Html5QrcodeSupportedFormats.CODABAR,
-          Html5QrcodeSupportedFormats.QR_CODE,
-          Html5QrcodeSupportedFormats.DATA_MATRIX
-        ],
-        useBarCodeDetectorIfSupported: true
-      });
-    }
-    const config = {
-      fps: 20,
-      qrbox: function(viewfinderWidth, viewfinderHeight) {
-        return { width: Math.floor(viewfinderWidth * 0.85), height: Math.floor(viewfinderHeight * 0.45) };
-      },
-      experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-    };
-    await this._scanner.start(
-      { facingMode: 'environment' },
-      config,
-      (decodedText) => {
-        const now = Date.now();
-        if (decodedText && (decodedText !== this._lastBarcode || now - this._lastTime > this.COOLDOWN)) {
-          this._lastBarcode = decodedText;
-          this._lastTime = now;
-          if (this._callback) this._callback(decodedText);
-        }
-      },
-      () => {} // ignore scan errors (no barcode found in frame)
-    );
-    this._scanning = true;
+  async start(videoEl) {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } }
+    });
+    videoEl.srcObject = stream;
+    this._stream = stream;
   },
 
-  async stopScan() {
-    if (!this._scanning || !this._scanner) return;
-    try { await this._scanner.stop(); } catch(e) {}
-    this._scanner = null;
-    this._scanning = false;
+  stop(videoEl) {
+    if (this._stream) {
+      this._stream.getTracks().forEach(t => t.stop());
+      this._stream = null;
+    }
+    if (videoEl) videoEl.srcObject = null;
+  },
+
+  captureFrame(videoEl) {
+    if (!videoEl || !videoEl.videoWidth) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = videoEl.videoWidth;
+    canvas.height = videoEl.videoHeight;
+    canvas.getContext('2d').drawImage(videoEl, 0, 0);
+    return canvas.toDataURL('image/jpeg', 0.85);
   }
 };
 
@@ -884,25 +851,15 @@ const BarcodeEngine = {
 const OCREngine = {
   WEBHOOK_URL: 'https://waltho1123.zeabur.app/webhook/barcode-label-ocr',
 
-  captureFrame() {
-    const video = document.querySelector('#scanner-reader video');
-    if (!video || !video.videoWidth) return null;
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    canvas.getContext('2d').drawImage(video, 0, 0);
-    return canvas.toDataURL('image/jpeg', 0.85);
-  },
-
-  async recognize(imageDataUrl, barcode, boxId) {
+  async recognize(imageDataUrl, boxId) {
     if (!imageDataUrl) return null;
     try {
       const resp = await fetch(this.WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ barcode, boxId: boxId || '', image: imageDataUrl })
+        body: JSON.stringify({ barcode: '', boxId: boxId || '', image: imageDataUrl })
       });
-      if (!resp.ok) return null;
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const result = await resp.json();
       if (result.success && result.data) return result.data;
       return null;
@@ -1024,41 +981,118 @@ document.getElementById('btn-close-box').addEventListener('click', () => {
   const box = BoxManager.getCurrentBox();
   if (!box) return;
   showDialog('完成裝箱確認', `確定要完成箱號 ${box.id} 嗎？完成後將無法修改。`, () => {
-    BarcodeEngine.stopScan();
+    CameraEngine.stop(document.getElementById('camera-video'));
     BoxManager.closeBox(box.id);
     showToast('箱號 ' + box.id + ' 已完成', 'success');
     renderAll();
   });
 });
 
-// Scanner
+// Scanner (Camera)
 document.getElementById('btn-start-scan').addEventListener('click', async () => {
+  const videoEl = document.getElementById('camera-video');
   try {
     document.getElementById('scanner-placeholder').style.display = 'none';
-    document.getElementById('scanner-reader').style.display = 'block';
-    await BarcodeEngine.startScan();
+    videoEl.style.display = 'block';
+    await CameraEngine.start(videoEl);
     document.getElementById('btn-start-scan').style.display = 'none';
     document.getElementById('btn-stop-scan').style.display = '';
+    const captureBtn = document.getElementById('btn-capture');
+    captureBtn.style.display = '';
+    captureBtn.disabled = false;
   } catch(e) {
     document.getElementById('scanner-placeholder').style.display = '';
-    document.getElementById('scanner-reader').style.display = 'none';
+    videoEl.style.display = 'none';
     showToast('無法開啟相機：' + e.message, 'error');
   }
 });
 
-document.getElementById('btn-stop-scan').addEventListener('click', async () => {
-  await BarcodeEngine.stopScan();
-  document.getElementById('scanner-reader').style.display = 'none';
+document.getElementById('btn-stop-scan').addEventListener('click', () => {
+  const videoEl = document.getElementById('camera-video');
+  CameraEngine.stop(videoEl);
+  videoEl.style.display = 'none';
   document.getElementById('scanner-placeholder').style.display = '';
   document.getElementById('btn-start-scan').style.display = '';
   document.getElementById('btn-stop-scan').style.display = 'none';
+  document.getElementById('btn-capture').style.display = 'none';
+  document.getElementById('ocr-status').style.display = 'none';
+});
+
+// Capture photo and send to OCR
+document.getElementById('btn-capture').addEventListener('click', async () => {
+  const videoEl = document.getElementById('camera-video');
+  const statusEl = document.getElementById('ocr-status');
+  const captureBtn = document.getElementById('btn-capture');
+  const box = BoxManager.getCurrentBox();
+  if (!box || box.status === 'closed') {
+    showToast('請先建立或選擇一個開放中的箱號', 'error');
+    return;
+  }
+
+  const frame = CameraEngine.captureFrame(videoEl);
+  if (!frame) {
+    showToast('無法擷取畫面，請確認相機已開啟', 'error');
+    return;
+  }
+
+  captureBtn.disabled = true;
+  statusEl.style.display = '';
+  statusEl.textContent = '辨識中，請稍候…';
+
+  try {
+    const result = await OCREngine.recognize(frame, box.id);
+    statusEl.textContent = '';
+    statusEl.style.display = 'none';
+    captureBtn.disabled = false;
+
+    if (!result) {
+      showToast('辨識失敗，請重新拍照', 'error');
+      return;
+    }
+
+    const barcode = (result.barcode || result.productCode || '').trim();
+    const info = {
+      productName: result.productName || '',
+      gender: result.gender || '',
+      color: result.color || '',
+      size: result.size || ''
+    };
+
+    // If barcode found and cached, auto-add
+    if (barcode && state.productCache[barcode]) {
+      BoxManager.addItem(box.id, barcode, state.productCache[barcode]);
+      try { navigator.vibrate?.(100); } catch(e) {}
+      showToast('掃描成功：' + barcode, 'success');
+      renderScanList();
+      return;
+    }
+
+    // Show dialog with pre-filled info for confirmation
+    showProductDialog(barcode, info, (confirmedBarcode, confirmedInfo) => {
+      if (!confirmedBarcode) {
+        showToast('商品編號不可為空', 'error');
+        return;
+      }
+      state.productCache[confirmedBarcode] = confirmedInfo;
+      persist();
+      BoxManager.addItem(box.id, confirmedBarcode, confirmedInfo);
+      try { navigator.vibrate?.(100); } catch(e) {}
+      showToast('已加入：' + confirmedBarcode, 'success');
+      renderScanList();
+    });
+  } catch(e) {
+    statusEl.textContent = '';
+    statusEl.style.display = 'none';
+    captureBtn.disabled = false;
+    showToast('辨識發生錯誤：' + e.message, 'error');
+  }
 });
 
 // ========== Product Info Dialog ==========
-function addBarcodeWithInfo(barcode, source) {
+function addManualBarcode(barcode) {
   const box = BoxManager.getCurrentBox();
   if (!box || box.status === 'closed') {
-    if (source === 'manual') showToast('請先建立或選擇一個開放中的箱號', 'error');
+    showToast('請先建立或選擇一個開放中的箱號', 'error');
     return;
   }
   barcode = barcode.trim();
@@ -1068,56 +1102,59 @@ function addBarcodeWithInfo(barcode, source) {
   if (cached) {
     BoxManager.addItem(box.id, barcode, cached);
     try { navigator.vibrate?.(100); } catch(e) {}
-    showToast('掃描成功：' + barcode, 'success');
+    showToast('已加入：' + barcode, 'success');
     renderScanList();
     return;
   }
 
-  // Capture frame for OCR before showing dialog
-  const frame = OCREngine.captureFrame();
-
-  showProductDialog(barcode, (info) => {
-    state.productCache[barcode] = info;
+  showProductDialog(barcode, {}, (confirmedBarcode, confirmedInfo) => {
+    if (!confirmedBarcode) {
+      showToast('商品編號不可為空', 'error');
+      return;
+    }
+    state.productCache[confirmedBarcode] = confirmedInfo;
     persist();
-    BoxManager.addItem(box.id, barcode, info);
+    BoxManager.addItem(box.id, confirmedBarcode, confirmedInfo);
     try { navigator.vibrate?.(100); } catch(e) {}
-    showToast('已加入：' + barcode, 'success');
+    showToast('已加入：' + confirmedBarcode, 'success');
     renderScanList();
-  }, frame);
+  });
 }
 
-function showProductDialog(barcode, onConfirm, frame) {
+function showProductDialog(barcode, prefilledInfo, onConfirm) {
+  const info = prefilledInfo || {};
   const backdrop = document.createElement('div');
   backdrop.className = 'dialog-backdrop';
   backdrop.innerHTML = `
     <div class="dialog">
       <h3>商品資訊</h3>
-      <p style="margin-bottom:12px">商品編號：<strong style="font-family:'SF Mono','Fira Code',monospace">${escHtml(barcode)}</strong>
-        <span id="dlg-ocr-status" class="dlg-ocr-status"></span>
-      </p>
       <div class="dialog-form">
         <div>
+          <label>商品編號</label>
+          <input type="text" id="dlg-barcode" value="${escHtml(barcode || '')}" placeholder="條碼編號" style="font-family:'SF Mono','Fira Code',monospace">
+        </div>
+        <div>
           <label>品名</label>
-          <input type="text" id="dlg-product-name" placeholder="例：第五代溫灸刷毛圓領發熱衣">
+          <input type="text" id="dlg-product-name" value="${escHtml(info.productName || '')}" placeholder="例：第五代溫灸刷毛圓領發熱衣">
         </div>
         <div class="form-row">
           <div>
             <label>性別</label>
             <select id="dlg-gender">
               <option value="">請選擇</option>
-              <option value="男">男</option>
-              <option value="女">女</option>
-              <option value="中性">中性</option>
+              <option value="男"${info.gender === '男' ? ' selected' : ''}>男</option>
+              <option value="女"${info.gender === '女' ? ' selected' : ''}>女</option>
+              <option value="中性"${info.gender === '中性' ? ' selected' : ''}>中性</option>
             </select>
           </div>
           <div>
             <label>顏色</label>
-            <input type="text" id="dlg-color" placeholder="例：經典黑">
+            <input type="text" id="dlg-color" value="${escHtml(info.color || '')}" placeholder="例：經典黑">
           </div>
         </div>
         <div>
           <label>尺寸</label>
-          <input type="text" id="dlg-size" placeholder="例：L、XL、XXL">
+          <input type="text" id="dlg-size" value="${escHtml(info.size || '')}" placeholder="例：L、XL、XXL">
         </div>
       </div>
       <div class="dialog-actions">
@@ -1127,44 +1164,24 @@ function showProductDialog(barcode, onConfirm, frame) {
     </div>
   `;
   document.body.appendChild(backdrop);
-  setTimeout(() => backdrop.querySelector('#dlg-product-name').focus(), 100);
+  setTimeout(() => {
+    const first = backdrop.querySelector(barcode ? '#dlg-product-name' : '#dlg-barcode');
+    first.focus();
+  }, 100);
   backdrop.querySelector('.dialog-cancel').addEventListener('click', () => backdrop.remove());
   backdrop.querySelector('.dialog-confirm').addEventListener('click', () => {
-    const info = {
+    const confirmedBarcode = backdrop.querySelector('#dlg-barcode').value.trim();
+    const confirmedInfo = {
       productName: backdrop.querySelector('#dlg-product-name').value.trim(),
       gender: backdrop.querySelector('#dlg-gender').value,
       color: backdrop.querySelector('#dlg-color').value.trim(),
       size: backdrop.querySelector('#dlg-size').value.trim()
     };
     backdrop.remove();
-    onConfirm(info);
+    onConfirm(confirmedBarcode, confirmedInfo);
   });
   backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
-
-  // Run OCR in background to pre-fill fields
-  if (frame) {
-    const status = backdrop.querySelector('#dlg-ocr-status');
-    status.textContent = '文字辨識中…';
-    const currentBox = BoxManager.getCurrentBox();
-    OCREngine.recognize(frame, barcode, currentBox ? currentBox.id : '').then(info => {
-      if (!info || !document.body.contains(backdrop)) return;
-      status.textContent = '✓ 已辨識';
-      setTimeout(() => status.textContent = '', 2000);
-      const n = backdrop.querySelector('#dlg-product-name');
-      const g = backdrop.querySelector('#dlg-gender');
-      const c = backdrop.querySelector('#dlg-color');
-      const s = backdrop.querySelector('#dlg-size');
-      if (!n.value && info.productName) n.value = info.productName;
-      if (!g.value && info.gender) g.value = info.gender;
-      if (!c.value && info.color) c.value = info.color;
-      if (!s.value && info.size) s.value = info.size;
-    }).catch(() => { status.textContent = ''; });
-  }
 }
-
-BarcodeEngine.onBarcode((barcode) => {
-  addBarcodeWithInfo(barcode, 'scan');
-});
 
 // Manual barcode input
 document.getElementById('btn-add-manual').addEventListener('click', () => {
@@ -1172,7 +1189,7 @@ document.getElementById('btn-add-manual').addEventListener('click', () => {
   const val = input.value.trim();
   if (!val) return;
   input.value = '';
-  addBarcodeWithInfo(val, 'manual');
+  addManualBarcode(val);
 });
 document.getElementById('input-manual-barcode').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('btn-add-manual').click();
@@ -1246,7 +1263,7 @@ function renderBoxTabs() {
         : `確定要刪除箱號 ${box.id} 嗎？`;
       showDialog('刪除箱號', msg, () => {
         if (state.currentBoxId === box.id) {
-          BarcodeEngine.stopScan();
+          CameraEngine.stop(document.getElementById('camera-video'));
           resetScannerUI();
         }
         BoxManager.deleteBox(box.id);
@@ -1300,7 +1317,7 @@ function renderCurrentBox() {
     banner.style.display = 'none';
     scannerCard.style.display = 'none';
     itemListCard.style.display = 'none';
-    BarcodeEngine.stopScan();
+    CameraEngine.stop(document.getElementById('camera-video'));
     resetScannerUI();
     return;
   }
@@ -1318,18 +1335,21 @@ function renderCurrentBox() {
     statusEl.className = 'box-status status-closed';
     scannerCard.style.display = 'none';
     document.getElementById('btn-close-box').style.display = 'none';
-    BarcodeEngine.stopScan();
+    CameraEngine.stop(document.getElementById('camera-video'));
     resetScannerUI();
   }
   itemListCard.style.display = '';
 }
 
-async function resetScannerUI() {
-  await BarcodeEngine.stopScan();
-  document.getElementById('scanner-reader').style.display = 'none';
+function resetScannerUI() {
+  const videoEl = document.getElementById('camera-video');
+  CameraEngine.stop(videoEl);
+  videoEl.style.display = 'none';
   document.getElementById('scanner-placeholder').style.display = '';
   document.getElementById('btn-start-scan').style.display = '';
   document.getElementById('btn-stop-scan').style.display = 'none';
+  document.getElementById('btn-capture').style.display = 'none';
+  document.getElementById('ocr-status').style.display = 'none';
 }
 
 function renderScanList() {
@@ -1437,7 +1457,7 @@ function showDialog(title, message, onConfirm) {
 
 function confirmClearAll() {
   showDialog('清除所有資料', '確定要清除所有盤點資料嗎？此操作無法復原。', () => {
-    BarcodeEngine.stopScan();
+    CameraEngine.stop(document.getElementById('camera-video'));
     resetScannerUI();
     Store.clearState();
     state = { boxes: [], currentBoxId: null, lastBoxSeq: 0, productCache: {} };
