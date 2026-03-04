@@ -273,6 +273,8 @@ body {
   color: var(--text);
 }
 .scan-item-name { color: var(--text-muted); font-size: .82rem; margin-top: 1px; }
+.scan-item-detail { color: var(--text-muted); font-size: .78rem; margin-top: 1px; display: flex; gap: 6px; flex-wrap: wrap; }
+.scan-item-detail span { background: rgba(58,181,236,.1); padding: 1px 6px; border-radius: 4px; }
 .scan-item-time { color: var(--text-muted); font-size: .78rem; white-space: nowrap; }
 .scan-list .empty {
   color: var(--text-muted);
@@ -513,6 +515,16 @@ body {
 .dialog h3 { margin-bottom: 8px; font-size: 1.05rem; }
 .dialog p { color: var(--text-muted); margin-bottom: 20px; font-size: .9rem; line-height: 1.5; }
 .dialog-actions { display: flex; gap: 10px; justify-content: flex-end; }
+.dialog-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+.dialog-form label { font-size: .85rem; font-weight: 600; color: var(--text); }
+.dialog-form input, .dialog-form select {
+  padding: 9px 12px; border: 1px solid rgba(0,0,0,.08); border-radius: var(--radius-sm);
+  font-size: 16px; outline: none; background: rgba(255,255,255,.5); box-shadow: var(--neu-inset);
+  color: var(--text); transition: border-color .2s;
+}
+.dialog-form input:focus, .dialog-form select:focus { border-color: var(--primary-light); }
+.dialog-form .form-row { display: flex; gap: 8px; }
+.dialog-form .form-row > div { flex: 1; display: flex; flex-direction: column; gap: 4px; }
 
 /* Manual barcode input row */
 .manual-input-row {
@@ -658,14 +670,17 @@ body {
           <thead>
             <tr>
               <th>#</th>
-              <th>條碼</th>
-              <th>商品名稱</th>
+              <th>商品編號</th>
+              <th>品名</th>
+              <th>性別</th>
+              <th>顏色</th>
+              <th>尺寸</th>
               <th>數量</th>
               <th>所在箱號</th>
             </tr>
           </thead>
           <tbody id="stats-tbody">
-            <tr><td colspan="5" class="stats-empty">尚無盤點資料</td></tr>
+            <tr><td colspan="8" class="stats-empty">尚無盤點資料</td></tr>
           </tbody>
         </table>
       </div>
@@ -683,8 +698,11 @@ body {
     <thead>
       <tr>
         <th>#</th>
-        <th>條碼</th>
-        <th>商品名稱</th>
+        <th>商品編號</th>
+        <th>品名</th>
+        <th>性別</th>
+        <th>顏色</th>
+        <th>尺寸</th>
         <th>數量</th>
       </tr>
     </thead>
@@ -712,7 +730,8 @@ const Store = {
 };
 
 // ========== App State ==========
-let state = Store.loadState() || { boxes: [], currentBoxId: null, lastBoxSeq: 0 };
+let state = Store.loadState() || { boxes: [], currentBoxId: null, lastBoxSeq: 0, productCache: {} };
+if (!state.productCache) state.productCache = {};
 
 function persist() { Store.saveState(state); }
 
@@ -743,13 +762,17 @@ const BoxManager = {
     if (state.currentBoxId === boxId) state.currentBoxId = null;
     persist();
   },
-  addItem(boxId, barcode, productName) {
+  addItem(boxId, barcode, info) {
     const box = state.boxes.find(b => b.id === boxId);
     if (!box || box.status === 'closed') return null;
+    info = info || {};
     const item = {
       scanId: crypto.randomUUID(),
       barcode: barcode.trim(),
-      productName: productName || '',
+      productName: info.productName || '',
+      gender: info.gender || '',
+      color: info.color || '',
+      size: info.size || '',
       scannedAt: new Date().toISOString()
     };
     box.items.push(item);
@@ -793,11 +816,14 @@ const AggregationEngine = {
     for (const box of boxes) {
       for (const item of box.items) {
         if (!map.has(item.barcode)) {
-          map.set(item.barcode, { barcode: item.barcode, productName: item.productName, totalQty: 0, boxes: [] });
+          map.set(item.barcode, { barcode: item.barcode, productName: item.productName, gender: item.gender || '', color: item.color || '', size: item.size || '', totalQty: 0, boxes: [] });
         }
         const agg = map.get(item.barcode);
         agg.totalQty += 1;
         if (!agg.productName && item.productName) agg.productName = item.productName;
+        if (!agg.gender && item.gender) agg.gender = item.gender;
+        if (!agg.color && item.color) agg.color = item.color;
+        if (!agg.size && item.size) agg.size = item.size;
         if (!agg.boxes.includes(box.id)) agg.boxes.push(box.id);
       }
     }
@@ -896,11 +922,14 @@ const PrintManager = {
     const map = new Map();
     for (const item of box.items) {
       if (!map.has(item.barcode)) {
-        map.set(item.barcode, { barcode: item.barcode, productName: item.productName, qty: 0 });
+        map.set(item.barcode, { barcode: item.barcode, productName: item.productName, gender: item.gender || '', color: item.color || '', size: item.size || '', qty: 0 });
       }
       const agg = map.get(item.barcode);
       agg.qty += 1;
       if (!agg.productName && item.productName) agg.productName = item.productName;
+      if (!agg.gender && item.gender) agg.gender = item.gender;
+      if (!agg.color && item.color) agg.color = item.color;
+      if (!agg.size && item.size) agg.size = item.size;
     }
     const aggItems = Array.from(map.values()).sort((a, b) => a.barcode.localeCompare(b.barcode));
     const totalQty = aggItems.reduce((s, a) => s + a.qty, 0);
@@ -920,6 +949,9 @@ const PrintManager = {
         <td>${idx + 1}</td>
         <td class="mono">${escHtml(item.barcode)}</td>
         <td>${escHtml(item.productName) || '—'}</td>
+        <td>${escHtml(item.gender) || '—'}</td>
+        <td>${escHtml(item.color) || '—'}</td>
+        <td>${escHtml(item.size) || '—'}</td>
         <td class="qty">${item.qty}</td>
       `;
       tbody.appendChild(tr);
@@ -1011,13 +1043,91 @@ document.getElementById('btn-stop-scan').addEventListener('click', () => {
   document.getElementById('btn-stop-scan').style.display = 'none';
 });
 
-BarcodeEngine.onBarcode((barcode) => {
+// ========== Product Info Dialog ==========
+function addBarcodeWithInfo(barcode, source) {
   const box = BoxManager.getCurrentBox();
-  if (!box || box.status === 'closed') return;
-  BoxManager.addItem(box.id, barcode);
-  try { navigator.vibrate?.(100); } catch(e) {}
-  showToast('掃描成功：' + barcode, 'success');
-  renderScanList();
+  if (!box || box.status === 'closed') {
+    if (source === 'manual') showToast('請先建立或選擇一個開放中的箱號', 'error');
+    return;
+  }
+  barcode = barcode.trim();
+  if (!barcode) return;
+
+  const cached = state.productCache[barcode];
+  if (cached) {
+    BoxManager.addItem(box.id, barcode, cached);
+    try { navigator.vibrate?.(100); } catch(e) {}
+    showToast('掃描成功：' + barcode, 'success');
+    renderScanList();
+    return;
+  }
+
+  showProductDialog(barcode, (info) => {
+    state.productCache[barcode] = info;
+    persist();
+    BoxManager.addItem(box.id, barcode, info);
+    try { navigator.vibrate?.(100); } catch(e) {}
+    showToast('已加入：' + barcode, 'success');
+    renderScanList();
+  });
+}
+
+function showProductDialog(barcode, onConfirm) {
+  const backdrop = document.createElement('div');
+  backdrop.className = 'dialog-backdrop';
+  backdrop.innerHTML = `
+    <div class="dialog" style="max-width:400px">
+      <h3>商品資訊</h3>
+      <p style="margin-bottom:12px">商品編號：<strong style="font-family:'SF Mono','Fira Code',monospace">${escHtml(barcode)}</strong></p>
+      <div class="dialog-form">
+        <div>
+          <label>品名</label>
+          <input type="text" id="dlg-product-name" placeholder="例：第五代溫灸刷毛圓領發熱衣">
+        </div>
+        <div class="form-row">
+          <div>
+            <label>性別</label>
+            <select id="dlg-gender">
+              <option value="">請選擇</option>
+              <option value="男">男</option>
+              <option value="女">女</option>
+              <option value="中性">中性</option>
+            </select>
+          </div>
+          <div>
+            <label>顏色</label>
+            <input type="text" id="dlg-color" placeholder="例：經典黑">
+          </div>
+          <div>
+            <label>尺寸</label>
+            <input type="text" id="dlg-size" placeholder="例：L">
+          </div>
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn btn-outline btn-sm dialog-cancel">取消</button>
+        <button class="btn btn-primary btn-sm dialog-confirm">確認</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  setTimeout(() => backdrop.querySelector('#dlg-product-name').focus(), 100);
+  backdrop.querySelector('.dialog-cancel').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('.dialog-confirm').addEventListener('click', () => {
+    const info = {
+      productName: backdrop.querySelector('#dlg-product-name').value.trim(),
+      gender: backdrop.querySelector('#dlg-gender').value,
+      color: backdrop.querySelector('#dlg-color').value.trim(),
+      size: backdrop.querySelector('#dlg-size').value.trim()
+    };
+    backdrop.remove();
+    onConfirm(info);
+  });
+  backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
+}
+
+BarcodeEngine.onBarcode((barcode) => {
+  addBarcodeWithInfo(barcode, 'scan');
 });
 
 // Manual barcode input
@@ -1025,15 +1135,8 @@ document.getElementById('btn-add-manual').addEventListener('click', () => {
   const input = document.getElementById('input-manual-barcode');
   const val = input.value.trim();
   if (!val) return;
-  const box = BoxManager.getCurrentBox();
-  if (!box || box.status === 'closed') {
-    showToast('請先建立或選擇一個開放中的箱號', 'error');
-    return;
-  }
-  BoxManager.addItem(box.id, val);
-  showToast('已加入：' + val, 'success');
   input.value = '';
-  renderScanList();
+  addBarcodeWithInfo(val, 'manual');
 });
 document.getElementById('input-manual-barcode').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('btn-add-manual').click();
@@ -1217,10 +1320,12 @@ function renderScanList() {
     const item = box.items[i];
     const li = document.createElement('li');
     const canDelete = box.status === 'open';
+    const details = [item.gender, item.color, item.size].filter(Boolean);
     li.innerHTML = `
       <div class="scan-item-info">
         <div class="scan-item-barcode">${escHtml(item.barcode)}</div>
         ${item.productName ? `<div class="scan-item-name">${escHtml(item.productName)}</div>` : ''}
+        ${details.length ? `<div class="scan-item-detail">${details.map(d => `<span>${escHtml(d)}</span>`).join('')}</div>` : ''}
       </div>
       <span class="scan-item-time">${new Date(item.scannedAt).toLocaleTimeString('zh-TW')}</span>
       ${canDelete ? `<button class="btn btn-danger btn-sm btn-delete-item" data-scan-id="${item.scanId}">刪除</button>` : ''}
@@ -1244,7 +1349,7 @@ function renderStats() {
   const summary = document.getElementById('stats-summary');
 
   if (state.boxes.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="stats-empty">尚無盤點資料</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="stats-empty">尚無盤點資料</td></tr>';
     summary.textContent = '';
     return;
   }
@@ -1255,7 +1360,7 @@ function renderStats() {
   summary.textContent = `共 ${state.boxes.length} 箱（已完成 ${closedBoxes} 箱）、${aggItems.length} 種商品、${totalItems} 筆掃描`;
 
   if (aggItems.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="5" class="stats-empty">尚無掃描記錄</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="stats-empty">尚無掃描記錄</td></tr>';
     return;
   }
 
@@ -1266,6 +1371,9 @@ function renderStats() {
       <td>${idx + 1}</td>
       <td class="mono">${escHtml(item.barcode)}</td>
       <td>${escHtml(item.productName) || '—'}</td>
+      <td>${escHtml(item.gender) || '—'}</td>
+      <td>${escHtml(item.color) || '—'}</td>
+      <td>${escHtml(item.size) || '—'}</td>
       <td class="qty">${item.totalQty}</td>
       <td>${item.boxes.map(escHtml).join(', ')}</td>
     `;
@@ -1301,7 +1409,7 @@ function confirmClearAll() {
     BarcodeEngine.stopScan();
     resetScannerUI();
     Store.clearState();
-    state = { boxes: [], currentBoxId: null, lastBoxSeq: 0 };
+    state = { boxes: [], currentBoxId: null, lastBoxSeq: 0, productCache: {} };
     showToast('資料已清除', '');
     renderAll();
     renderStats();
