@@ -759,6 +759,7 @@ const BoxManager = {
       gender: info.gender || '',
       color: info.color || '',
       size: info.size || '',
+      qty: info.qty || 1,
       scannedAt: new Date().toISOString()
     };
     box.items.push(item);
@@ -770,6 +771,19 @@ const BoxManager = {
     if (!box) return;
     box.items = box.items.filter(i => i.scanId !== scanId);
     persist();
+  },
+  updateItem(boxId, scanId, updates) {
+    const box = state.boxes.find(b => b.id === boxId);
+    if (!box) return null;
+    const item = box.items.find(i => i.scanId === scanId);
+    if (!item) return null;
+    if (updates.productName !== undefined) item.productName = updates.productName;
+    if (updates.gender !== undefined) item.gender = updates.gender;
+    if (updates.color !== undefined) item.color = updates.color;
+    if (updates.size !== undefined) item.size = updates.size;
+    if (updates.qty !== undefined) item.qty = updates.qty;
+    persist();
+    return item;
   },
   renameBox(boxId, newId) {
     newId = newId.trim();
@@ -805,7 +819,7 @@ const AggregationEngine = {
           map.set(item.barcode, { barcode: item.barcode, productName: item.productName, gender: item.gender || '', color: item.color || '', size: item.size || '', totalQty: 0, boxes: [] });
         }
         const agg = map.get(item.barcode);
-        agg.totalQty += 1;
+        agg.totalQty += (item.qty || 1);
         if (!agg.productName && item.productName) agg.productName = item.productName;
         if (!agg.gender && item.gender) agg.gender = item.gender;
         if (!agg.color && item.color) agg.color = item.color;
@@ -901,7 +915,7 @@ const PrintManager = {
         map.set(item.barcode, { barcode: item.barcode, productName: item.productName, gender: item.gender || '', color: item.color || '', size: item.size || '', qty: 0 });
       }
       const agg = map.get(item.barcode);
-      agg.qty += 1;
+      agg.qty += (item.qty || 1);
       if (!agg.productName && item.productName) agg.productName = item.productName;
       if (!agg.gender && item.gender) agg.gender = item.gender;
       if (!agg.color && item.color) agg.color = item.color;
@@ -1186,6 +1200,77 @@ function showProductDialog(barcode, prefilledInfo, onConfirm) {
   backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
 }
 
+// Edit item dialog
+function showEditItemDialog(boxId, scanId) {
+  const box = BoxManager.getBox(boxId);
+  if (!box) return;
+  const item = box.items.find(i => i.scanId === scanId);
+  if (!item) return;
+  const qty = item.qty || 1;
+
+  const backdrop = document.createElement('div');
+  backdrop.className = 'dialog-backdrop';
+  backdrop.innerHTML = `
+    <div class="dialog">
+      <h3>編輯商品</h3>
+      <div style="font-size:.82rem;color:var(--text-muted);margin-bottom:12px;font-family:'SF Mono','Fira Code',monospace">${escHtml(item.barcode)}</div>
+      <div class="dialog-form">
+        <div>
+          <label>品名</label>
+          <input type="text" id="edit-product-name" value="${escHtml(item.productName || '')}" placeholder="例：第五代溫灸刷毛圓領發熱衣">
+        </div>
+        <div class="form-row">
+          <div>
+            <label>性別</label>
+            <select id="edit-gender">
+              <option value="">請選擇</option>
+              <option value="男"${item.gender === '男' ? ' selected' : ''}>男</option>
+              <option value="女"${item.gender === '女' ? ' selected' : ''}>女</option>
+              <option value="中性"${item.gender === '中性' ? ' selected' : ''}>中性</option>
+            </select>
+          </div>
+          <div>
+            <label>顏色</label>
+            <input type="text" id="edit-color" value="${escHtml(item.color || '')}" placeholder="例：經典黑">
+          </div>
+        </div>
+        <div class="form-row">
+          <div>
+            <label>尺寸</label>
+            <input type="text" id="edit-size" value="${escHtml(item.size || '')}" placeholder="例：L、XL">
+          </div>
+          <div>
+            <label>數量</label>
+            <input type="number" id="edit-qty" value="${qty}" min="1" max="9999" style="text-align:center">
+          </div>
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <button class="btn btn-outline btn-sm dialog-cancel">取消</button>
+        <button class="btn btn-primary btn-sm dialog-confirm">儲存</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  setTimeout(() => backdrop.querySelector('#edit-product-name').focus(), 100);
+
+  backdrop.querySelector('.dialog-cancel').addEventListener('click', () => backdrop.remove());
+  backdrop.querySelector('.dialog-confirm').addEventListener('click', () => {
+    const updates = {
+      productName: backdrop.querySelector('#edit-product-name').value.trim(),
+      gender: backdrop.querySelector('#edit-gender').value,
+      color: backdrop.querySelector('#edit-color').value.trim(),
+      size: backdrop.querySelector('#edit-size').value.trim(),
+      qty: Math.max(1, parseInt(backdrop.querySelector('#edit-qty').value, 10) || 1)
+    };
+    backdrop.remove();
+    BoxManager.updateItem(boxId, scanId, updates);
+    showToast('商品已更新', 'success');
+    renderScanList();
+  });
+  backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
+}
+
 // Manual barcode input
 document.getElementById('btn-add-manual').addEventListener('click', () => {
   const input = document.getElementById('input-manual-barcode');
@@ -1231,7 +1316,8 @@ function renderBoxTabs() {
     tab.className = 'box-tab' +
       (state.currentBoxId === box.id ? ' active' : '') +
       (box.status === 'closed' ? ' closed' : '');
-    tab.textContent = box.id + (box.status === 'closed' ? ' ✓' : ` (${box.items.length})`);
+    const boxTotalQty = box.items.reduce((s, i) => s + (i.qty || 1), 0);
+    tab.textContent = box.id + (box.status === 'closed' ? ' ✓' : ` (${boxTotalQty})`);
     tab.addEventListener('click', () => {
       state.currentBoxId = box.id;
       persist();
@@ -1366,26 +1452,36 @@ function renderScanList() {
     return;
   }
 
-  count.textContent = box.items.length;
+  const totalQty = box.items.reduce((s, i) => s + (i.qty || 1), 0);
+  count.textContent = totalQty;
   list.innerHTML = '';
 
   // Show in reverse order (newest first)
   for (let i = box.items.length - 1; i >= 0; i--) {
     const item = box.items[i];
     const li = document.createElement('li');
-    const canDelete = box.status === 'open';
+    const canEdit = box.status === 'open';
+    const itemQty = item.qty || 1;
     const details = [item.gender, item.color, item.size].filter(Boolean);
     li.innerHTML = `
       <div class="scan-item-info">
-        <div class="scan-item-barcode">${escHtml(item.barcode)}</div>
+        <div class="scan-item-barcode">${escHtml(item.barcode)}${itemQty > 1 ? ` <span style="color:var(--primary-dark);font-size:.82rem">×${itemQty}</span>` : ''}</div>
         ${item.productName ? `<div class="scan-item-name">${escHtml(item.productName)}</div>` : ''}
         ${details.length ? `<div class="scan-item-detail">${details.map(d => `<span>${escHtml(d)}</span>`).join('')}</div>` : ''}
       </div>
       <span class="scan-item-time">${new Date(item.scannedAt).toLocaleTimeString('zh-TW')}</span>
-      ${canDelete ? `<button class="btn btn-danger btn-sm btn-delete-item" data-scan-id="${item.scanId}">刪除</button>` : ''}
+      ${canEdit ? `<button class="btn btn-outline btn-sm btn-edit-item" data-scan-id="${item.scanId}" style="padding:6px 10px">✎</button>` : ''}
+      ${canEdit ? `<button class="btn btn-danger btn-sm btn-delete-item" data-scan-id="${item.scanId}" style="padding:6px 10px">✕</button>` : ''}
     `;
     list.appendChild(li);
   }
+
+  // Bind edit buttons
+  list.querySelectorAll('.btn-edit-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      showEditItemDialog(box.id, btn.dataset.scanId);
+    });
+  });
 
   // Bind delete buttons
   list.querySelectorAll('.btn-delete-item').forEach(btn => {
