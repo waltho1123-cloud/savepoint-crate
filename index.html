@@ -566,13 +566,13 @@ body {
   }
 }
 </style>
+<script src="config.js"></script>
 </head>
 <body>
 
 <header class="header">
   <h1>IPAS 庫存盤點裝箱系統</h1>
   <div class="header-actions">
-    <button class="btn btn-sm btn-outline" style="color:#fff;border-color:rgba(255,255,255,.4)" onclick="promptApiKey()">⚙️</button>
     <button class="btn btn-sm btn-outline" style="color:#fff;border-color:rgba(255,255,255,.4)" onclick="confirmClearAll()">清除資料</button>
   </div>
 </header>
@@ -868,7 +868,7 @@ const CameraEngine = {
 
 // ========== OCREngine (Direct OpenAI Vision + n8n Google Sheets sync) ==========
 const OCREngine = {
-  get API_KEY() { return localStorage.getItem('openai_api_key') || ''; },
+  get API_KEY() { return (typeof OPENAI_API_KEY !== 'undefined' && OPENAI_API_KEY) || ''; },
   N8N_SAVE_URL: 'https://waltho1123.zeabur.app/webhook/ipas-save-product',
 
   async recognize(imageDataUrl, boxId) {
@@ -1615,16 +1615,6 @@ function showDialog(title, message, onConfirm) {
     onConfirm();
   });
   backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
-}
-
-function promptApiKey() {
-  const current = localStorage.getItem('openai_api_key') || '';
-  const masked = current ? current.substring(0, 8) + '...' + current.substring(current.length - 4) : '（未設定）';
-  const key = prompt('請輸入 OpenAI API Key\n\n目前：' + masked, current);
-  if (key !== null && key.trim()) {
-    localStorage.setItem('openai_api_key', key.trim());
-    showToast('API Key 已儲存', 'success');
-  }
 }
 
 function confirmClearAll() {
