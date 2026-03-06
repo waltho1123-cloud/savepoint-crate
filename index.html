@@ -251,6 +251,7 @@ body {
   transition: all .15s;
 }
 .scan-list li:hover { background: rgba(255,255,255,.65); }
+.scan-item-seq { font-weight: 700; font-size: .82rem; color: var(--text-muted); min-width: 22px; text-align: center; }
 .scan-item-info { flex: 1; min-width: 0; }
 .scan-item-barcode {
   font-weight: 700;
@@ -571,6 +572,7 @@ body {
 <header class="header">
   <h1>IPAS 庫存盤點裝箱系統</h1>
   <div class="header-actions">
+    <button class="btn btn-sm btn-outline" style="color:#fff;border-color:rgba(255,255,255,.4)" onclick="promptApiKey()">⚙️</button>
     <button class="btn btn-sm btn-outline" style="color:#fff;border-color:rgba(255,255,255,.4)" onclick="confirmClearAll()">清除資料</button>
   </div>
 </header>
@@ -864,25 +866,81 @@ const CameraEngine = {
   }
 };
 
-// ========== OCREngine (n8n + OpenAI Vision) ==========
+// ========== OCREngine (Direct OpenAI Vision + n8n Google Sheets sync) ==========
 const OCREngine = {
-  WEBHOOK_URL: 'https://waltho1123.zeabur.app/webhook/barcode-label-ocr',
+  get API_KEY() { return localStorage.getItem('openai_api_key') || ''; },
+  N8N_SAVE_URL: 'https://waltho1123.zeabur.app/webhook/ipas-save-product',
 
   async recognize(imageDataUrl, boxId) {
     if (!imageDataUrl) return null;
+    if (!this.API_KEY) {
+      showToast('請先設定 OpenAI API Key（點右上角 ⚙️）', 'error');
+      return null;
+    }
     try {
-      const resp = await fetch(this.WEBHOOK_URL, {
+      const resp = await fetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ barcode: '', boxId: boxId || '', image: imageDataUrl })
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + this.API_KEY
+        },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          max_tokens: 300,
+          temperature: 0.1,
+          messages: [
+            {
+              role: 'system',
+              content: '你是專業的商品條碼標籤 OCR 辨識系統。請辨識商品條碼標籤上印刷的文字資訊。\n\n標籤有多種格式，以下是常見範例：\n\n【格式A】分行排列：\n條碼編號（純數字）\n商品品名\n性別　顏色+尺寸\n[一維條碼圖形]\n範例：「1801080204 / 第五代溫灸刷毛圓領發熱衣 / 女　經典黑L」\n\n【格式B】品名後括號內含所有屬性：\n條碼編號\n商品品名(顏色 性別 尺寸)\n[一維條碼圖形]\n範例：「1801472364 / 搖粒絨極暖衝鋒褲(星夜黑 男女共版 L)」\n\n【格式C】括號內用連字號分隔：\n[一維條碼圖形]\n條碼編號\n商品品名(性別-顏色 尺寸)\n範例：「1801872396 / 熱導石墨烯輕羽絨衣(中性-晨霧灰 2XL)」\n\n【格式D】括號內顏色+性別尺寸連寫：\n商品品名(顏色 性別+尺寸)\n[一維條碼圖形]\n條碼編號\n範例：「素面防曬排汗短版涼感衣(戀愛粉 女XL) / 1037720345」\n\n請辨識並回傳以下欄位（純 JSON，不含 markdown 標記）：\n{"barcode":"條碼數字編號","productName":"商品名稱（不含括號內容）","gender":"男 或 女 或 中性","color":"顏色名稱","size":"尺寸代碼"}\n\n重要規則：\n- productName 只取括號前的商品名稱，不含括號及括號內的屬性文字\n- 「男女共版」視為「中性」\n- 性別可能是：男、女、中性、男女共版\n- 尺寸為英文字母或數字（S、M、L、XL、XXL、2XL、3XL、F 等）\n- 顏色是中文描述（如「星夜黑」「晨霧灰」「戀愛粉」「經典黑」「深藍」等）\n- 括號內的分隔方式不固定：可能是空格、連字號、或直接連寫\n- 如果某欄位看不清楚或不存在，回傳空字串'
+            },
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: '請辨識這張商品條碼標籤上的所有文字資訊。'
+                },
+                {
+                  type: 'image_url',
+                  image_url: { url: imageDataUrl, detail: 'auto' }
+                }
+              ]
+            }
+          ]
+        })
       });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
-      const result = await resp.json();
-      if (result.success && result.data) return result.data;
-      return null;
+      const data = await resp.json();
+      const text = data.choices?.[0]?.message?.content || '';
+      let clean = text.trim();
+      if (clean.startsWith('```json')) clean = clean.replace(/^```json\n?/, '').replace(/\n?```$/, '');
+      else if (clean.startsWith('```')) clean = clean.replace(/^```\n?/, '').replace(/\n?```$/, '');
+      const jsonMatch = clean.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) return null;
+      return JSON.parse(jsonMatch[0]);
     } catch(e) {
       console.error('OCR API error:', e);
       return null;
+    }
+  },
+
+  // 非同步存入 Google Sheets（透過 n8n，fire-and-forget 不阻塞 UI）
+  syncToSheet(barcode, info, boxId) {
+    try {
+      fetch(this.N8N_SAVE_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          boxId: boxId || '',
+          barcode: barcode || '',
+          productName: info.productName || '',
+          gender: info.gender || '',
+          color: info.color || '',
+          size: info.size || ''
+        })
+      }).catch(e => console.warn('Google Sheets sync error (non-blocking):', e));
+    } catch(e) {
+      console.warn('Google Sheets sync error (non-blocking):', e);
     }
   }
 };
@@ -1078,6 +1136,7 @@ document.getElementById('btn-capture').addEventListener('click', async () => {
     // If barcode found and cached, auto-add
     if (barcode && state.productCache[barcode]) {
       BoxManager.addItem(box.id, barcode, state.productCache[barcode]);
+      OCREngine.syncToSheet(barcode, state.productCache[barcode], box.id);
       try { navigator.vibrate?.(100); } catch(e) {}
       showToast('掃描成功：' + barcode, 'success');
       renderScanList();
@@ -1093,6 +1152,7 @@ document.getElementById('btn-capture').addEventListener('click', async () => {
       state.productCache[confirmedBarcode] = confirmedInfo;
       persist();
       BoxManager.addItem(box.id, confirmedBarcode, confirmedInfo);
+      OCREngine.syncToSheet(confirmedBarcode, confirmedInfo, box.id);
       try { navigator.vibrate?.(100); } catch(e) {}
       showToast('已加入：' + confirmedBarcode, 'success');
       renderScanList();
@@ -1457,13 +1517,16 @@ function renderScanList() {
   list.innerHTML = '';
 
   // Show in reverse order (newest first)
+  const totalItems = box.items.length;
   for (let i = box.items.length - 1; i >= 0; i--) {
     const item = box.items[i];
+    const seqNo = i + 1;
     const li = document.createElement('li');
     const canEdit = box.status === 'open';
     const itemQty = item.qty || 1;
     const details = [item.gender, item.color, item.size].filter(Boolean);
     li.innerHTML = `
+      <span class="scan-item-seq">${seqNo}</span>
       <div class="scan-item-info">
         <div class="scan-item-barcode">${escHtml(item.barcode)}${itemQty > 1 ? ` <span style="color:var(--primary-dark);font-size:.82rem">×${itemQty}</span>` : ''}</div>
         ${item.productName ? `<div class="scan-item-name">${escHtml(item.productName)}</div>` : ''}
@@ -1552,6 +1615,16 @@ function showDialog(title, message, onConfirm) {
     onConfirm();
   });
   backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
+}
+
+function promptApiKey() {
+  const current = localStorage.getItem('openai_api_key') || '';
+  const masked = current ? current.substring(0, 8) + '...' + current.substring(current.length - 4) : '（未設定）';
+  const key = prompt('請輸入 OpenAI API Key\n\n目前：' + masked, current);
+  if (key !== null && key.trim()) {
+    localStorage.setItem('openai_api_key', key.trim());
+    showToast('API Key 已儲存', 'success');
+  }
 }
 
 function confirmClearAll() {
