@@ -1,0 +1,124 @@
+{
+  "name": "IPAS 裝箱系統 - 存入商品主檔",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ipas-save-product",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-save-001",
+      "name": "接收儲存請求",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [288, 320],
+      "webhookId": "ipas-save-product"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nreturn [{ json: {\n  序號: body.seqNo || '',\n  日期: body.date || '',\n  箱號: body.boxId || '',\n  商品編號: body.barcode || '',\n  品名: body.productName || '',\n  性別: body.gender || '',\n  顏色: body.color || '',\n  尺寸: body.size || '',\n  辨識時間: body.time || ''\n}}];"
+      },
+      "id": "code-format-001",
+      "name": "整理欄位",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [528, 320]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A",
+          "mode": "list",
+          "cachedResultName": "商品主檔",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "商品主檔",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "序號": "={{ $json['序號'] }}",
+            "日期": "={{ $json['日期'] }}",
+            "箱號": "={{ $json['箱號'] }}",
+            "商品編號": "={{ $json['商品編號'] }}",
+            "品名": "={{ $json['品名'] }}",
+            "性別": "={{ $json['性別'] }}",
+            "顏色": "={{ $json['顏色'] }}",
+            "尺寸": "={{ $json['尺寸'] }}",
+            "辨識時間": "={{ $json['辨識時間'] }}"
+          },
+          "schema": [
+            { "id": "序號", "displayName": "序號", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "日期", "displayName": "日期", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "箱號", "displayName": "箱號", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "商品編號", "displayName": "商品編號", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "品名", "displayName": "品名", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "性別", "displayName": "性別", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "顏色", "displayName": "顏色", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "尺寸", "displayName": "尺寸", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "辨識時間", "displayName": "辨識時間", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "id": "sheets-001",
+      "name": "存入商品主檔",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [784, 320]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"success\": true }",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Access-Control-Allow-Methods", "value": "POST, OPTIONS" },
+              { "name": "Access-Control-Allow-Headers", "value": "Content-Type" }
+            ]
+          }
+        }
+      },
+      "id": "resp-save-001",
+      "name": "回傳成功",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1040, 320]
+    },
+    {
+      "parameters": {
+        "content": "## IPAS 裝箱系統 - 存入商品主檔\n\n### 功能\n前端確認商品後，送序號+商品資料 → Append 到 Google Sheets\n\n### Webhook：POST /webhook/ipas-save-product\n\n### 請求：\n```json\n{\n  \"seqNo\": \"1\",\n  \"date\": \"2026/03/06\",\n  \"boxId\": \"1\",\n  \"barcode\": \"1037720345\",\n  \"productName\": \"素面防曬排汗短版涼感衣\",\n  \"gender\": \"女\",\n  \"color\": \"戀愛粉\",\n  \"size\": \"XL\",\n  \"time\": \"2026-03-06 17:40:00\"\n}\n```\n\n### Google Sheets 欄位：\n序號 | 日期 | 箱號 | 商品編號 | 品名 | 性別 | 顏色 | 尺寸 | 辨識時間\n\n### 需設定：\n1. Google Sheets OAuth 憑證\n\n### 序號來源：\n由前端掃描清單的序號直接傳入（box.items.length）"
+      },
+      "id": "note-save-001",
+      "name": "系統說明",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "size": [420, 420]
+    }
+  ],
+  "connections": {
+    "接收儲存請求": {
+      "main": [[{ "node": "整理欄位", "type": "main", "index": 0 }]]
+    },
+    "整理欄位": {
+      "main": [[
+        { "node": "存入商品主檔", "type": "main", "index": 0 },
+        { "node": "回傳成功", "type": "main", "index": 0 }
+      ]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -765,6 +765,8 @@ const BoxManager = {
     };
     box.items.push(item);
     persist();
+    // 自動同步到 Google Sheets，序號 = 目前清單長度
+    OCREngine.syncToSheet(boxId, box.items.length, item);
     return item;
   },
   removeItem(boxId, scanId) {
@@ -865,9 +867,10 @@ const CameraEngine = {
   }
 };
 
-// ========== OCREngine (n8n OpenAI proxy + Google Sheets) ==========
+// ========== OCREngine (n8n OpenAI proxy) ==========
 const OCREngine = {
   OCR_URL: 'https://waltho1123.zeabur.app/webhook/ipas-ocr',
+  SAVE_URL: 'https://waltho1123.zeabur.app/webhook/ipas-save-product',
 
   async recognize(imageDataUrl, boxId) {
     if (!imageDataUrl) return null;
@@ -885,6 +888,29 @@ const OCREngine = {
       console.error('OCR API error:', e);
       return null;
     }
+  },
+
+  syncToSheet(boxId, seqNo, item) {
+    const now = new Date();
+    const taipeiOffset = now.getTime() + 8 * 60 * 60 * 1000;
+    const taipeiTime = new Date(taipeiOffset);
+    const dateOnly = taipeiTime.toISOString().substring(0, 10).replace(/-/g, '/');
+    const fullTime = taipeiTime.toISOString().replace('T', ' ').substring(0, 19);
+    fetch(this.SAVE_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        seqNo: String(seqNo),
+        date: dateOnly,
+        boxId: boxId,
+        barcode: item.barcode,
+        productName: item.productName,
+        gender: item.gender,
+        color: item.color,
+        size: item.size,
+        time: fullTime
+      })
+    }).catch(e => console.error('Sheets sync error:', e));
   }
 };
 
