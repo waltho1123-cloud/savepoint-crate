@@ -1,0 +1,114 @@
+{
+  "name": "IPAS 裝箱系統 - OCR 辨識代理（薄代理）",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ipas-ocr",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wh-ocr-001",
+      "name": "接收辨識請求",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [288, 320],
+      "webhookId": "ipas-ocr"
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst imageDataUrl = body.image || '';\nif (!imageDataUrl) throw new Error('缺少 image 欄位');\n\nlet base64String, mimeType;\nif (imageDataUrl.startsWith('data:')) {\n  const match = imageDataUrl.match(/^data:(.+?);base64,(.+)$/);\n  if (match) { mimeType = match[1]; base64String = match[2]; }\n  else throw new Error('無效的 data URL');\n} else { base64String = imageDataUrl; mimeType = 'image/jpeg'; }\n\nconst prompt = '你是專業的商品條碼標籤 OCR 辨識系統。請辨識商品條碼標籤上印刷的文字資訊。\\n\\n標籤有多種格式，以下是常見範例：\\n\\n【格式A】分行排列：\\n條碼編號（純數字）\\n商品品名\\n性別　顏色+尺寸\\n[一維條碼圖形]\\n範例：「1801080204 / 第五代溫灸刷毛圓領發熱衣 / 女　經典黑L」\\n\\n【格式B】品名後括號內含所有屬性：\\n條碼編號\\n商品品名(顏色 性別 尺寸)\\n[一維條碼圖形]\\n範例：「1801472364 / 搖粒絨極暖衝鋒褲(星夜黑 男女共版 L)」\\n\\n【格式C】括號內用連字號分隔：\\n[一維條碼圖形]\\n條碼編號\\n商品品名(性別-顏色 尺寸)\\n範例：「1801872396 / 熱導石墨烯輕羽絨衣(中性-晨霧灰 2XL)」\\n\\n【格式D】括號內顏色+性別尺寸連寫：\\n商品品名(顏色 性別+尺寸)\\n[一維條碼圖形]\\n條碼編號\\n範例：「素面防曬排汗短版涼感衣(戀愛粉 女XL) / 1037720345」\\n\\n請辨識並回傳以下欄位（純 JSON，不含 markdown 標記）：\\n{\"barcode\":\"條碼數字編號\",\"productName\":\"商品名稱（不含括號內容）\",\"gender\":\"男 或 女 或 中性\",\"color\":\"顏色名稱\",\"size\":\"尺寸代碼\"}\\n\\n重要規則：\\n- productName 只取括號前的商品名稱，不含括號及括號內的屬性文字\\n- 「男女共版」視為「中性」\\n- 性別可能是：男、女、中性、男女共版\\n- 尺寸為英文字母或數字（S、M、L、XL、XXL、2XL、3XL、F 等）\\n- 顏色是中文描述（如「星夜黑」「晨霧灰」「戀愛粉」「經典黑」「深藍」等）\\n- 括號內的分隔方式不固定：可能是空格、連字號、或直接連寫\\n- 如果某欄位看不清楚或不存在，回傳空字串';\n\nreturn [{\n  json: {\n    requestBody: JSON.stringify({\n      model: 'gpt-4o-mini',\n      max_tokens: 300,\n      temperature: 0.1,\n      messages: [\n        { role: 'system', content: prompt },\n        { role: 'user', content: [\n          { type: 'text', text: '請辨識這張商品條碼標籤上的所有文字資訊。' },\n          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64String}`, detail: 'auto' } }\n        ]}\n      ]\n    })\n  }\n}];"
+      },
+      "id": "code-ocr-001",
+      "name": "組裝請求",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [528, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "application/json",
+        "body": "={{ $json.requestBody }}",
+        "options": { "timeout": 30000 }
+      },
+      "id": "http-ocr-001",
+      "name": "OpenAI Vision",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [784, 320],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 1000
+    },
+    {
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst content = response.choices[0].message.content;\nlet clean = content.trim();\nif (clean.startsWith('```json')) clean = clean.replace(/^```json\\n?/, '').replace(/\\n?```$/, '');\nelse if (clean.startsWith('```')) clean = clean.replace(/^```\\n?/, '').replace(/\\n?```$/, '');\nlet data;\ntry { data = JSON.parse(clean); } catch(e) {\n  const m = clean.match(/\\{[\\s\\S]*\\}/);\n  if (m) data = JSON.parse(m[0]); else throw new Error('OCR parse fail');\n}\nif (data['男女共版']) data.gender = '中性';\nreturn [{ json: {\n  barcode: data.barcode || '',\n  productName: data.productName || '',\n  gender: data.gender || '',\n  color: data.color || '',\n  size: data.size || ''\n}}];"
+      },
+      "id": "code-parse-001",
+      "name": "解析結果",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1040, 320]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"data\": {\n    \"barcode\": \"{{ $json.barcode }}\",\n    \"productName\": \"{{ $json.productName }}\",\n    \"gender\": \"{{ $json.gender }}\",\n    \"color\": \"{{ $json.color }}\",\n    \"size\": \"{{ $json.size }}\"\n  }\n}",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              { "name": "Access-Control-Allow-Origin", "value": "*" },
+              { "name": "Access-Control-Allow-Methods", "value": "POST, OPTIONS" },
+              { "name": "Access-Control-Allow-Headers", "value": "Content-Type" }
+            ]
+          }
+        }
+      },
+      "id": "resp-001",
+      "name": "回傳結果",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1296, 320]
+    },
+    {
+      "parameters": {
+        "content": "## 📦 IPAS OCR 辨識代理（薄代理）\n\n### 📌 功能\n前端送圖片 → n8n 轉發 OpenAI Vision → 回傳解析結果\nAPI Key 安全存在 n8n，前端不需要任何密鑰。\n\n### 🌐 Webhook：POST /webhook/ipas-ocr\n\n### 📨 請求：{ \"image\": \"data:image/jpeg;base64,...\", \"boxId\": \"BOX-001\" }\n### 📤 回傳：{ \"success\": true, \"data\": { barcode, productName, gender, color, size } }\n\n### ⚙️ 只需設定 OpenAI API 憑證（openAiApi）"
+      },
+      "id": "note-001",
+      "name": "說明",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "size": [460, 340]
+    }
+  ],
+  "connections": {
+    "接收辨識請求": {
+      "main": [[{ "node": "組裝請求", "type": "main", "index": 0 }]]
+    },
+    "組裝請求": {
+      "main": [[{ "node": "OpenAI Vision", "type": "main", "index": 0 }]]
+    },
+    "OpenAI Vision": {
+      "main": [[{ "node": "解析結果", "type": "main", "index": 0 }]]
+    },
+    "解析結果": {
+      "main": [[{ "node": "回傳結果", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
