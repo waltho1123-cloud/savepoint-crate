@@ -1,5 +1,5 @@
 {
-  "name": "IPAS 裝箱系統 - OCR 辨識代理（薄代理）",
+  "name": "IPAS 裝箱系統 - OCR 辨識 + 商品主檔",
   "nodes": [
     {
       "parameters": {
@@ -17,7 +17,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst imageDataUrl = body.image || '';\nif (!imageDataUrl) throw new Error('缺少 image 欄位');\n\nlet base64String, mimeType;\nif (imageDataUrl.startsWith('data:')) {\n  const match = imageDataUrl.match(/^data:(.+?);base64,(.+)$/);\n  if (match) { mimeType = match[1]; base64String = match[2]; }\n  else throw new Error('無效的 data URL');\n} else { base64String = imageDataUrl; mimeType = 'image/jpeg'; }\n\nconst prompt = '你是專業的商品條碼標籤 OCR 辨識系統。請辨識商品條碼標籤上印刷的文字資訊。\\n\\n標籤有多種格式，以下是常見範例：\\n\\n【格式A】分行排列：\\n條碼編號（純數字）\\n商品品名\\n性別　顏色+尺寸\\n[一維條碼圖形]\\n範例：「1801080204 / 第五代溫灸刷毛圓領發熱衣 / 女　經典黑L」\\n\\n【格式B】品名後括號內含所有屬性：\\n條碼編號\\n商品品名(顏色 性別 尺寸)\\n[一維條碼圖形]\\n範例：「1801472364 / 搖粒絨極暖衝鋒褲(星夜黑 男女共版 L)」\\n\\n【格式C】括號內用連字號分隔：\\n[一維條碼圖形]\\n條碼編號\\n商品品名(性別-顏色 尺寸)\\n範例：「1801872396 / 熱導石墨烯輕羽絨衣(中性-晨霧灰 2XL)」\\n\\n【格式D】括號內顏色+性別尺寸連寫：\\n商品品名(顏色 性別+尺寸)\\n[一維條碼圖形]\\n條碼編號\\n範例：「素面防曬排汗短版涼感衣(戀愛粉 女XL) / 1037720345」\\n\\n請辨識並回傳以下欄位（純 JSON，不含 markdown 標記）：\\n{\"barcode\":\"條碼數字編號\",\"productName\":\"商品名稱（不含括號內容）\",\"gender\":\"男 或 女 或 中性\",\"color\":\"顏色名稱\",\"size\":\"尺寸代碼\"}\\n\\n重要規則：\\n- productName 只取括號前的商品名稱，不含括號及括號內的屬性文字\\n- 「男女共版」視為「中性」\\n- 性別可能是：男、女、中性、男女共版\\n- 尺寸為英文字母或數字（S、M、L、XL、XXL、2XL、3XL、F 等）\\n- 顏色是中文描述（如「星夜黑」「晨霧灰」「戀愛粉」「經典黑」「深藍」等）\\n- 括號內的分隔方式不固定：可能是空格、連字號、或直接連寫\\n- 如果某欄位看不清楚或不存在，回傳空字串';\n\nreturn [{\n  json: {\n    requestBody: JSON.stringify({\n      model: 'gpt-4o-mini',\n      max_tokens: 300,\n      temperature: 0.1,\n      messages: [\n        { role: 'system', content: prompt },\n        { role: 'user', content: [\n          { type: 'text', text: '請辨識這張商品條碼標籤上的所有文字資訊。' },\n          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64String}`, detail: 'auto' } }\n        ]}\n      ]\n    })\n  }\n}];"
+        "jsCode": "const body = $input.first().json.body || $input.first().json;\nconst imageDataUrl = body.image || '';\nconst boxId = body.boxId || '';\nif (!imageDataUrl) throw new Error('缺少 image 欄位');\n\nlet base64String, mimeType;\nif (imageDataUrl.startsWith('data:')) {\n  const match = imageDataUrl.match(/^data:(.+?);base64,(.+)$/);\n  if (match) { mimeType = match[1]; base64String = match[2]; }\n  else throw new Error('無效的 data URL');\n} else { base64String = imageDataUrl; mimeType = 'image/jpeg'; }\n\nconst prompt = '你是專業的商品條碼標籤 OCR 辨識系統。請辨識商品條碼標籤上印刷的文字資訊。\\n\\n標籤有多種格式，以下是常見範例：\\n\\n【格式A】分行排列：\\n條碼編號（純數字）\\n商品品名\\n性別　顏色+尺寸\\n[一維條碼圖形]\\n範例：「1801080204 / 第五代溫灸刷毛圓領發熱衣 / 女　經典黑L」\\n\\n【格式B】品名後括號內含所有屬性：\\n條碼編號\\n商品品名(顏色 性別 尺寸)\\n[一維條碼圖形]\\n範例：「1801472364 / 搖粒絨極暖衝鋒褲(星夜黑 男女共版 L)」\\n\\n【格式C】括號內用連字號分隔：\\n[一維條碼圖形]\\n條碼編號\\n商品品名(性別-顏色 尺寸)\\n範例：「1801872396 / 熱導石墨烯輕羽絨衣(中性-晨霧灰 2XL)」\\n\\n【格式D】括號內顏色+性別尺寸連寫：\\n商品品名(顏色 性別+尺寸)\\n[一維條碼圖形]\\n條碼編號\\n範例：「素面防曬排汗短版涼感衣(戀愛粉 女XL) / 1037720345」\\n\\n請辨識並回傳以下欄位（純 JSON，不含 markdown 標記）：\\n{\"barcode\":\"條碼數字編號\",\"productName\":\"商品名稱（不含括號內容）\",\"gender\":\"男 或 女 或 中性\",\"color\":\"顏色名稱\",\"size\":\"尺寸代碼\"}\\n\\n重要規則：\\n- productName 只取括號前的商品名稱，不含括號及括號內的屬性文字\\n- 「男女共版」視為「中性」\\n- 性別可能是：男、女、中性、男女共版\\n- 尺寸為英文字母或數字（S、M、L、XL、XXL、2XL、3XL、F 等）\\n- 顏色是中文描述（如「星夜黑」「晨霧灰」「戀愛粉」「經典黑」「深藍」等）\\n- 括號內的分隔方式不固定：可能是空格、連字號、或直接連寫\\n- 如果某欄位看不清楚或不存在，回傳空字串';\n\nreturn [{\n  json: {\n    boxId,\n    requestBody: JSON.stringify({\n      model: 'gpt-4o-mini',\n      max_tokens: 300,\n      temperature: 0.1,\n      messages: [\n        { role: 'system', content: prompt },\n        { role: 'user', content: [\n          { type: 'text', text: '請辨識這張商品條碼標籤上的所有文字資訊。' },\n          { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64String}`, detail: 'auto' } }\n        ]}\n      ]\n    })\n  }\n}];"
       },
       "id": "code-ocr-001",
       "name": "組裝請求",
@@ -54,7 +54,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const response = $input.first().json;\nconst content = response.choices[0].message.content;\nlet clean = content.trim();\nif (clean.startsWith('```json')) clean = clean.replace(/^```json\\n?/, '').replace(/\\n?```$/, '');\nelse if (clean.startsWith('```')) clean = clean.replace(/^```\\n?/, '').replace(/\\n?```$/, '');\nlet data;\ntry { data = JSON.parse(clean); } catch(e) {\n  const m = clean.match(/\\{[\\s\\S]*\\}/);\n  if (m) data = JSON.parse(m[0]); else throw new Error('OCR parse fail');\n}\nif (data['男女共版']) data.gender = '中性';\nreturn [{ json: {\n  barcode: data.barcode || '',\n  productName: data.productName || '',\n  gender: data.gender || '',\n  color: data.color || '',\n  size: data.size || ''\n}}];"
+        "jsCode": "const response = $input.first().json;\nconst boxId = $('組裝請求').first().json.boxId;\nconst content = response.choices[0].message.content;\nlet clean = content.trim();\nif (clean.startsWith('```json')) clean = clean.replace(/^```json\\n?/, '').replace(/\\n?```$/, '');\nelse if (clean.startsWith('```')) clean = clean.replace(/^```\\n?/, '').replace(/\\n?```$/, '');\nlet data;\ntry { data = JSON.parse(clean); } catch(e) {\n  const m = clean.match(/\\{[\\s\\S]*\\}/);\n  if (m) data = JSON.parse(m[0]); else throw new Error('OCR parse fail');\n}\nconst gender = (data.gender === '男女共版') ? '中性' : (data.gender || '');\n\n// 台北時間\nconst now = new Date();\nconst taipeiTime = new Date(now.getTime() + 8*60*60*1000);\nconst dateOnly = taipeiTime.toISOString().substring(0, 10).replace(/-/g, '/');\nconst fullTime = taipeiTime.toISOString().replace('T', ' ').substring(0, 19);\n\nreturn [{ json: {\n  barcode: data.barcode || '',\n  productName: data.productName || '',\n  gender: gender,\n  color: data.color || '',\n  size: data.size || '',\n  boxId: boxId,\n  日期: dateOnly,\n  辨識時間: fullTime\n}}];"
       },
       "id": "code-parse-001",
       "name": "解析結果",
@@ -80,18 +80,68 @@
       "name": "回傳結果",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [1296, 320]
+      "position": [1296, 224]
     },
     {
       "parameters": {
-        "content": "## 📦 IPAS OCR 辨識代理（薄代理）\n\n### 📌 功能\n前端送圖片 → n8n 轉發 OpenAI Vision → 回傳解析結果\nAPI Key 安全存在 n8n，前端不需要任何密鑰。\n\n### 🌐 Webhook：POST /webhook/ipas-ocr\n\n### 📨 請求：{ \"image\": \"data:image/jpeg;base64,...\", \"boxId\": \"BOX-001\" }\n### 📤 回傳：{ \"success\": true, \"data\": { barcode, productName, gender, color, size } }\n\n### ⚙️ 只需設定 OpenAI API 憑證（openAiApi）"
+        "operation": "appendOrUpdate",
+        "documentId": {
+          "__rl": true,
+          "value": "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A",
+          "mode": "list",
+          "cachedResultName": "商品主檔",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "商品主檔",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "日期": "={{ $json['日期'] }}",
+            "箱號": "={{ $json.boxId }}",
+            "商品編號": "={{ $json.barcode }}",
+            "品名": "={{ $json.productName }}",
+            "性別": "={{ $json.gender }}",
+            "顏色": "={{ $json.color }}",
+            "尺寸": "={{ $json.size }}",
+            "辨識時間": "={{ $json['辨識時間'] }}"
+          },
+          "matchingColumns": ["箱號", "商品編號"],
+          "schema": [
+            { "id": "序號", "displayName": "序號", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "日期", "displayName": "日期", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "箱號", "displayName": "箱號", "required": false, "defaultMatch": true, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "商品編號", "displayName": "商品編號", "required": false, "defaultMatch": true, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "品名", "displayName": "品名", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "性別", "displayName": "性別", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "顏色", "displayName": "顏色", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "尺寸", "displayName": "尺寸", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true },
+            { "id": "辨識時間", "displayName": "辨識時間", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": true
+        },
+        "options": {}
+      },
+      "id": "sheets-001",
+      "name": "存入商品主檔",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [1296, 432]
+    },
+    {
+      "parameters": {
+        "content": "## 📦 IPAS 裝箱系統 - OCR 辨識 + 商品主檔\n\n### 📌 功能\n前端送圖片 → OpenAI Vision OCR → 同時：\n1. 回傳辨識結果給前端\n2. 存入 Google Sheets 商品主檔\n\n### 🌐 Webhook：POST /webhook/ipas-ocr\n\n### 📨 請求：\n```json\n{ \"image\": \"data:image/jpeg;base64,...\", \"boxId\": \"BOX-001\" }\n```\n\n### 📤 回傳：\n```json\n{ \"success\": true, \"data\": { barcode, productName, gender, color, size } }\n```\n\n### 📋 Google Sheets 欄位：\n序號(公式) | 日期 | 箱號 | 商品編號 | 品名 | 性別 | 顏色 | 尺寸 | 辨識時間\n\n### ⚙️ 需設定：\n1. OpenAI API 憑證（openAiApi）\n2. Google Sheets OAuth 憑證\n3. 序號公式：A2 = =IF(B2=\"\",,ROW()-1)"
       },
       "id": "note-001",
-      "name": "說明",
+      "name": "系統說明",
       "type": "n8n-nodes-base.stickyNote",
       "typeVersion": 1,
       "position": [0, 0],
-      "size": [460, 340]
+      "size": [460, 480]
     }
   ],
   "connections": {
@@ -105,7 +155,10 @@
       "main": [[{ "node": "解析結果", "type": "main", "index": 0 }]]
     },
     "解析結果": {
-      "main": [[{ "node": "回傳結果", "type": "main", "index": 0 }]]
+      "main": [[
+        { "node": "回傳結果", "type": "main", "index": 0 },
+        { "node": "存入商品主檔", "type": "main", "index": 0 }
+      ]]
     }
   },
   "settings": {

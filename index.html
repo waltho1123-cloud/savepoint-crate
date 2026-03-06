@@ -865,10 +865,9 @@ const CameraEngine = {
   }
 };
 
-// ========== OCREngine (n8n OpenAI proxy + Google Sheets sync) ==========
+// ========== OCREngine (n8n OpenAI proxy + Google Sheets) ==========
 const OCREngine = {
   OCR_URL: 'https://waltho1123.zeabur.app/webhook/ipas-ocr',
-  N8N_SAVE_URL: 'https://waltho1123.zeabur.app/webhook/ipas-save-product',
 
   async recognize(imageDataUrl, boxId) {
     if (!imageDataUrl) return null;
@@ -885,26 +884,6 @@ const OCREngine = {
     } catch(e) {
       console.error('OCR API error:', e);
       return null;
-    }
-  },
-
-  // 非同步存入 Google Sheets（透過 n8n，fire-and-forget 不阻塞 UI）
-  syncToSheet(barcode, info, boxId) {
-    try {
-      fetch(this.N8N_SAVE_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          boxId: boxId || '',
-          barcode: barcode || '',
-          productName: info.productName || '',
-          gender: info.gender || '',
-          color: info.color || '',
-          size: info.size || ''
-        })
-      }).catch(e => console.warn('Google Sheets sync error (non-blocking):', e));
-    } catch(e) {
-      console.warn('Google Sheets sync error (non-blocking):', e);
     }
   }
 };
@@ -1100,7 +1079,7 @@ document.getElementById('btn-capture').addEventListener('click', async () => {
     // If barcode found and cached, auto-add
     if (barcode && state.productCache[barcode]) {
       BoxManager.addItem(box.id, barcode, state.productCache[barcode]);
-      OCREngine.syncToSheet(barcode, state.productCache[barcode], box.id);
+
       try { navigator.vibrate?.(100); } catch(e) {}
       showToast('掃描成功：' + barcode, 'success');
       renderScanList();
@@ -1116,7 +1095,7 @@ document.getElementById('btn-capture').addEventListener('click', async () => {
       state.productCache[confirmedBarcode] = confirmedInfo;
       persist();
       BoxManager.addItem(box.id, confirmedBarcode, confirmedInfo);
-      OCREngine.syncToSheet(confirmedBarcode, confirmedInfo, box.id);
+
       try { navigator.vibrate?.(100); } catch(e) {}
       showToast('已加入：' + confirmedBarcode, 'success');
       renderScanList();
