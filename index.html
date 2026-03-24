@@ -251,7 +251,6 @@ body {
   transition: all .15s;
 }
 .scan-list li:hover { background: rgba(255,255,255,.65); }
-.scan-item-seq { font-weight: 700; font-size: .82rem; color: var(--text-muted); min-width: 22px; text-align: center; }
 .scan-item-info { flex: 1; min-width: 0; }
 .scan-item-barcode {
   font-weight: 700;
@@ -765,8 +764,6 @@ const BoxManager = {
     };
     box.items.push(item);
     persist();
-    // 自動同步到 Google Sheets，序號 = 目前清單長度
-    OCREngine.syncToSheet(boxId, box.items.length, item);
     return item;
   },
   removeItem(boxId, scanId) {
@@ -867,18 +864,17 @@ const CameraEngine = {
   }
 };
 
-// ========== OCREngine (n8n OpenAI proxy) ==========
+// ========== OCREngine (n8n + OpenAI Vision) ==========
 const OCREngine = {
-  OCR_URL: 'https://waltho1123.zeabur.app/webhook/ipas-ocr',
-  SAVE_URL: 'https://waltho1123.zeabur.app/webhook/ipas-save-product',
+  WEBHOOK_URL: 'https://waltho1123.zeabur.app/webhook/barcode-label-ocr',
 
   async recognize(imageDataUrl, boxId) {
     if (!imageDataUrl) return null;
     try {
-      const resp = await fetch(this.OCR_URL, {
+      const resp = await fetch(this.WEBHOOK_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: imageDataUrl, boxId: boxId || '' })
+        body: JSON.stringify({ barcode: '', boxId: boxId || '', image: imageDataUrl })
       });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const result = await resp.json();
@@ -888,29 +884,6 @@ const OCREngine = {
       console.error('OCR API error:', e);
       return null;
     }
-  },
-
-  syncToSheet(boxId, seqNo, item) {
-    const now = new Date();
-    const taipeiOffset = now.getTime() + 8 * 60 * 60 * 1000;
-    const taipeiTime = new Date(taipeiOffset);
-    const dateOnly = taipeiTime.toISOString().substring(0, 10).replace(/-/g, '/');
-    const fullTime = taipeiTime.toISOString().replace('T', ' ').substring(0, 19);
-    fetch(this.SAVE_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        seqNo: String(seqNo),
-        date: dateOnly,
-        boxId: boxId,
-        barcode: item.barcode,
-        productName: item.productName,
-        gender: item.gender,
-        color: item.color,
-        size: item.size,
-        time: fullTime
-      })
-    }).catch(e => console.error('Sheets sync error:', e));
   }
 };
 
@@ -925,45 +898,22 @@ const SaveEngine = {
     const now = new Date();
     const taipeiOffset = 8 * 60 * 60 * 1000;
     const dateStr = new Date(now.getTime() + taipeiOffset).toISOString().split('T')[0].replace(/-/g, '/');
+    const timeStr = new Date(now.getTime() + taipeiOffset).toISOString().replace('T', ' ').substring(0, 19);
 
-    // Aggregate items by barcode within this box
-    const map = new Map();
-    for (const item of box.items) {
-      const key = item.barcode;
-      if (!map.has(key)) {
-        map.set(key, {
+    // ★ 逐筆發送，不聚合 — 尊重使用者編輯後的數量
+    for (let i = 0; i < box.items.length; i++) {
+      const item = box.items[i];
+      try {
+        const payload = {
+          seqNo: String(i + 1),
+          date: dateStr,
+          boxId: box.id,
           barcode: item.barcode,
           productName: item.productName || '',
           gender: item.gender || '',
           color: item.color || '',
           size: item.size || '',
-          qty: 0
-        });
-      }
-      const agg = map.get(key);
-      agg.qty += (item.qty || 1);
-      if (!agg.productName && item.productName) agg.productName = item.productName;
-      if (!agg.gender && item.gender) agg.gender = item.gender;
-      if (!agg.color && item.color) agg.color = item.color;
-      if (!agg.size && item.size) agg.size = item.size;
-    }
-
-    const aggItems = Array.from(map.values());
-    let seqNo = 1;
-
-    for (const agg of aggItems) {
-      try {
-        const timeStr = new Date(now.getTime() + taipeiOffset).toISOString().replace('T', ' ').substring(0, 19);
-        const payload = {
-          seqNo: String(seqNo),
-          date: dateStr,
-          boxId: box.id,
-          barcode: agg.barcode,
-          productName: agg.productName,
-          gender: agg.gender,
-          color: agg.color,
-          size: agg.size,
-          quantity: agg.qty,
+          quantity: item.qty || 1,
           time: timeStr
         };
         const resp = await fetch(this.SAVE_URL, {
@@ -973,11 +923,10 @@ const SaveEngine = {
         });
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const result = await resp.json();
-        results.push({ barcode: agg.barcode, success: result.success });
-        seqNo++;
+        results.push({ barcode: item.barcode, success: result.success });
       } catch (e) {
-        console.error('Save error for', agg.barcode, e);
-        results.push({ barcode: agg.barcode, success: false, error: e.message });
+        console.error('Save error for', item.barcode, e);
+        results.push({ barcode: item.barcode, success: false, error: e.message });
       }
     }
 
@@ -1201,7 +1150,6 @@ document.getElementById('btn-capture').addEventListener('click', async () => {
     // If barcode found and cached, auto-add
     if (barcode && state.productCache[barcode]) {
       BoxManager.addItem(box.id, barcode, state.productCache[barcode]);
-
       try { navigator.vibrate?.(100); } catch(e) {}
       showToast('掃描成功：' + barcode, 'success');
       renderScanList();
@@ -1217,7 +1165,6 @@ document.getElementById('btn-capture').addEventListener('click', async () => {
       state.productCache[confirmedBarcode] = confirmedInfo;
       persist();
       BoxManager.addItem(box.id, confirmedBarcode, confirmedInfo);
-
       try { navigator.vibrate?.(100); } catch(e) {}
       showToast('已加入：' + confirmedBarcode, 'success');
       renderScanList();
@@ -1582,16 +1529,13 @@ function renderScanList() {
   list.innerHTML = '';
 
   // Show in reverse order (newest first)
-  const totalItems = box.items.length;
   for (let i = box.items.length - 1; i >= 0; i--) {
     const item = box.items[i];
-    const seqNo = i + 1;
     const li = document.createElement('li');
     const canEdit = box.status === 'open';
     const itemQty = item.qty || 1;
     const details = [item.gender, item.color, item.size].filter(Boolean);
     li.innerHTML = `
-      <span class="scan-item-seq">${seqNo}</span>
       <div class="scan-item-info">
         <div class="scan-item-barcode">${escHtml(item.barcode)}${itemQty > 1 ? ` <span style="color:var(--primary-dark);font-size:.82rem">×${itemQty}</span>` : ''}</div>
         ${item.productName ? `<div class="scan-item-name">${escHtml(item.productName)}</div>` : ''}
