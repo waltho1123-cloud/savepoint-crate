@@ -914,6 +914,84 @@ const OCREngine = {
   }
 };
 
+// ========== SaveEngine (n8n save to Google Sheets) ==========
+const SaveEngine = {
+  SAVE_URL: 'https://waltho1123.zeabur.app/webhook/ipas-save-product',
+
+  async saveBoxItems(box) {
+    if (!box || box.items.length === 0) return { success: false, error: '無資料可儲存' };
+
+    const results = [];
+    const now = new Date();
+    const taipeiOffset = 8 * 60 * 60 * 1000;
+    const dateStr = new Date(now.getTime() + taipeiOffset).toISOString().split('T')[0].replace(/-/g, '/');
+
+    // Aggregate items by barcode within this box
+    const map = new Map();
+    for (const item of box.items) {
+      const key = item.barcode;
+      if (!map.has(key)) {
+        map.set(key, {
+          barcode: item.barcode,
+          productName: item.productName || '',
+          gender: item.gender || '',
+          color: item.color || '',
+          size: item.size || '',
+          qty: 0
+        });
+      }
+      const agg = map.get(key);
+      agg.qty += (item.qty || 1);
+      if (!agg.productName && item.productName) agg.productName = item.productName;
+      if (!agg.gender && item.gender) agg.gender = item.gender;
+      if (!agg.color && item.color) agg.color = item.color;
+      if (!agg.size && item.size) agg.size = item.size;
+    }
+
+    const aggItems = Array.from(map.values());
+    let seqNo = 1;
+
+    for (const agg of aggItems) {
+      try {
+        const timeStr = new Date(now.getTime() + taipeiOffset).toISOString().replace('T', ' ').substring(0, 19);
+        const payload = {
+          seqNo: String(seqNo),
+          date: dateStr,
+          boxId: box.id,
+          barcode: agg.barcode,
+          productName: agg.productName,
+          gender: agg.gender,
+          color: agg.color,
+          size: agg.size,
+          quantity: agg.qty,
+          time: timeStr
+        };
+        const resp = await fetch(this.SAVE_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const result = await resp.json();
+        results.push({ barcode: agg.barcode, success: result.success });
+        seqNo++;
+      } catch (e) {
+        console.error('Save error for', agg.barcode, e);
+        results.push({ barcode: agg.barcode, success: false, error: e.message });
+      }
+    }
+
+    const successCount = results.filter(r => r.success).length;
+    return {
+      success: successCount === results.length,
+      total: results.length,
+      successCount,
+      failCount: results.length - successCount,
+      results
+    };
+  }
+};
+
 // ========== PrintManager ==========
 const PrintManager = {
   _setPrintMode(mode) {
@@ -1020,12 +1098,30 @@ document.getElementById('input-box-id').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('btn-new-box').click();
 });
 
-// Close box
+// Close box — save to Google Sheets first, then close
 document.getElementById('btn-close-box').addEventListener('click', () => {
   const box = BoxManager.getCurrentBox();
   if (!box) return;
-  showDialog('完成裝箱確認', `確定要完成箱號 ${box.id} 嗎？完成後將無法修改。`, () => {
+  const totalQty = box.items.reduce((s, i) => s + (i.qty || 1), 0);
+  showDialog('完成裝箱確認', `確定要完成箱號 ${box.id} 嗎？（共 ${box.items.length} 種商品，${totalQty} 件）\n完成後將同步到 Google Sheets 並鎖定此箱。`, async () => {
     CameraEngine.stop(document.getElementById('camera-video'));
+
+    // Save to Google Sheets via n8n
+    showToast('正在同步到商品主檔…', '');
+    try {
+      const saveResult = await SaveEngine.saveBoxItems(box);
+      if (saveResult.success) {
+        showToast(`已同步 ${saveResult.successCount} 筆到商品主檔 ✓`, 'success');
+      } else if (saveResult.successCount > 0) {
+        showToast(`部分同步：${saveResult.successCount}/${saveResult.total} 筆成功`, 'error');
+      } else {
+        showToast('同步失敗，但箱號仍會完成', 'error');
+      }
+    } catch (e) {
+      console.error('Save failed:', e);
+      showToast('同步發生錯誤：' + e.message, 'error');
+    }
+
     BoxManager.closeBox(box.id);
     showToast('箱號 ' + box.id + ' 已完成', 'success');
     renderAll();
