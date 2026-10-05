@@ -4,7 +4,8 @@ import { ServiceError } from "../src/common.js";
 import { GoogleTokenProvider, parseServiceAccountCredentials } from "../src/google-auth.js";
 import {
   APPEND_MAX_PENDING,
-  APPEND_MIN_INTERVAL_MS,
+  APPEND_WINDOW_MAX,
+  APPEND_WINDOW_MS,
   buildMergedName,
   buildSaveRow,
   HEADER_CACHE_MS,
@@ -233,7 +234,6 @@ describe("SheetsClient（Google Sheets REST：讀表頭＋append）", () => {
       fetchImpl: google.mock,
       log,
       now,
-      appendMinIntervalMs: 0, // 這組測試不是在測配速（配速另有專屬的 describe），關掉以免同一個假時刻的多次 append 互相等待
     });
     return { client, calls: google.calls, log, advance: (ms: number) => void (clock += ms) };
   }
@@ -365,8 +365,7 @@ describe("SheetsClient（Google Sheets REST：讀表頭＋append）", () => {
     };
     const log = createCapturingLogger();
     const tokenProvider = new GoogleTokenProvider(parseServiceAccountCredentials(creds.json)!, { fetchImpl, log });
-    // 這個測試的重點是換 token；配速（含 401 重送遵守間隔）另有專屬測試，這裡關掉以免重送時真的等 1 秒
-    const client = new SheetsClient({ tokenProvider, spreadsheetId: "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A", sheetName: "商品主檔", fetchImpl, log, appendMinIntervalMs: 0 });
+    const client = new SheetsClient({ tokenProvider, spreadsheetId: "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A", sheetName: "商品主檔", fetchImpl, log });
 
     await expect(client.appendRow(row)).resolves.toEqual({ updatedRange: "'商品主檔'!A125:K125" });
     expect(appendCalls).toBe(2);
@@ -438,15 +437,17 @@ describe("SheetsClient（Google Sheets REST：讀表頭＋append）", () => {
 });
 
 
-describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時間至少間隔 1000 ms）", () => {
+describe("SheetsClient：append 滾動視窗配額（過去 60 秒內最多起始 55 次，達到上限才先進先出排隊）", () => {
   const SPREADSHEET_ID = "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A";
   const rowOf = (seqNo: string) =>
     buildSaveRow(parseSaveInput({ seqNo, barcode: "1801080204", productName: "第五代溫灸刷毛圓領發熱衣", quantity: 1 }));
-
   const urlOf = (input: string | URL | Request) => (typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+  const seqs = (n: number) => Array.from({ length: n }, (_, i) => String(i + 1));
+  const ok = { updatedRange: "'商品主檔'!A125:K125" };
 
   /**
-   * 假時鐘：sleep(ms) 只讓時鐘前進 ms（不真的等待）；記錄每個 append／讀表頭請求「送出時」的假時鐘。
+   * 假時鐘：預設的 sleep 先讓出一個 macrotask（讓「現在就能起始」的請求把 fetch 都呼叫完），再讓假時鐘前進 ms，不真的等待。
+   * sentAt 記錄每個 append／讀表頭請求「fetch 被呼叫時」的假時鐘。
    * tokenStatuses 可依序指定每一次換 token 的狀態碼（預設全部成功）。
    */
   function setupPaced(
@@ -456,11 +457,14 @@ describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時�
       tokenStatuses?: number[];
       /** 前 N 次 append 直接丟網路錯誤（模擬連線失敗／逾時）。 */
       appendThrows?: number;
+      /** 覆寫假 sleep（拿到 ms 與讓假時鐘前進的函式）。 */
+      sleep?: (ms: number, advance: (ms: number) => void) => Promise<void>;
     } = {},
   ) {
     const google = createGoogleMock(options.google);
     const log = createCapturingLogger();
     let clock = 5_000_000;
+    const advance = (ms: number) => void (clock += ms);
     const sleeps: number[] = [];
     const sentAt = { append: [] as number[], header: [] as number[] };
     let tokenCalls = 0;
@@ -481,7 +485,9 @@ describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時�
     const now = () => clock;
     const sleep = async (ms: number) => {
       sleeps.push(ms);
-      clock += ms;
+      if (options.sleep) return options.sleep(ms, advance);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      advance(ms);
     };
     const tokenProvider = new GoogleTokenProvider(parseServiceAccountCredentials(creds.base64)!, { fetchImpl, log, now });
     const client = new SheetsClient({
@@ -494,116 +500,191 @@ describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時�
       sleep,
       ...options.client,
     });
-    return { client, google, log, sleeps, sentAt, now, tokenProvider, advance: (ms: number) => void (clock += ms) };
+    /** 依 fetch 被呼叫的順序，列出各筆 append 的序號欄（表頭預設順序，序號是第 1 欄）。 */
+    const appendOrder = () =>
+      google.calls.filter((c) => c.url.includes(":append")).map((c) => (JSON.parse(c.body!) as { values: string[][] }).values[0]![0]!);
+    return { client, google, log, sleeps, sentAt, now, tokenProvider, advance, appendOrder };
   }
 
-  it("三筆同時送出：第 2、3 筆分別延後 1000／2000 ms，並依先進先出的順序寫入", async () => {
-    const { client, google, sleeps, sentAt, now } = setupPaced();
-    const t0 = now();
-    const results = await Promise.all([client.appendRow(rowOf("1")), client.appendRow(rowOf("2")), client.appendRow(rowOf("3"))]);
-
-    expect(results).toEqual(Array(3).fill({ updatedRange: "'商品主檔'!A125:K125" }));
-    expect(sentAt.append).toEqual([t0, t0 + 1000, t0 + 2000]); // 第 1 筆立刻送；第 2、3 筆延後 1000／2000 ms
-    expect(sleeps).toEqual([1000, 1000]);
-    const order = google.calls.filter((c) => c.url.includes(":append")).map((c) => (JSON.parse(c.body!) as { values: string[][] }).values[0]![0]);
-    expect(order).toEqual(["1", "2", "3"]);
-    expect(APPEND_MIN_INTERVAL_MS).toBe(1000);
+  it("預設值：過去 60 秒內最多起始 55 次（Google 寫入配額每分鐘 60 次，留 5 次餘裕）", () => {
+    expect(APPEND_WINDOW_MAX).toBe(55);
+    expect(APPEND_WINDOW_MS).toBe(60_000);
+    expect(APPEND_MAX_PENDING).toBe(50);
   });
 
-  it("單筆不等待；距離上一筆不到一個間隔時，只補足差額", async () => {
+  it("55 筆同時送出：全部立即起始（0 等待、不呼叫 sleep），依先進先出順序", async () => {
+    const { client, sleeps, sentAt, now, appendOrder } = setupPaced();
+    const t0 = now();
+    const results = await Promise.all(seqs(55).map((n) => client.appendRow(rowOf(n))));
+
+    expect(results).toEqual(Array(55).fill(ok));
+    expect(sleeps).toEqual([]); // 沒有任何人為的等待
+    expect(sentAt.append).toEqual(Array(55).fill(t0)); // 55 筆全都在同一時刻起始
+    expect(appendOrder()).toEqual(seqs(55));
+  });
+
+  it("第 56 筆起要排隊：等到「第 1 筆起始時間＋60 秒」才送；依先進先出順序", async () => {
+    const { client, sleeps, sentAt, now, appendOrder } = setupPaced();
+    const t0 = now();
+    const results = await Promise.all(seqs(60).map((n) => client.appendRow(rowOf(n))));
+
+    expect(results).toEqual(Array(60).fill(ok));
+    expect(sentAt.append).toEqual([...Array(55).fill(t0), ...Array(5).fill(t0 + 60_000)]);
+    expect(sleeps).toEqual([60_000]); // 只有排在最前面的那個需要睡；視窗放行後其餘 4 筆立刻跟上
+    expect(appendOrder()).toEqual(seqs(60));
+  });
+
+  it("是滾動視窗，不是整點分段：超過 55 件之後，每放行一筆只等下一個最舊的起始離開視窗", async () => {
+    const { client, sleeps, sentAt, advance, now } = setupPaced();
+    const t0 = now();
+    for (let i = 0; i < 55; i++) {
+      await client.appendRow(rowOf(String(i + 1))); // 起始時間 t0、t0+100、…、t0+5400
+      advance(100);
+    }
+    expect(sleeps).toEqual([]); // 55 筆以內全速
+    // 現在 t0+5500，視窗已滿：第 56 筆等最舊的（t0）離開視窗，也就是 t0+60000
+    await client.appendRow(rowOf("56"));
+    // 第 57、58 筆：下一個最舊的是 t0+100、t0+200，所以各自只需要再等 100 ms
+    await client.appendRow(rowOf("57"));
+    await client.appendRow(rowOf("58"));
+
+    expect(sleeps).toEqual([54_500, 100, 100]);
+    expect(sentAt.append.slice(55)).toEqual([t0 + 60_000, t0 + 60_100, t0 + 60_200]);
+  });
+
+  it("視窗過後配額恢復：差 1 ms 還要再等 1 ms，過完整個視窗後整批 55 筆又可以全速起始", async () => {
+    const { client, sleeps, sentAt, advance, now } = setupPaced();
+    const t0 = now();
+    await Promise.all(seqs(55).map((n) => client.appendRow(rowOf(n)))); // 用完配額，全部起始於 t0
+
+    advance(APPEND_WINDOW_MS - 1); // 差 1 ms：最舊的那批還在視窗內
+    await client.appendRow(rowOf("56"));
+    expect(sleeps).toEqual([1]);
+    expect(sentAt.append[55]).toBe(t0 + 60_000);
+
+    advance(APPEND_WINDOW_MS); // 視窗完全過去：配額全部恢復
+    const t1 = now();
+    await Promise.all(seqs(55).map((n) => client.appendRow(rowOf(n))));
+    expect(sleeps).toEqual([1]); // 沒有新的等待
+    expect(sentAt.append.slice(56)).toEqual(Array(55).fill(t1));
+  });
+
+  it("單筆不等待（再晚一點才來的單筆也一樣）", async () => {
     const { client, sleeps, sentAt, advance, now } = setupPaced();
     const t0 = now();
     await client.appendRow(rowOf("1"));
-    expect(sleeps).toEqual([]); // 單筆不等待
+    expect(sleeps).toEqual([]);
     expect(sentAt.append).toEqual([t0]);
 
-    advance(APPEND_MIN_INTERVAL_MS); // 剛好滿一個間隔：不必等
+    advance(86_400_000);
     await client.appendRow(rowOf("2"));
     expect(sleeps).toEqual([]);
-
-    advance(400); // 只過了 400 ms：只補足剩下的 600 ms
-    await client.appendRow(rowOf("3"));
-    expect(sleeps).toEqual([600]);
-    expect(sentAt.append).toEqual([t0, t0 + 1000, t0 + 2000]);
+    expect(sentAt.append).toEqual([t0, t0 + 86_400_000]);
   });
 
-  it("第 1 筆失敗（Google 回 500）後，第 2 筆仍正常送出（不被卡住），起始時間仍間隔 1000 ms", async () => {
-    const { client, sentAt, sleeps, now } = setupPaced({ google: { appendStatuses: [500] } });
+  it("送出前就失敗（換不到 token）不佔配額：後面的不必為它多等", async () => {
+    // token 呼叫順序：[1] 暖機那筆（成功）、[2] 第 1 筆（400 失敗）、[3] 之後（成功）
+    const { client, sentAt, sleeps, advance, now, tokenProvider } = setupPaced({
+      tokenStatuses: [200, 400, 200],
+      client: { appendWindowMax: 3 },
+    });
     const t0 = now();
-    const [first, second] = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
+    await client.appendRow(rowOf("0")); // 暖機：換 token、快取表頭（用掉 1 個名額）
+    tokenProvider.invalidate(); // 讓接下來的 append 都要重新換 token
+    advance(APPEND_WINDOW_MS); // 暖機那筆離開視窗，配額全空
 
-    expect(first).toMatchObject({ status: "rejected", reason: { status: 502 } });
-    expect(second).toEqual({ status: "fulfilled", value: { updatedRange: "'商品主檔'!A125:K125" } });
-    expect(sentAt.append).toEqual([t0, t0 + 1000]);
-    expect(sleeps).toEqual([1000]);
+    await expect(client.appendRow(rowOf("1"))).rejects.toMatchObject({ status: 500 }); // 換不到 token：沒有送出
+    // 若上面那筆佔了名額，這三筆裡的第 3 筆就得等一個視窗
+    const rest = await Promise.all(["2", "3", "4"].map((n) => client.appendRow(rowOf(n))));
+    expect(rest).toEqual(Array(3).fill(ok));
+    expect(sleeps).toEqual([]);
+    expect(sentAt.append).toEqual([t0, ...Array(3).fill(t0 + 60_000)]); // 失敗的那筆沒有送出任何 append
   });
 
-  it("第 1 筆在送出前就失敗（換不到 token）：不會卡住第 2 筆，也不佔用間隔（第 2 筆不必多等）", async () => {
-    // token 呼叫順序：[1] 暖機那筆（成功）、[2] 第 1 筆（400 失敗）、[3] 第 2 筆（成功）
-    const { client, sentAt, sleeps, advance, now, tokenProvider } = setupPaced({ tokenStatuses: [200, 400, 200] });
+  it("已經送出但失敗（Google 回 500）的那次照樣佔配額；它也不會卡住後面的", async () => {
+    const { client, sentAt, sleeps, now } = setupPaced({ google: { appendStatuses: [500] }, client: { appendWindowMax: 2 } });
     const t0 = now();
-    await client.appendRow(rowOf("0")); // 暖機：換 token、快取表頭
-    tokenProvider.invalidate(); // 讓接下來的兩筆都要重新換 token
-    advance(5000); // 距離暖機那筆已超過一個間隔，所以正常情況下不需要等待
+    const results = await Promise.allSettled(["1", "2", "3"].map((n) => client.appendRow(rowOf(n))));
 
-    const [first, second] = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
-    expect(first).toMatchObject({ status: "rejected", reason: { status: 500 } });
-    expect(second).toMatchObject({ status: "fulfilled" });
-    expect(sentAt.append).toEqual([t0, t0 + 5000]); // 失敗的那筆沒有送出任何 append
-    expect(sleeps).toEqual([]); // 沒送出的請求不佔用間隔：第 2 筆不必為它多等
+    expect(results[0]).toMatchObject({ status: "rejected", reason: { status: 502 } });
+    expect(results[1]).toEqual({ status: "fulfilled", value: ok });
+    expect(results[2]).toEqual({ status: "fulfilled", value: ok }); // 排隊的第 3 筆照常送出
+    expect(sentAt.append).toEqual([t0, t0, t0 + 60_000]); // 失敗的那次確實送出了，所以第 3 筆要等視窗讓出名額
+    expect(sleeps).toEqual([60_000]);
   });
 
-  it("401 之後的重送也是一次 append 請求：同樣等滿間隔才送，後面排隊的從重送時間起算", async () => {
-    // append 呼叫順序：[1] 第 1 筆首次（401）、[2] 第 1 筆重送（200）、[3] 第 2 筆（200）
-    const { client, sentAt, sleeps, now } = setupPaced({ google: { appendStatuses: [401] } });
+  it("排隊中的請求在等待時出錯（例如 sleep 丟例外）：它會歸還排隊名額，後面排隊的照常取得名額", async () => {
+    let sleepCalls = 0;
+    const { client, sentAt, now } = setupPaced({
+      client: { appendWindowMax: 1, appendMaxPending: 2 },
+      sleep: async (ms, advance) => {
+        if (++sleepCalls === 1) throw new Error("sleep 壞了");
+        advance(ms);
+      },
+    });
     const t0 = now();
-    const results = await Promise.all([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
+    const results = await Promise.allSettled(["1", "2", "3"].map((n) => client.appendRow(rowOf(n))));
 
-    expect(results).toEqual(Array(2).fill({ updatedRange: "'商品主檔'!A125:K125" }));
-    expect(sentAt.append).toEqual([t0, t0 + 1000, t0 + 2000]); // 首次、重送、下一筆：相鄰各 1000 ms
-    expect(sleeps).toEqual([1000, 1000]);
+    expect(results[0]).toEqual({ status: "fulfilled", value: ok }); // 第 1 筆立刻起始
+    expect(results[1]).toMatchObject({ status: "rejected", reason: { message: "sleep 壞了" } }); // 排在最前面的等待時出錯
+    expect(results[2]).toEqual({ status: "fulfilled", value: ok }); // 它後面的照常
+    expect(sentAt.append).toEqual([t0, t0 + 60_000]);
+    // 名額有歸還：視窗仍滿著時，兩個排隊名額（appendMaxPending=2）都還能用，第 3 筆才回 503
+    const next = await Promise.allSettled(["4", "5", "6"].map((n) => client.appendRow(rowOf(n))));
+    expect(next.map((r) => r.status)).toEqual(["fulfilled", "fulfilled", "rejected"]);
+    expect((next[2] as PromiseRejectedResult).reason).toMatchObject({ status: 503 });
   });
 
-  it("401 連續兩次（重送也失敗）：回 500，且不卡住後面的", async () => {
-    const { client, sentAt } = setupPaced({ google: { appendStatuses: [401, 401] } });
-    const [first, second] = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
-    expect(first).toMatchObject({ status: "rejected", reason: { status: 500 } });
-    expect(second).toMatchObject({ status: "fulfilled" });
-    expect(sentAt.append).toHaveLength(3);
+  it("排隊上限：排隊等名額的請求超過 appendMaxPending 立刻回 503，不影響已排隊的；佇列清空後恢復", async () => {
+    const { client, sentAt, sleeps, now, log } = setupPaced({ client: { appendWindowMax: 1, appendMaxPending: 2 } });
+    const t0 = now();
+    const results = await Promise.allSettled(["1", "2", "3", "4"].map((n) => client.appendRow(rowOf(n))));
+
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled", "fulfilled", "rejected"]);
+    expect(results[3]).toMatchObject({ reason: { status: 503, message: "目前等待寫入的筆數過多，請稍後再試" } });
+    expect(sentAt.append).toEqual([t0, t0 + 60_000, t0 + 120_000]); // 第 1 筆立刻，排隊的兩筆各等一個視窗
+    expect(sleeps).toEqual([60_000, 60_000]);
+    expect(log.lines.join("\n")).toContain("append 佇列已滿（2/2）");
+
+    await expect(client.appendRow(rowOf("5"))).resolves.toEqual(ok); // 恢復
   });
 
-  // 回歸測試：失敗（不論哪種）之後一定要歸還佇列名額；否則連續失敗幾次後，/api/save 會一直回 503 直到重啟。
+  // 回歸測試：排隊名額一定要歸還；否則連續失敗幾次後，/api/save 會一直回 503 直到重啟。
   it.each([
     ["Google 回 500", { google: { appendStatuses: [500, 500] } }],
     ["Google 回 429", { google: { appendStatuses: [429, 429] } }],
     ["連線失敗或逾時", { appendThrows: 2 }],
-    ["401 連續兩次（每筆首次與重送都失敗）", { google: { appendStatuses: [401, 401, 401, 401] } }],
-  ])("失敗後會歸還佇列名額：%s（appendMaxPending=2，連續兩筆失敗之後仍能再寫兩筆）", async (_name, scenario) => {
-    const { client } = setupPaced({ ...scenario, client: { appendMaxPending: 2 } });
+    ["401 連續兩次（首次與重送都失敗）", { google: { appendStatuses: [401, 401, 401, 401] } }],
+  ])("失敗之後會歸還排隊名額：%s（視窗只有 1 個名額、排隊上限 3）", async (_name, scenario) => {
+    const { client } = setupPaced({ ...scenario, client: { appendWindowMax: 1, appendMaxPending: 3 } });
 
     const failed = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
     expect(failed.map((r) => r.status)).toEqual(["rejected", "rejected"]);
     for (const result of failed) expect((result as PromiseRejectedResult).reason.status).not.toBe(503); // 是上游失敗，不是佇列已滿
 
-    // 若名額沒有歸還，這兩筆會被擋成 503
-    const next = await Promise.allSettled([client.appendRow(rowOf("3")), client.appendRow(rowOf("4"))]);
-    expect(next.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
+    // 視窗仍滿著：四筆同時進來，剛好三筆排得進去（排隊上限 3），第 4 筆回 503。若名額沒歸還，能排進去的會少於 3 筆。
+    const next = await Promise.allSettled(["3", "4", "5", "6"].map((n) => client.appendRow(rowOf(n))));
+    expect(next.map((r) => r.status)).toEqual(["fulfilled", "fulfilled", "fulfilled", "rejected"]);
+    expect((next[3] as PromiseRejectedResult).reason).toMatchObject({ status: 503 });
   });
 
-  it("換不到 token 的失敗也會歸還名額（送出前就失敗）", async () => {
-    // token 呼叫順序：[1] 暖機（成功）、[2][3] 兩筆都換不到（400）、[4][5] 之後成功
-    const { client, tokenProvider, advance } = setupPaced({ tokenStatuses: [200, 400, 400, 200, 200], client: { appendMaxPending: 2 } });
-    await client.appendRow(rowOf("0")); // 暖機：快取表頭
-    tokenProvider.invalidate();
-    advance(5000);
-
-    const failed = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
-    expect(failed.map((r) => r.status)).toEqual(["rejected", "rejected"]);
-    const next = await Promise.allSettled([client.appendRow(rowOf("3")), client.appendRow(rowOf("4"))]);
-    expect(next.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
+  it("401 之後的重送算一次新的起始：同樣受視窗限制（視窗已滿就等）", async () => {
+    // 視窗只有 1 個名額：首次送出（401）用掉它，重送必須等一個視窗
+    const { client, sentAt, sleeps, now } = setupPaced({ google: { appendStatuses: [401] }, client: { appendWindowMax: 1 } });
+    const t0 = now();
+    await expect(client.appendRow(rowOf("1"))).resolves.toEqual(ok);
+    expect(sentAt.append).toEqual([t0, t0 + 60_000]);
+    expect(sleeps).toEqual([60_000]);
   });
 
-  it("讀表頭不受配速限制：append 正在排隊等待時，別的請求的表頭讀取會立刻送出", async () => {
+  it("401 連續兩次（重送也失敗）：回 500，且不卡住後面的", async () => {
+    const { client, sentAt } = setupPaced({ google: { appendStatuses: [401, 401] } });
+    await expect(client.appendRow(rowOf("1"))).rejects.toMatchObject({ status: 500 }); // 首次與重送都是 401
+    await expect(client.appendRow(rowOf("2"))).resolves.toEqual(ok);
+    expect(sentAt.append).toHaveLength(3); // 第 1 筆送了 2 次（首次＋重送），第 2 筆 1 次
+  });
+
+  it("讀表頭不受視窗限制：append 正在排隊等名額時，別的請求的表頭讀取會立刻送出", async () => {
     const google = createGoogleMock();
     const log = createCapturingLogger();
     let clock = 5_000_000;
@@ -628,12 +709,13 @@ describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時�
       now,
       sleep,
       headerTtlMs: 0, // 表頭不快取：每次 appendRow 都重新讀一次
+      appendWindowMax: 1, // 視窗只有 1 個名額，第 2 筆起都要排隊
     });
 
     const a = client.appendRow(rowOf("1"));
-    await vi.waitFor(() => expect(appends()).toBe(1)); // A 立刻送出
+    await vi.waitFor(() => expect(appends()).toBe(1)); // A 立刻起始
     const b = client.appendRow(rowOf("2"));
-    await vi.waitFor(() => expect(gates).toHaveLength(1)); // B 讀完表頭，正在排隊等待配速
+    await vi.waitFor(() => expect(gates).toHaveLength(1)); // B 讀完表頭，視窗已滿，正在等名額
     expect(headerReads()).toBe(2);
     expect(appends()).toBe(1);
 
@@ -643,37 +725,85 @@ describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時�
 
     gates.shift()!(); // 放行 B
     await b;
-    await vi.waitFor(() => expect(gates).toHaveLength(1)); // 接著 C 排隊等待
+    await vi.waitFor(() => expect(gates).toHaveLength(1)); // 接著 C 排隊等名額
     gates.shift()!();
     await Promise.all([a, c]);
     expect(appends()).toBe(3);
   });
 
-  it("排隊上限：超過 appendMaxPending 的請求立刻回 503，不影響已排隊的；佇列清空後恢復", async () => {
-    const { client, sentAt, log } = setupPaced({ client: { appendMaxPending: 2 } });
-    const results = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2")), client.appendRow(rowOf("3"))]);
+  it("先進先出：有人在排隊時，新來的不會插隊——即使此刻視窗剛好有名額", async () => {
+    const google = createGoogleMock();
+    const log = createCapturingLogger();
+    let clock = 5_000_000;
+    const gates: Array<() => void> = []; // 每個 sleep 都停在這裡，由測試手動放行
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        gates.push(() => {
+          clock += ms;
+          resolve();
+        });
+      });
+    const now = () => clock;
+    const appends = () => google.calls.filter((c) => c.url.includes(":append")).length;
+    const order = () => google.calls.filter((c) => c.url.includes(":append")).map((c) => (JSON.parse(c.body!) as { values: string[][] }).values[0]![0]);
+    const tokenProvider = new GoogleTokenProvider(parseServiceAccountCredentials(creds.base64)!, { fetchImpl: google.mock, log, now });
+    const client = new SheetsClient({
+      tokenProvider,
+      spreadsheetId: SPREADSHEET_ID,
+      sheetName: "商品主檔",
+      fetchImpl: google.mock,
+      log,
+      now,
+      sleep,
+      appendWindowMax: 1,
+    });
 
-    expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled", "rejected"]);
-    expect(results[2]).toMatchObject({ reason: { status: 503, message: "目前等待寫入的筆數過多，請稍後再試" } });
-    expect(sentAt.append).toHaveLength(2);
-    expect(log.lines.join("\n")).toContain("append 佇列已滿（2/2）");
+    const a = client.appendRow(rowOf("A"));
+    await vi.waitFor(() => expect(appends()).toBe(1)); // A 立刻起始，視窗滿了
+    const b = client.appendRow(rowOf("B"));
+    await vi.waitFor(() => expect(gates).toHaveLength(1)); // B 排隊，正在等 A 離開視窗
 
-    await expect(client.appendRow(rowOf("4"))).resolves.toEqual({ updatedRange: "'商品主檔'!A125:K125" }); // 恢復
-    expect(sentAt.append).toHaveLength(3);
-    expect(APPEND_MAX_PENDING).toBe(50);
+    clock += APPEND_WINDOW_MS; // 時間過去一個視窗：此刻視窗其實已經有名額了，但 B 還沒被放行（它的等待還沒醒來）
+    const c = client.appendRow(rowOf("C")); // 這時新來的 C 必須排在 B 後面，不能插隊
+    await new Promise<void>((resolve) => setTimeout(resolve, 20)); // 給 C 足夠的時間（若它會插隊，早就送出了）
+    expect(appends()).toBe(1);
+
+    gates.shift()!(); // 放行 B
+    await b;
+    await vi.waitFor(() => expect(gates).toHaveLength(1)); // C 輪到後發現視窗又滿了（B 剛起始），排隊等 B 離開視窗
+    gates.shift()!();
+    await Promise.all([a, c]);
+    expect(order()).toEqual(["A", "B", "C"]);
   });
 
-  it("appendMinIntervalMs 可由建構參數覆寫（0 代表不配速）", async () => {
-    const custom = setupPaced({ client: { appendMinIntervalMs: 250 } });
-    await Promise.all([custom.client.appendRow(rowOf("1")), custom.client.appendRow(rowOf("2"))]);
-    expect(custom.sleeps).toEqual([250]);
+  it("appendWindowMax／appendWindowMs 可由建構參數覆寫；appendWindowMax 小於 1 時當作 1", async () => {
+    const custom = setupPaced({ client: { appendWindowMax: 2, appendWindowMs: 1000 } });
+    const t0 = custom.now();
+    await Promise.all(seqs(3).map((n) => custom.client.appendRow(rowOf(n))));
+    expect(custom.sleeps).toEqual([1000]);
+    expect(custom.sentAt.append).toEqual([t0, t0, t0 + 1000]);
 
-    const off = setupPaced({ client: { appendMinIntervalMs: 0 } });
-    await Promise.all([off.client.appendRow(rowOf("1")), off.client.appendRow(rowOf("2")), off.client.appendRow(rowOf("3"))]);
-    expect(off.sleeps).toEqual([]);
+    // appendWindowMax 0 當作 1：第 1 筆走快速路徑（視窗至少有 1 個名額），即使完全不允許排隊（appendMaxPending=0）也不會被擋
+    const strict = setupPaced({ client: { appendWindowMax: 0, appendMaxPending: 0 } });
+    await expect(strict.client.appendRow(rowOf("1"))).resolves.toEqual(ok);
+    expect(strict.sleeps).toEqual([]);
+
+    const zero = setupPaced({ client: { appendWindowMax: 0 } }); // 第 2 筆要等一個視窗，不會因此永遠排不到名額
+    await Promise.all([zero.client.appendRow(rowOf("1")), zero.client.appendRow(rowOf("2"))]);
+    expect(zero.sleeps).toEqual([60_000]);
   });
 
-  it("不注入 now／sleep（正式環境的預設值）：配速同樣有效（以 vitest 假計時器驗證，不真的等待）", async () => {
+  it("系統時鐘被往回調時，視窗最多多滿一個視窗長度（不會因此卡很久）", async () => {
+    const { client, sleeps, sentAt, advance, now } = setupPaced({ client: { appendWindowMax: 1 } });
+    const t0 = now();
+    await client.appendRow(rowOf("1"));
+    advance(-3_600_000); // 時鐘往回調 1 小時
+    await client.appendRow(rowOf("2"));
+    expect(sleeps).toEqual([60_000]); // 不是 3_660_000
+    expect(sentAt.append).toEqual([t0, t0 - 3_600_000 + 60_000]);
+  });
+
+  it("不注入 now／sleep（正式環境的預設值）：視窗配額同樣有效（以 vitest 假計時器驗證，不真的等待）", async () => {
     vi.useFakeTimers();
     try {
       const google = createGoogleMock();
@@ -686,20 +816,12 @@ describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時�
       const tokenProvider = new GoogleTokenProvider(parseServiceAccountCredentials(creds.base64)!, { fetchImpl, log });
       const client = new SheetsClient({ tokenProvider, spreadsheetId: SPREADSHEET_ID, sheetName: "商品主檔", fetchImpl, log }); // 沒給 now／sleep
       const t0 = Date.now();
-      const all = Promise.all([client.appendRow(rowOf("1")), client.appendRow(rowOf("2")), client.appendRow(rowOf("3"))]);
-      await vi.advanceTimersByTimeAsync(2000);
+      const all = Promise.all(seqs(56).map((n) => client.appendRow(rowOf(n))));
+      await vi.advanceTimersByTimeAsync(60_000);
       await all;
-      expect(sentAt).toEqual([t0, t0 + 1000, t0 + 2000]);
+      expect(sentAt).toEqual([...Array(55).fill(t0), t0 + 60_000]);
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it("系統時鐘被往回調時，最多只等一個間隔（不會因此卡很久）", async () => {
-    const { client, sleeps, advance } = setupPaced();
-    await client.appendRow(rowOf("1"));
-    advance(-60_000);
-    await client.appendRow(rowOf("2"));
-    expect(sleeps).toEqual([1000]);
   });
 });

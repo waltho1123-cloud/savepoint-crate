@@ -17,7 +17,7 @@ export const RATE_LIMIT_WINDOW_MS = 60_000;
 export const OCR_RATE_LIMIT_MAX = 60;
 /**
  * POST /api/save 每個 IP 每分鐘的請求上限。關箱時前端是逐筆、循序送出，額度與拍照辨識分開計算，
- * 才不會被拍照的次數擠壓。真正決定寫入速度的是 sheets.ts 的 append 配速（Google 寫入配額），不是這個數字。
+ * 才不會被拍照的次數擠壓。真正決定寫入速度的是 sheets.ts 的 append 視窗配額（Google 寫入配額），不是這個數字。
  */
 export const SAVE_RATE_LIMIT_MAX = 600;
 
@@ -27,9 +27,9 @@ export interface AppDeps {
   indexHtml: string;
   /** 預設用全域 fetch（每次呼叫時才取 globalThis.fetch，所以測試用 vi.stubGlobal 也攔得到）。 */
   fetchImpl?: FetchLike;
-  /** OCR 重試之間、以及 Google append 配速時的等待；測試時注入以免真的等待。 */
+  /** OCR 重試之間、以及 Google append 視窗已滿時等名額的等待；測試時注入以免真的等待。 */
   sleep?: (ms: number) => Promise<void>;
-  /** 目前時間（毫秒）；測試時注入以驗證限流視窗、快取過期與 append 配速。 */
+  /** 目前時間（毫秒）；測試時注入以驗證限流視窗、快取過期與 append 視窗配額。 */
   now?: () => number;
   log?: Logger;
 }

@@ -43,10 +43,10 @@ export class ServiceError extends Error {
 }
 
 /**
- * 等待至少 ms 毫秒（OCR 重試的間隔、Google append 的配速都用這個）。
+ * 等待至少 ms 毫秒（OCR 重試的間隔、Google append 視窗已滿時等名額都用這個）。
  * Node 的 setTimeout 偶爾（實測約 1%）會比 Date.now() 量到的時間早 1～2 毫秒觸發，
  * 所以醒來後再用 Date.now() 檢查一次，不足就補睡；最多補兩次，避免系統時鐘被往回調時等太久。
- * append 配速要求「相鄰兩筆的起始時間至少間隔 1000 ms」，靠這個才能在真實時鐘下也嚴格成立。
+ * append 的視窗配額要等「最舊的起始離開視窗」，靠這個才能保證醒來時名額真的空出來（以 Date.now() 衡量）。
  */
 export async function sleep(ms: number): Promise<void> {
   const target = Date.now() + ms;

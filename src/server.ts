@@ -9,8 +9,8 @@ import { parseServiceAccountCredentials } from "./google-auth.js";
 
 /**
  * 收到 SIGTERM／SIGINT 後，最多等多久讓處理中（含排隊中的存檔）的請求完成才強制結束。
- * append 排隊最長約 50 秒（見 sheets.ts 的 APPEND_MAX_PENDING），但 Kubernetes 預設的終止寬限期是 30 秒，
- * 所以取 25 秒；超過的請求會被中斷（排隊中、還沒寫進試算表的存檔就是這樣掉的）。
+ * append 視窗已滿時，排隊的存檔最長要等約 60 秒（等最舊的起始離開視窗，見 sheets.ts 的 APPEND_WINDOW_MS），
+ * 但 Kubernetes 預設的終止寬限期是 30 秒，所以取 25 秒；超過的請求會被中斷（排隊中、還沒寫進試算表的存檔就是這樣掉的）。
  */
 const SHUTDOWN_GRACE_MS = 25_000;
 

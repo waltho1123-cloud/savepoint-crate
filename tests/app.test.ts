@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createApp, MAX_BODY_BYTES, OCR_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, SAVE_RATE_LIMIT_MAX } from "../src/app.js";
+import { APPEND_WINDOW_MAX, APPEND_WINDOW_MS } from "../src/sheets.js";
 import { loadEnv } from "../src/env.js";
 import { buildOcrRequestBody, parseImageInput } from "../src/ocr.js";
 import {
@@ -477,15 +478,27 @@ describe("POST /api/save", () => {
     expect(google.calls).toHaveLength(0);
   });
 
-  it("連續兩筆存檔：第 2 筆依 APPEND_MIN_INTERVAL_MS 配速（createApp 有把 now／sleep 傳給 SheetsClient）", async () => {
+  it("連續存檔：前 55 筆不等待，第 56 筆要等一個視窗，之後配額恢復（createApp 有把 now／sleep 傳給 SheetsClient）", async () => {
     const google = createGoogleMock();
     vi.stubGlobal("fetch", google.mock);
-    const { app, sleep } = makeApp({ now: () => 1_000_000 }); // 時鐘不動 → 第 2 筆必須等滿一個間隔
-    expect((await post(app, "/api/save", payload)).status).toBe(200);
-    expect(sleep).not.toHaveBeenCalled(); // 第一筆不等待
-    expect((await post(app, "/api/save", payload)).status).toBe(200);
+    let clock = 1_000_000;
+    // 假 sleep 要像真的一樣：讓注入的時鐘前進 ms（睡醒後最舊的那批起始才會離開視窗）
+    const sleep = vi.fn(async (ms: number) => {
+      clock += ms;
+    });
+    const { app } = makeApp({ now: () => clock, sleep });
+    for (let i = 0; i < APPEND_WINDOW_MAX; i++) {
+      expect((await post(app, "/api/save", payload)).status).toBe(200);
+    }
+    expect(sleep).not.toHaveBeenCalled(); // 55 筆以內全速、不等待
+
+    expect((await post(app, "/api/save", payload)).status).toBe(200); // 第 56 筆：等一個視窗
     expect(sleep).toHaveBeenCalledTimes(1);
-    expect(sleep).toHaveBeenCalledWith(1000);
+    expect(sleep).toHaveBeenCalledWith(APPEND_WINDOW_MS); // 60_000
+    expect(clock).toBe(1_000_000 + APPEND_WINDOW_MS);
+
+    expect((await post(app, "/api/save", payload)).status).toBe(200); // 第 57 筆：視窗已放出名額，不必再等
+    expect(sleep).toHaveBeenCalledTimes(1);
   });
 
   it("GET /api/save → 405", async () => {

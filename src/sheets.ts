@@ -186,17 +186,18 @@ const SHEETS_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
  * Google Sheets API 的寫入配額是「每分鐘每使用者 60 次」（服務帳號＝一個使用者，超過回 429；
- * 來源：https://developers.google.com/workspace/sheets/api/limits ，2026-10-05 查閱）。
- * 所以整個程序的 append 請求排成一條佇列，相鄰兩次的「起始時間」至少間隔這麼久。
- * 注意：不間斷地連續寫入時，1000 ms 剛好是每分鐘 60 次，正好壓在配額邊緣；
- * 如果實際看到 Google 回 429，請把間隔調大一點（例如 1200 ms）。
+ * 來源：https://developers.google.com/workspace/sheets/api/limits ，2026-10-05 查閱），所以 append 用「滾動視窗配額」：
+ * 過去 APPEND_WINDOW_MS（60 秒）內已起始的 append 少於 APPEND_WINDOW_MAX（55 次，留 5 次餘裕）就立刻送出、不等待；
+ * 達到上限時依先進先出排隊，等最舊的那次起始時間離開視窗才送。
+ * 所以過去 60 秒累計 55 件內全速寫入，超過才會被放慢，而不是撞到 Google 的配額而失敗。
  */
-export const APPEND_MIN_INTERVAL_MS = 1000;
+export const APPEND_WINDOW_MAX = 55;
+export const APPEND_WINDOW_MS = 60_000;
 /**
- * 同時在佇列中（含正在送出）的 append 上限。正常使用時前端是逐筆等回應才送下一筆，
- * 佇列長度頂多等於同時關箱的人數（個位數）；超過上限就直接回 503，避免異常流量讓請求越積越多、等待時間失控。
- * 以每秒 1 筆計，50 筆最多等約 50 秒，仍低於一般反向代理 60 秒左右的逾時（等得比代理逾時還久，
- * 前端會先看到失敗、伺服器之後卻還是寫入了，使用者重送就會變成重複列）。
+ * 同時排隊等名額（視窗已滿、還沒送出）的 append 上限；超過就直接回 503，避免異常流量讓請求與連線越積越多。
+ * 已經拿到名額、正在送出的不算。這個上限不是等待時間的上限：排隊的人最多等約一個視窗長度（60 秒），
+ * 與排在第幾個無關（每過一個視窗，最舊的那批起始會一起離開）。等得比反向代理的逾時（常見 60 秒左右）還久時，
+ * 前端會先看到失敗、伺服器之後卻還是寫入了，使用者重送就會變成重複列。
  */
 export const APPEND_MAX_PENDING = 50;
 
@@ -207,22 +208,16 @@ export interface SheetsClientOptions {
   fetchImpl: FetchLike;
   log: Logger;
   now?: () => number;
-  /** append 配速時的等待函式；測試時注入以免真的等待（通常同時讓假時鐘前進）。 */
+  /** append 視窗已滿、要等名額時的等待函式；測試時注入以免真的等待（通常同時讓假時鐘前進）。 */
   sleep?: (ms: number) => Promise<void>;
   headerTtlMs?: number;
   timeoutMs?: number;
-  /** 相鄰兩次 append 請求的最小起始間隔（毫秒）；預設 APPEND_MIN_INTERVAL_MS。 */
-  appendMinIntervalMs?: number;
-  /** 同時排隊（含正在送出）的 append 上限；預設 APPEND_MAX_PENDING。 */
+  /** 滾動視窗內最多起始幾次 append；預設 APPEND_WINDOW_MAX。 */
+  appendWindowMax?: number;
+  /** 滾動視窗的長度（毫秒）；預設 APPEND_WINDOW_MS。 */
+  appendWindowMs?: number;
+  /** 同時排隊等名額的 append 上限；預設 APPEND_MAX_PENDING。 */
   appendMaxPending?: number;
-}
-
-/** append 配速交給 request() 的兩個掛鉤。 */
-interface AppendHooks {
-  /** 401 之後、重送之前呼叫：重送也是一次 append 請求，同樣要等滿配速間隔。 */
-  beforeRetry: () => Promise<void>;
-  /** 每次 fetch 被呼叫之後、等待回應之前呼叫：記錄真正的送出時間。 */
-  onSend: () => void;
 }
 
 export interface AppendResult {
@@ -251,11 +246,11 @@ function mapGoogleError(status: number, sheetName: string): ServiceError {
  * - 表頭快取 5 分鐘：改了試算表表頭後最多 5 分鐘生效；表頭缺欄位造成寫入失敗時會立刻清掉快取，
  *   修好表頭後下一筆就會重新讀取。
  * - append 不自動重試（逾時或 5xx 時無法確定有沒有寫進去，重試可能造成重複列）；
- *   唯一的例外是 401（授權過期，請求尚未執行）：換新 token 後重送一次——重送也是一次 append 請求，
- *   同樣要等滿配速間隔才送。
- * - append 全域配速：同一個 SheetsClient 實例內（server.ts 只建一個 app，所以等於整個程序）、不分來源請求，
- *   append 一次只送一筆，且相鄰兩筆的起始時間至少間隔 appendMinIntervalMs（見 APPEND_MIN_INTERVAL_MS 的說明）。
- *   讀表頭不受這個限制。
+ *   唯一的例外是 401（授權過期，請求尚未執行）：換新 token 後重送一次——重送算一次新的起始，同樣受視窗限制。
+ * - append 滾動視窗配額（全域）：同一個 SheetsClient 實例內（server.ts 只建一個 app，所以等於整個程序）、不分來源請求，
+ *   過去 appendWindowMs 內已起始的 append 少於 appendWindowMax 次就立刻送出（不人為等待，可以同時有多筆在途）；
+ *   達到上限時依先進先出排隊，等最舊的那次起始時間離開視窗才送（細節見 APPEND_WINDOW_MAX 的說明）。
+ *   換不到 token 的失敗發生在取得名額之前，不佔配額；讀表頭不受這個限制。
  */
 export class SheetsClient {
   private headerCache: { header: string[]; fetchedAt: number } | null = null;
@@ -269,14 +264,18 @@ export class SheetsClient {
   private readonly sleepFn: (ms: number) => Promise<void>;
   private readonly headerTtlMs: number;
   private readonly timeoutMs: number;
-  private readonly appendMinIntervalMs: number;
+  private readonly appendWindowMax: number;
+  private readonly appendWindowMs: number;
   private readonly appendMaxPending: number;
-  /** append 佇列的尾端：下一筆 append 要等它完成（成功或失敗都會放行）才能開始。 */
-  private appendTail: Promise<void> = Promise.resolve();
-  /** 目前在佇列中（含正在送出）的 append 數量。 */
-  private pendingAppends = 0;
-  /** 最近一次「真正送出」append 請求的時間（毫秒）；null＝還沒送過。 */
-  private lastAppendSentAt: number | null = null;
+  /**
+   * 滾動視窗內「已起始」的 append 的起始時間（毫秒，由舊到新）。
+   * 取得名額的同一個同步步驟就記錄（檢查有沒有名額、記錄起始時間之間不讓出控制權），同時進來的請求才不會超發。
+   */
+  private appendStarts: number[] = [];
+  /** 正在排隊等名額的 append 數量（視窗已滿時才會有）。 */
+  private waitingAppends = 0;
+  /** 排隊鏈的尾端：後來的 append 要等前面排的都拿到名額才輪到（先進先出）；成功或失敗都會放行下一個。 */
+  private appendQueueTail: Promise<void> = Promise.resolve();
 
   constructor(options: SheetsClientOptions) {
     this.tokenProvider = options.tokenProvider;
@@ -288,7 +287,9 @@ export class SheetsClient {
     this.sleepFn = options.sleep ?? sleep;
     this.headerTtlMs = options.headerTtlMs ?? HEADER_CACHE_MS;
     this.timeoutMs = options.timeoutMs ?? SHEETS_REQUEST_TIMEOUT_MS;
-    this.appendMinIntervalMs = options.appendMinIntervalMs ?? APPEND_MIN_INTERVAL_MS;
+    const windowMax = options.appendWindowMax ?? APPEND_WINDOW_MAX;
+    this.appendWindowMax = windowMax >= 1 ? windowMax : 1; // 至少 1，否則永遠排不到名額
+    this.appendWindowMs = options.appendWindowMs ?? APPEND_WINDOW_MS;
     this.appendMaxPending = options.appendMaxPending ?? APPEND_MAX_PENDING;
   }
 
@@ -309,8 +310,8 @@ export class SheetsClient {
       `${SHEETS_API}/${encodeURIComponent(this.spreadsheetId)}/values/${encodeURIComponent(range)}:append` +
       "?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS";
     const payload = { majorDimension: "ROWS", values: [mapped.values.map(toSheetCell)] };
-    // 讀表頭（上面的 getHeader）不經過配速；只有 append 這一步排隊。
-    const json = (await this.paceAppend((hooks) => this.request("POST", url, payload, hooks))) as {
+    // 讀表頭（上面的 getHeader）不受視窗限制；只有 append 這一步要先取得「起始」名額。
+    const json = (await this.request("POST", url, payload, () => this.acquireAppendStart())) as {
       updates?: { updatedRange?: unknown };
     } | null;
 
@@ -345,65 +346,85 @@ export class SheetsClient {
   }
 
   /**
-   * append 全域配速：把所有 append 請求排成一條佇列（先進先出），一次只送一筆，且距離上一筆「真正送出」至少
-   * appendMinIntervalMs；需要等的時候只補足差額。task 收到的 hooks.onSend 要在 fetch 被呼叫之後立刻呼叫，用來記錄送出時間；
-   * hooks.beforeRetry 讓 401 之後的重送也遵守同樣的間隔。
+   * 取得一個 append「起始」名額（滾動視窗配額，見 APPEND_WINDOW_MAX 的說明）。
    *
-   * 這是一個簡單的非同步互斥鎖（promise chain）：每筆 append 先等前一筆的 promise，結束時（不論成功或失敗）
-   * 在 finally 放行下一筆並歸還名額，所以前一筆失敗不會卡住後面的。送出前就失敗的（例如換不到 token）不會更新送出時間，
-   * 後面的也就不必為它多等。
+   * - 快速路徑：沒有人在排隊、而且視窗內已起始的次數還沒到上限 → 當場記錄起始時間並放行，不等待、不讓出控制權
+   *   （檢查與記錄是同一個同步步驟，所以同時進來的請求不會超發；也因此視窗內可以同時有多筆在途）。
+   * - 慢速路徑：視窗已滿（或前面已有人在排）→ 先進先出排隊；輪到時，等最舊的那次起始時間離開視窗才記錄並放行。
+   *   排隊的人數超過 appendMaxPending 就直接回 503。
+   *
+   * 排隊鏈是一個簡單的非同步互斥鎖（promise chain）：每個排隊的人先等前一個拿到名額，結束時（不論成功或失敗）
+   * 在 finally 歸還排隊名額並放行下一個，所以任何一個失敗都不會卡住後面的。
+   *
+   * 注意：睡醒後不再重檢視窗，直接取得名額。所以注入的 sleep 必須真的等滿（或讓注入的時鐘前進）至少 ms 毫秒；
+   * 提早返回的 sleep 會讓視窗短暫超發。正式環境用的 common.ts 的 sleep 保證至少等 ms（以 Date.now() 衡量）。
    */
-  private async paceAppend<T>(task: (hooks: AppendHooks) => Promise<T>): Promise<T> {
-    if (this.pendingAppends >= this.appendMaxPending) {
-      this.log.warn(`[sheets] append 佇列已滿（${this.pendingAppends}/${this.appendMaxPending}），拒絕這次寫入`);
+  private async acquireAppendStart(): Promise<void> {
+    const arrivedAt = this.now();
+    this.pruneAppendStarts(arrivedAt);
+    if (this.waitingAppends === 0 && this.appendStarts.length < this.appendWindowMax) {
+      this.appendStarts.push(arrivedAt);
+      return;
+    }
+
+    if (this.waitingAppends >= this.appendMaxPending) {
+      this.log.warn(`[sheets] append 佇列已滿（${this.waitingAppends}/${this.appendMaxPending}），拒絕這次寫入`);
       throw new ServiceError(503, "目前等待寫入的筆數過多，請稍後再試");
     }
-    this.pendingAppends += 1;
-    const previous = this.appendTail;
+    this.waitingAppends += 1;
+    const previous = this.appendQueueTail;
     let release!: () => void;
-    this.appendTail = new Promise<void>((resolve) => {
+    this.appendQueueTail = new Promise<void>((resolve) => {
       release = resolve;
     });
     try {
-      await previous;
-      await this.waitAppendInterval();
-      return await task({
-        beforeRetry: () => this.waitAppendInterval(),
-        onSend: () => {
-          this.lastAppendSentAt = this.now();
-        },
-      });
+      await previous; // 前面排的都已拿到名額，輪到我了
+      let now = this.now();
+      this.pruneAppendStarts(now);
+      if (this.appendStarts.length >= this.appendWindowMax) {
+        // 等最舊的那次起始離開視窗。pruneAppendStarts 已把比 now 還晚的時間戳壓成 now，所以最多只等一個視窗長度。
+        const waitMs = this.appendStarts[0]! + this.appendWindowMs - now;
+        if (waitMs > 0) await this.sleepFn(waitMs);
+        now = this.now();
+        this.pruneAppendStarts(now);
+      }
+      this.appendStarts.push(now);
     } finally {
-      this.pendingAppends -= 1;
+      this.waitingAppends -= 1;
       release();
     }
   }
 
   /**
-   * 等到距離上一筆 append「送出」滿 appendMinIntervalMs（只補足差額）。
-   * 最多只等一個間隔：萬一系統時鐘被往回調，不會因此卡住很久。
+   * 丟掉已經離開視窗的起始時間（年齡 ≥ appendWindowMs）。比「現在」還晚的時間戳（系統時鐘被往回調）
+   * 一律當成剛剛才起始，所以時鐘往回調最多讓視窗多滿一個視窗長度，不會卡住更久。
    */
-  private async waitAppendInterval(): Promise<void> {
-    if (this.lastAppendSentAt === null) return;
-    const waitMs = Math.min(this.appendMinIntervalMs, this.lastAppendSentAt + this.appendMinIntervalMs - this.now());
-    if (waitMs > 0) await this.sleepFn(waitMs);
+  private pruneAppendStarts(now: number): void {
+    const kept: number[] = [];
+    for (const started of this.appendStarts) {
+      const at = Math.min(started, now);
+      if (now - at < this.appendWindowMs) kept.push(at);
+    }
+    this.appendStarts = kept;
   }
 
   /**
-   * 送出一次 Google 請求（含 401 時換 token 重送一次）。append 會帶 hooks：onSend 在「每次 fetch 被呼叫之後、
-   * 等待回應之前」立刻被呼叫，讓配速記錄真正的送出時間（換 token 所花的時間不會算進間隔裡）；
-   * beforeRetry 在 401 之後換好 token、重送之前被呼叫，讓重送也等滿間隔。
-   * 記錄放在 fetch 被呼叫「之後」而不是之前：這樣記錄的時間一定不早於 fetch 實際被呼叫的時間，
-   * 下一筆的等待目標（記錄時間＋間隔）就一定不早於「上一筆 fetch 被呼叫的時間＋間隔」，
-   * 以毫秒時鐘從外面量測相鄰兩筆 fetch 被呼叫的時間差，也不會因為毫秒進位而少 1 ms。
+   * 送出一次 Google 請求（含 401 時換 token 重送一次）。append 會帶 acquireStart：每次真正要送出之前先取得一個
+   * 「起始」名額（可能要排隊）——首次送出與 401 之後的重送都一樣，所以重送也算一次新的起始、同樣受視窗限制。
+   * 順序是先取得 token、再取得名額、取得後立刻呼叫 fetch：換不到 token 的失敗發生在取得名額之前，不佔配額。
    */
-  private async request(method: "GET" | "POST", url: string, body?: unknown, hooks?: AppendHooks): Promise<unknown> {
+  private async request(
+    method: "GET" | "POST",
+    url: string,
+    body?: unknown,
+    acquireStart?: () => Promise<void>,
+  ): Promise<unknown> {
     for (let attempt = 1; attempt <= 2; attempt++) {
       const token = await this.tokenProvider.getToken();
-      if (attempt > 1) await hooks?.beforeRetry();
+      await acquireStart?.();
       let res: Response;
       try {
-        const pending = this.fetchImpl(url, {
+        res = await this.fetchImpl(url, {
           method,
           headers: {
             Authorization: `Bearer ${token}`,
@@ -412,8 +433,6 @@ export class SheetsClient {
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: AbortSignal.timeout(this.timeoutMs),
         });
-        hooks?.onSend();
-        res = await pending;
       } catch (err) {
         this.log.error(`[sheets] ${method} 連線失敗或逾時：${describeError(err)}`);
         throw new ServiceError(502, "Google 試算表連線失敗或逾時，請稍後再試");
