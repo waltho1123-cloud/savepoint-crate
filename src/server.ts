@@ -45,6 +45,18 @@ function main(): void {
     );
   }
 
+  // LINE 關箱通知是選填功能：三個變數都沒設定就完全靜默；只設定一半時提醒（名稱而已，不印值）。
+  const hasLineToken = env.LINE_CHANNEL_ACCESS_TOKEN !== "";
+  const hasLineGroup = env.LINE_GROUP_ID !== "";
+  if (hasLineToken !== hasLineGroup) {
+    console.warn("[config] 關箱 LINE 通知需要同時設定 LINE_CHANNEL_ACCESS_TOKEN 與 LINE_GROUP_ID（目前只設定了其中一個）：關箱時不會推播");
+  } else if (hasLineGroup && !env.LINE_GROUP_ID.startsWith("C")) {
+    console.warn("[config] LINE_GROUP_ID 看起來不是群組 ID（群組 ID 以 C 開頭）：推播可能會失敗");
+  }
+  if (env.LINE_CHANNEL_SECRET !== "" && !hasLineToken) {
+    console.warn("[config] 已設定 LINE_CHANNEL_SECRET 但沒有 LINE_CHANNEL_ACCESS_TOKEN：webhook 只能把群組 ID 寫進 log，無法回覆");
+  }
+
   const app = createApp({ env, indexHtml });
   const server = serve({ fetch: app.fetch, port: env.PORT, hostname: "0.0.0.0" }, (info) => {
     console.log(`savepoint-crate listening on port ${info.port} (${info.address})`);

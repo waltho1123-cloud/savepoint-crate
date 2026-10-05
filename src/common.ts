@@ -2,7 +2,7 @@
  * 各模組共用的小東西：可回給前端的錯誤型別、log 介面、fetch 型別、睡眠函式。
  */
 
-/** 全域 fetch 的型別。所有對外呼叫（OpenAI、Google）都經由注入的 FetchLike，方便測試時 mock。 */
+/** 全域 fetch 的型別。所有對外呼叫（OpenAI、Google、LINE）都經由注入的 FetchLike，方便測試時 mock。 */
 export type FetchLike = typeof fetch;
 
 export interface Logger {
@@ -23,7 +23,7 @@ export const silentLogger: Logger = {
   error: () => undefined,
 };
 
-export type ServiceErrorStatus = 400 | 413 | 429 | 500 | 502 | 503;
+export type ServiceErrorStatus = 400 | 401 | 413 | 429 | 500 | 502 | 503;
 
 /**
  * 可以直接回給前端的錯誤。
@@ -57,14 +57,24 @@ export async function sleep(ms: number): Promise<void> {
   }
 }
 
-/** 把例外轉成一行可寫進 log 的短字串（只取名稱與訊息，截斷到 200 字，不帶 stack 與請求內容）。 */
-export function describeError(err: unknown): string {
+/**
+ * 把例外轉成一行可寫進 log 的短字串（只取名稱與訊息，截斷到 200 字，不帶 stack 與請求內容）。
+ * secrets 裡的字串（例如 token）如果出現在訊息裡，會先整段換成 ***，**之後**才截斷——
+ * 先截斷再遮罩的話，剛好被截在邊界上的殘缺 token 前綴就遮不到了。
+ */
+export function describeError(err: unknown, secrets: readonly string[] = []): string {
+  let text: string;
   if (err instanceof Error) {
     const cause = (err as { cause?: { code?: unknown } }).cause;
     const code = cause && typeof cause.code === "string" ? ` (${cause.code})` : "";
-    return `${err.name}: ${err.message}${code}`.slice(0, 200);
+    text = `${err.name}: ${err.message}${code}`;
+  } else {
+    text = String(err);
   }
-  return String(err).slice(0, 200);
+  for (const secret of secrets) {
+    if (secret !== "") text = text.split(secret).join("***");
+  }
+  return text.slice(0, 200);
 }
 
 /** 讀取 JSON 回應；不是合法 JSON 時回 null，不丟例外。 */

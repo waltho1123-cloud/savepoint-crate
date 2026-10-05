@@ -11,6 +11,9 @@ describe("loadEnv", () => {
       GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: "",
       GOOGLE_SHEET_ID: "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A",
       GOOGLE_SHEET_NAME: "商品主檔",
+      LINE_CHANNEL_ACCESS_TOKEN: "",
+      LINE_GROUP_ID: "",
+      LINE_CHANNEL_SECRET: "",
       PORT: 8080,
     });
   });
@@ -23,6 +26,9 @@ describe("loadEnv", () => {
       GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: " abc ",
       GOOGLE_SHEET_ID: "sheet-id",
       GOOGLE_SHEET_NAME: "分頁",
+      LINE_CHANNEL_ACCESS_TOKEN: "  line-token \n",
+      LINE_GROUP_ID: " C0123456789abcdef0123456789abcdef ",
+      LINE_CHANNEL_SECRET: "\tline-secret",
       PORT: "9090",
     });
     expect(env).toEqual({
@@ -32,12 +38,26 @@ describe("loadEnv", () => {
       GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: "abc",
       GOOGLE_SHEET_ID: "sheet-id",
       GOOGLE_SHEET_NAME: "分頁",
+      LINE_CHANNEL_ACCESS_TOKEN: "line-token",
+      LINE_GROUP_ID: "C0123456789abcdef0123456789abcdef",
+      LINE_CHANNEL_SECRET: "line-secret",
       PORT: 9090,
     });
   });
 
-  it("空白字串視同未設定，回到預設值", () => {
-    const env = loadEnv({ OPENAI_MODEL: "  ", GOOGLE_SHEET_NAME: "", OPENAI_BASE_URL: " ", GOOGLE_SHEET_ID: "\n" });
+  it("空白字串視同未設定，回到預設值（LINE 三個變數是空字串）", () => {
+    const env = loadEnv({
+      OPENAI_MODEL: "  ",
+      GOOGLE_SHEET_NAME: "",
+      OPENAI_BASE_URL: " ",
+      GOOGLE_SHEET_ID: "\n",
+      LINE_CHANNEL_ACCESS_TOKEN: "  ",
+      LINE_GROUP_ID: "\n",
+      LINE_CHANNEL_SECRET: "",
+    });
+    expect(env.LINE_CHANNEL_ACCESS_TOKEN).toBe("");
+    expect(env.LINE_GROUP_ID).toBe("");
+    expect(env.LINE_CHANNEL_SECRET).toBe("");
     expect(env.OPENAI_MODEL).toBe("gpt-5.6-luna");
     expect(env.GOOGLE_SHEET_NAME).toBe("商品主檔");
     expect(env.OPENAI_BASE_URL).toBe("https://api.openai.com");

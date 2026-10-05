@@ -63,6 +63,8 @@ describe("src/server.ts（實際啟動行程）", () => {
         sheetsConfigured: false,
         serviceAccountEmail: null,
         clientIp: "127.0.0.1",
+        lineConfigured: false,
+        lineWebhookConfigured: false,
       });
 
       // 帶 X-Forwarded-For：取最右邊的公開位址（左邊客戶端自填的不採信）

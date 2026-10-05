@@ -941,6 +941,45 @@ const SaveEngine = {
   }
 };
 
+// ========== NotifyEngine (後端 /api/box-closed → LINE 群組通知) ==========
+const NotifyEngine = {
+  NOTIFY_URL: '/api/box-closed',
+
+  // 關箱後通知 LINE 群組。任何失敗都不能影響關箱：整段包 try/catch，只在推播失敗時提示，其餘只寫 console。
+  // saveResult 是 SaveEngine.saveBoxItems 的回傳；它丟例外（null）時，成功筆數算 0。
+  async boxClosed(box, saveResult) {
+    try {
+      // 空箱子（沒有任何商品）不通知：同步會顯示「無資料可儲存」，再發一則「已完成」的 LINE 訊息只會互相矛盾。
+      if (Array.isArray(box.items) && box.items.length === 0) return;
+      // 超過後端驗證上限的值（數量 9999、文字 200 字、500 筆）先截斷：不然整則通知會被 400 擋掉、什麼都收不到。
+      const clip = value => String(value || '').slice(0, 200);
+      const items = box.items.slice(0, 500).map(item => ({
+        barcode: clip(item.barcode),
+        productName: clip(item.productName),
+        gender: clip(item.gender),
+        color: clip(item.color),
+        size: clip(item.size),
+        qty: Math.min(9999, Math.max(1, parseInt(item.qty, 10) || 1))
+      }));
+      const total = saveResult && typeof saveResult.total === 'number' ? saveResult.total : items.length;
+      const successCount = saveResult && typeof saveResult.successCount === 'number' ? saveResult.successCount : 0;
+      const failedCount = saveResult && typeof saveResult.failCount === 'number' ? saveResult.failCount : total - successCount;
+      const resp = await fetch(this.NOTIFY_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ boxId: box.id, closedAt: new Date().toISOString(), items, total, successCount, failedCount })
+      });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const result = await resp.json();
+      if (result.notified === false && result.reason === 'push_failed') {
+        showToast('LINE 通知失敗（不影響關箱）', 'error');
+      }
+    } catch (e) {
+      console.error('LINE notify error:', e);
+    }
+  }
+};
+
 // ========== PrintManager ==========
 const PrintManager = {
   _setPrintMode(mode) {
@@ -1057,8 +1096,10 @@ document.getElementById('btn-close-box').addEventListener('click', () => {
 
     // Save to Google Sheets via n8n
     showToast('正在同步到商品主檔…', '');
+    let notifySaveResult = null; // 關箱通知用；saveBoxItems 丟例外時維持 null
     try {
       const saveResult = await SaveEngine.saveBoxItems(box);
+      notifySaveResult = saveResult;
       if (saveResult.success) {
         showToast(`已同步 ${saveResult.successCount} 筆到商品主檔 ✓`, 'success');
       } else if (saveResult.successCount > 0) {
@@ -1070,6 +1111,9 @@ document.getElementById('btn-close-box').addEventListener('click', () => {
       console.error('Save failed:', e);
       showToast('同步發生錯誤：' + e.message, 'error');
     }
+
+    // 關箱通知（LINE 群組）：不等回應、失敗不影響關箱
+    NotifyEngine.boxClosed(box, notifySaveResult);
 
     BoxManager.closeBox(box.id);
     showToast('箱號 ' + box.id + ' 已完成', 'success');

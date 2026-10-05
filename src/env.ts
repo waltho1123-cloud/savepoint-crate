@@ -4,6 +4,7 @@
  * 設計取捨：缺少 OPENAI_API_KEY／GOOGLE_SERVICE_ACCOUNT_CREDENTIALS 時服務**仍會啟動**
  * （靜態頁與 /healthz 照常），只是對應端點回 503；這樣部署到 Zeabur 後即使金鑰還沒填，
  * 也能開 /healthz 看到「哪一項還沒設定」，不會變成反覆崩潰重啟。
+ * LINE 三個變數（關箱通知）都是選填：沒設定時整個通知功能靜默略過，絕不影響關箱與存檔。
  * 絕不在 log 或錯誤訊息裡印出任何變數的值。
  */
 
@@ -23,6 +24,12 @@ export interface AppEnv {
   GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: string;
   GOOGLE_SHEET_ID: string;
   GOOGLE_SHEET_NAME: string;
+  /** LINE Messaging API 的 channel access token（推播與 webhook 回覆用）；空字串＝未設定。 */
+  LINE_CHANNEL_ACCESS_TOKEN: string;
+  /** 關箱通知的目標群組 ID（C 開頭）；空字串＝未設定。token 與群組 ID 兩者都有才會推播。 */
+  LINE_GROUP_ID: string;
+  /** channel secret，只用來驗證 webhook 簽章；空字串＝未設定（POST /api/line/webhook 回 503）。 */
+  LINE_CHANNEL_SECRET: string;
   PORT: number;
 }
 
@@ -47,6 +54,9 @@ export function loadEnv(source: EnvSource = process.env): AppEnv {
     GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: pick(source, "GOOGLE_SERVICE_ACCOUNT_CREDENTIALS", ""),
     GOOGLE_SHEET_ID: pick(source, "GOOGLE_SHEET_ID", DEFAULT_GOOGLE_SHEET_ID),
     GOOGLE_SHEET_NAME: pick(source, "GOOGLE_SHEET_NAME", DEFAULT_GOOGLE_SHEET_NAME),
+    LINE_CHANNEL_ACCESS_TOKEN: pick(source, "LINE_CHANNEL_ACCESS_TOKEN", ""),
+    LINE_GROUP_ID: pick(source, "LINE_GROUP_ID", ""),
+    LINE_CHANNEL_SECRET: pick(source, "LINE_CHANNEL_SECRET", ""),
     PORT: parsePort(source.PORT),
   };
 }

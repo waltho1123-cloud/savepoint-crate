@@ -1,4 +1,4 @@
-import { generateKeyPairSync, type KeyObject } from "node:crypto";
+import { createHmac, generateKeyPairSync, type KeyObject } from "node:crypto";
 import { vi } from "vitest";
 
 import type { Logger } from "../src/common.js";
@@ -155,3 +155,17 @@ export function createCapturingLogger(): Logger & { lines: string[] } {
 
 /** 一張假的 JPEG data URL（內容不重要，只要格式對）。 */
 export const SAMPLE_IMAGE = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/";
+
+// ---------------------------------------------------------------------------
+// LINE：測試用的假 token／secret／群組 ID（都不是真的）與 webhook 簽章。
+// ---------------------------------------------------------------------------
+
+export const TEST_LINE_TOKEN = "test-line-access-token-123";
+export const TEST_LINE_SECRET = "test-line-channel-secret-456";
+/** 群組 ID 的格式：C＋32 位十六進位。 */
+export const TEST_GROUP_ID = "C0123456789abcdef0123456789abcdef";
+
+/** LINE webhook 的 X-Line-Signature：對原始 body 做 HMAC-SHA256（金鑰是 channel secret）、base64。 */
+export function signLineBody(body: string | Uint8Array, secret: string = TEST_LINE_SECRET): string {
+  return createHmac("sha256", secret).update(body).digest("base64");
+}

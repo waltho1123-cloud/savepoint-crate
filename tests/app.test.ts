@@ -88,6 +88,8 @@ describe("GET /healthz", () => {
       sheetsConfigured: true,
       serviceAccountEmail: creds.email,
       clientIp: "unknown", // app.request 沒有真實連線，也沒帶 X-Forwarded-For
+      lineConfigured: false,
+      lineWebhookConfigured: false,
     });
   });
 
@@ -106,6 +108,8 @@ describe("GET /healthz", () => {
       sheetsConfigured: false,
       serviceAccountEmail: null,
       clientIp: "unknown",
+      lineConfigured: false,
+      lineWebhookConfigured: false,
     });
   });
 
@@ -181,6 +185,8 @@ describe("GET /healthz", () => {
     const text = await (await app.request("/healthz")).text();
     expect(Object.keys(JSON.parse(text) as object).sort()).toEqual([
       "clientIp",
+      "lineConfigured",
+      "lineWebhookConfigured",
       "ok",
       "openaiConfigured",
       "serviceAccountEmail",

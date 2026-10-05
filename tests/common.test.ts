@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { sleep } from "../src/common.js";
+import { describeError, sleep } from "../src/common.js";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -74,5 +74,34 @@ describe("sleep（至少等 ms 毫秒）", () => {
 
     await sleep(100);
     expect(delays).toEqual([100, 100, 100]);
+  });
+});
+
+describe("describeError（log 用的簡短錯誤描述）", () => {
+  it("只取名稱與訊息、最多 200 字；非 Error 轉成字串", () => {
+    expect(describeError(new TypeError("fetch failed"))).toBe("TypeError: fetch failed");
+    expect(describeError("純字串")).toBe("純字串");
+    expect(describeError(new Error("x".repeat(500)))).toHaveLength(200);
+    expect(describeError("y".repeat(500))).toHaveLength(200);
+  });
+
+  it("有 cause.code 時附在後面", () => {
+    const err = new TypeError("fetch failed", { cause: Object.assign(new Error("connect"), { code: "ECONNREFUSED" }) });
+    expect(describeError(err)).toBe("TypeError: fetch failed (ECONNREFUSED)");
+  });
+
+  it("secrets 先整段換成 ***、之後才截斷：被截在 200 字邊界上的 token 也遮得到", () => {
+    const token = "secret-token-abcdefghijklmnopqrstuvwxyz-0123456789";
+    // 訊息前面 150 字、後面接 token：若先截斷到 200 字再遮罩，token 只剩殘缺前綴（前 50 字裡的 40 多字）就遮不掉
+    const err = new Error(`${"x".repeat(150)} Bearer ${token}`);
+    const text = describeError(err, [token]);
+    expect(text).not.toContain("secret-token");
+    expect(text).toContain("Bearer ***");
+    expect(describeError(new Error(`a ${token} b ${token}`), [token])).toBe("Error: a *** b ***");
+    expect(describeError(`${token}`, [token])).toBe("***");
+  });
+
+  it("空字串的 secret 被忽略（不會把整段文字炸成 ***）", () => {
+    expect(describeError(new Error("abc"), ["", ""])).toBe("Error: abc");
   });
 });
