@@ -94,12 +94,14 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 - **NODE_ENV**：Zeabur 會把 `NODE_ENV=production` 注入 build 階段，pnpm 會因此跳過 devDependencies 導致建置失敗；Dockerfile 的 build 階段已明確設 `ENV NODE_ENV=development` 並用 `--prod=false`，不要拿掉。
 - **pnpm 版本**：`package.json` 的 `packageManager`、Dockerfile 的 `corepack prepare pnpm@…`、產生 `pnpm-lock.yaml` 的 pnpm 三者必須同版（目前 9.15.9），否則 `--frozen-lockfile` 會失敗。
 - 在服務的環境變數頁設定上表的變數（至少 `OPENAI_API_KEY`、`GOOGLE_SERVICE_ACCOUNT_CREDENTIALS`）。**改環境變數後容器不會自動重啟**：請重啟服務，並用 `GET /healthz` 確認 `openaiConfigured`、`sheetsConfigured` 都變成 `true`；若仍是 `false`（重啟沒有帶到新增的變數），改為重新部署。
+- **重啟與重新部署**：收到 SIGTERM／SIGINT 後，服務停止接受新連線，並最多等 25 秒（`src/server.ts` 的 `SHUTDOWN_GRACE_MS`，比 Kubernetes 預設的 30 秒終止寬限期短）讓處理中與排隊中的存檔寫完；超過的會被中斷。有人正在關大箱子時請避免重啟或部署。
 - 本機驗證映像：`docker build -t savepoint-crate:local .`，再 `docker run --rm -p 8080:8080 -e OPENAI_API_KEY=x -e GOOGLE_SERVICE_ACCOUNT_CREDENTIALS=x savepoint-crate:local`。
 - 部署後檢查：
   1. runtime log 出現 `savepoint-crate listening on port 8080`。
   2. `curl -s https://<網域>/healthz`：`openaiConfigured`、`sheetsConfigured` 皆為 `true`，並把 `serviceAccountEmail` 加為試算表編輯者。
   3. **確認反向代理的 IP 處理**：同一個 `/healthz` 回應的 `clientIp` 應該是你自己的對外 IP（可與「我的 IP」網站比對）。如果看到 `10.x`、`172.16–31.x`、`192.168.x`、`100.64–127.x` 這類內部位址或 `"unknown"`，或不同人 curl 得到同一個值，代表 `X-Forwarded-For` 沒有被正確取得，**所有使用者會共用同一個限流額度**，需要先處理再上線。
-  4. 最後在頁面實際拍一張標籤、關一個箱子，確認有寫進試算表。
+  4. **偽造測試**：`curl -s -H 'X-Forwarded-For: 203.0.113.99' https://<網域>/healthz` 回的 `clientIp` **不得**是 `203.0.113.99`（應該仍是你自己的對外 IP）。若回的是偽造值，代表代理沒有把真實 IP 附加在 `X-Forwarded-For` 最右邊，限流可以被客戶端自填的標頭繞過，需要先處理。
+  5. 最後在頁面實際拍一張標籤、關一個箱子，確認有寫進試算表。
 
 ## 回滾
 
@@ -138,11 +140,13 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 - **限流與寫入速度**：
   - **限流（每 IP 每分鐘）**：`/api/ocr` 60 次（`OCR_RATE_LIMIT_MAX`）、`/api/save` 600 次（`SAVE_RATE_LIMIT_MAX`），兩個額度**各自獨立計算**——關箱時前端是逐筆、循序送出，不會被拍照的次數擠壓。其他 `/api/*` 路徑（含不存在的）算進 OCR 的額度。常數在 `src/app.ts`。同一個出口 IP（例如倉庫同一個網路）的人共用一份額度。
   - **寫入速度（真正的瓶頸）**：Google Sheets API 的寫入配額預設是每分鐘 60 次／使用者（服務帳號算一個使用者；每專案 300 次，超過回 429；來源：developers.google.com/workspace/sheets/api/limits，2026-10-05 查閱）。所以伺服器把所有 `values.append` 排成一條**全域**佇列（整個程序共用、不分來源請求，先進先出）：一次只送一筆，相鄰兩筆的**起始時間**至少間隔 1 秒（`src/sheets.ts` 的 `APPEND_MIN_INTERVAL_MS`，建構 `SheetsClient` 時可用 `appendMinIntervalMs` 覆寫）；前一筆不論成功或失敗都不會卡住後面的；讀表頭不受影響。
-  - **實務影響**：一個箱子有 N 筆商品，關箱同步至少要 N 秒（50 筆約 50 秒，期間畫面停在「正在同步到商品主檔…」）；多人同時關箱會互相排隊，整體速度仍是每秒 1 筆。Google 若回應很慢（單次 timeout 20 秒），後面排隊的請求也會跟著等。
+  - **實務影響**：第 1 筆不等待，所以一個箱子有 N 筆商品，關箱同步約需 (N−1) 秒再加上每筆的往返時間（例如 8 筆約 7 秒、50 筆約 49 秒）；多人同時關箱會互相排隊，整體速度仍是每秒 1 筆。Google 若回應很慢（單次 timeout 20 秒），後面排隊的請求也會跟著等。
+  - **⚠️ 前端沒有「同步中」的鎖定**：頁面的「正在同步到商品主檔…」提示約 2.5 秒就消失，確認對話框關閉後「完成此箱」鈕仍可按，直到全部寫完才會鎖箱。`index.html` 依規定只改了兩個端點常數，沒有動這部分。所以請提醒現場：**按下確認後，等到出現「已同步 N 筆到商品主檔 ✓」再離開頁面或再按一次**——中途離開頁面，剩下的筆就不會送出；重複按會把同一箱再送一次（重複列）。要根治，需要讓前端在同步期間鎖住按鈕、顯示進度（或改成批次送出），這會動到 `index.html`，需要另外決定。
   - **配額邊緣**：不間斷地連續寫入時，1 秒間隔剛好是每分鐘 60 次，正好壓在 Google 配額邊緣。如果實際看到 `/api/save` 回 502、且 log 出現 `[sheets] POST 失敗：HTTP 429`，請把 `APPEND_MIN_INTERVAL_MS` 調大一點（例如 1200）。
-  - **排隊上限**：同時排隊（含正在送出）的 append 超過 `APPEND_MAX_PENDING`（50）筆時，新的請求直接回 503「目前等待寫入的筆數過多」。以每秒 1 筆計，50 筆最多等約 50 秒，仍低於一般反向代理 60 秒左右的逾時；若等得更久，前端會先看到失敗、伺服器之後卻還是寫入，使用者重送就變成重複列。正常使用時前端是逐筆等回應才送下一筆，佇列長度頂多等於同時關箱的人數。
+  - **排隊上限**：同時排隊（含正在送出）的 append 超過 `APPEND_MAX_PENDING`（50）筆時，新的請求直接回 503「目前等待寫入的筆數過多」。每筆約 1 秒時，50 筆最多等約 50 秒，仍低於一般反向代理 60 秒左右的逾時（Google 變慢時每筆最長 20 秒，等待會更久，因為上限是用「筆數」而不是「時間」算的）；等得比代理逾時還久，前端會先看到失敗、伺服器之後卻還是寫入，使用者重送就變成重複列。正常使用時前端是逐筆等回應才送下一筆，佇列長度頂多等於同時關箱的人數。
+  - **已知限制**：(1) 上限是**全域**的，沒有每個 IP 各自的佇列額度——單一來源一次送出 50 個以上的請求（每分鐘 600 次的額度允許），就能讓全站的存檔暫時回 503 約 50 秒；(2) client 中途斷線時，已排進佇列的請求仍會寫入（與 n8n 版相同）；(3) 佇列在記憶體裡，服務重啟或重新部署時，還沒寫進試算表的排隊中存檔會遺失（見「部署」的優雅關閉說明）。
 - **不開 CORS**：頁面與 API 同源。
-- **`/api/save` 的 `values.append` 不自動重試**：逾時或 5xx 時無法確定有沒有寫進去，重試可能造成重複列；失敗時前端會提示，請到試算表確認後再補送。
+- **`/api/save` 的 `values.append` 不自動重試**：逾時或 5xx 時無法確定有沒有寫進去，重試可能造成重複列；失敗時前端會提示，請到試算表確認後再補送。唯一的例外是 401（授權過期、請求尚未執行）：換新 token 後重送一次，重送前一樣會等滿配速間隔。
 - log 不記請求內容（圖片、商品資料）與任何金鑰；上游失敗只記狀態碼與錯誤類型／代碼（Google 讀表頭失敗時另記其簡短錯誤訊息，方便判斷是分頁名稱還是權限問題；append 失敗不記訊息，因為可能回顯欄位值）。
 
 ## 專案結構

@@ -217,6 +217,14 @@ export interface SheetsClientOptions {
   appendMaxPending?: number;
 }
 
+/** append 配速交給 request() 的兩個掛鉤。 */
+interface AppendHooks {
+  /** 401 之後、重送之前呼叫：重送也是一次 append 請求，同樣要等滿配速間隔。 */
+  beforeRetry: () => Promise<void>;
+  /** 每次 fetch 被呼叫之後、等待回應之前呼叫：記錄真正的送出時間。 */
+  onSend: () => void;
+}
+
 export interface AppendResult {
   /** Sheets API 回應的 updates.updatedRange，例如 '商品主檔'!A125:K125；拿不到時為 undefined。 */
   updatedRange?: string;
@@ -243,7 +251,8 @@ function mapGoogleError(status: number, sheetName: string): ServiceError {
  * - 表頭快取 5 分鐘：改了試算表表頭後最多 5 分鐘生效；表頭缺欄位造成寫入失敗時會立刻清掉快取，
  *   修好表頭後下一筆就會重新讀取。
  * - append 不自動重試（逾時或 5xx 時無法確定有沒有寫進去，重試可能造成重複列）；
- *   唯一的例外是 401（授權過期，請求尚未執行）：換新 token 後重送一次。
+ *   唯一的例外是 401（授權過期，請求尚未執行）：換新 token 後重送一次——重送也是一次 append 請求，
+ *   同樣要等滿配速間隔才送。
  * - append 全域配速：同一個 SheetsClient 實例內（server.ts 只建一個 app，所以等於整個程序）、不分來源請求，
  *   append 一次只送一筆，且相鄰兩筆的起始時間至少間隔 appendMinIntervalMs（見 APPEND_MIN_INTERVAL_MS 的說明）。
  *   讀表頭不受這個限制。
@@ -301,7 +310,7 @@ export class SheetsClient {
       "?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS";
     const payload = { majorDimension: "ROWS", values: [mapped.values.map(toSheetCell)] };
     // 讀表頭（上面的 getHeader）不經過配速；只有 append 這一步排隊。
-    const json = (await this.paceAppend((markSent) => this.request("POST", url, payload, markSent))) as {
+    const json = (await this.paceAppend((hooks) => this.request("POST", url, payload, hooks))) as {
       updates?: { updatedRange?: unknown };
     } | null;
 
@@ -337,13 +346,14 @@ export class SheetsClient {
 
   /**
    * append 全域配速：把所有 append 請求排成一條佇列（先進先出），一次只送一筆，且距離上一筆「真正送出」至少
-   * appendMinIntervalMs；需要等的時候只補足差額。task 收到的 markSent 要在 fetch 被呼叫之後立刻呼叫，用來記錄送出時間。
+   * appendMinIntervalMs；需要等的時候只補足差額。task 收到的 hooks.onSend 要在 fetch 被呼叫之後立刻呼叫，用來記錄送出時間；
+   * hooks.beforeRetry 讓 401 之後的重送也遵守同樣的間隔。
    *
    * 這是一個簡單的非同步互斥鎖（promise chain）：每筆 append 先等前一筆的 promise，結束時（不論成功或失敗）
-   * 在 finally 放行下一筆，所以前一筆失敗不會卡住後面的。送出前就失敗的（例如換不到 token）不會更新送出時間，
+   * 在 finally 放行下一筆並歸還名額，所以前一筆失敗不會卡住後面的。送出前就失敗的（例如換不到 token）不會更新送出時間，
    * 後面的也就不必為它多等。
    */
-  private async paceAppend<T>(task: (markSent: () => void) => Promise<T>): Promise<T> {
+  private async paceAppend<T>(task: (hooks: AppendHooks) => Promise<T>): Promise<T> {
     if (this.pendingAppends >= this.appendMaxPending) {
       this.log.warn(`[sheets] append 佇列已滿（${this.pendingAppends}/${this.appendMaxPending}），拒絕這次寫入`);
       throw new ServiceError(503, "目前等待寫入的筆數過多，請稍後再試");
@@ -356,16 +366,12 @@ export class SheetsClient {
     });
     try {
       await previous;
-      if (this.lastAppendSentAt !== null) {
-        // 最多只等一個間隔：萬一系統時鐘被往回調，不會因此卡住很久。
-        const waitMs = Math.min(
-          this.appendMinIntervalMs,
-          this.lastAppendSentAt + this.appendMinIntervalMs - this.now(),
-        );
-        if (waitMs > 0) await this.sleepFn(waitMs);
-      }
-      return await task(() => {
-        this.lastAppendSentAt = this.now();
+      await this.waitAppendInterval();
+      return await task({
+        beforeRetry: () => this.waitAppendInterval(),
+        onSend: () => {
+          this.lastAppendSentAt = this.now();
+        },
       });
     } finally {
       this.pendingAppends -= 1;
@@ -374,15 +380,27 @@ export class SheetsClient {
   }
 
   /**
-   * 送出一次 Google 請求（含 401 時換 token 重送一次）。onSend 會在「每次 fetch 被呼叫之後、等待回應之前」立刻被呼叫，
-   * 讓 append 配速記錄真正的送出時間（換 token 所花的時間不會算進間隔裡）。
+   * 等到距離上一筆 append「送出」滿 appendMinIntervalMs（只補足差額）。
+   * 最多只等一個間隔：萬一系統時鐘被往回調，不會因此卡住很久。
+   */
+  private async waitAppendInterval(): Promise<void> {
+    if (this.lastAppendSentAt === null) return;
+    const waitMs = Math.min(this.appendMinIntervalMs, this.lastAppendSentAt + this.appendMinIntervalMs - this.now());
+    if (waitMs > 0) await this.sleepFn(waitMs);
+  }
+
+  /**
+   * 送出一次 Google 請求（含 401 時換 token 重送一次）。append 會帶 hooks：onSend 在「每次 fetch 被呼叫之後、
+   * 等待回應之前」立刻被呼叫，讓配速記錄真正的送出時間（換 token 所花的時間不會算進間隔裡）；
+   * beforeRetry 在 401 之後換好 token、重送之前被呼叫，讓重送也等滿間隔。
    * 記錄放在 fetch 被呼叫「之後」而不是之前：這樣記錄的時間一定不早於 fetch 實際被呼叫的時間，
    * 下一筆的等待目標（記錄時間＋間隔）就一定不早於「上一筆 fetch 被呼叫的時間＋間隔」，
    * 以毫秒時鐘從外面量測相鄰兩筆 fetch 被呼叫的時間差，也不會因為毫秒進位而少 1 ms。
    */
-  private async request(method: "GET" | "POST", url: string, body?: unknown, onSend?: () => void): Promise<unknown> {
+  private async request(method: "GET" | "POST", url: string, body?: unknown, hooks?: AppendHooks): Promise<unknown> {
     for (let attempt = 1; attempt <= 2; attempt++) {
       const token = await this.tokenProvider.getToken();
+      if (attempt > 1) await hooks?.beforeRetry();
       let res: Response;
       try {
         const pending = this.fetchImpl(url, {
@@ -394,7 +412,7 @@ export class SheetsClient {
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: AbortSignal.timeout(this.timeoutMs),
         });
-        onSend?.();
+        hooks?.onSend();
         res = await pending;
       } catch (err) {
         this.log.error(`[sheets] ${method} 連線失敗或逾時：${describeError(err)}`);

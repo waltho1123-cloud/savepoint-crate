@@ -149,6 +149,13 @@ describe("GET /healthz", () => {
       expect(await clientIp(app, { "x-forwarded-for": "garbage" }, connection("172.20.0.3"))).toBe("172.20.0.3");
     });
 
+    it("X-Forwarded-For 含 IPv6 zone id（%…）：略過，不會把客戶端給的字串回顯出來", async () => {
+      const { app } = makeApp();
+      const forged = "2001:db8::1%aaaa-attacker.controlled:text";
+      expect(await clientIp(app, { "x-forwarded-for": forged }, connection("198.51.100.7"))).toBe("198.51.100.7");
+      expect(await clientIp(app, { "x-forwarded-for": forged })).toBe("unknown");
+    });
+
     it('什麼都沒有（沒有 X-Forwarded-For、也沒有連線位址）：回 "unknown"', async () => {
       const { app } = makeApp();
       expect(await clientIp(app)).toBe("unknown");
@@ -546,6 +553,27 @@ describe("速率限制（OCR 每 IP 每分鐘 60 次、存檔每 IP 每分鐘 60
     expect((await app.request("/api/nope", { headers: ip("203.0.113.5") })).status).toBe(429);
     expect((await post(app, "/api/ocr", {}, ip("203.0.113.5"))).status).toBe(429);
     expect((await post(app, "/api/save", {}, ip("203.0.113.5"))).status).toBe(400);
+  });
+
+  it("路徑變體落在哪個額度：/api/save（含查詢字串、百分比編碼）算存檔額度；其餘變體算 OCR 額度", async () => {
+    const { app } = makeApp({ now: () => 1_000_000 });
+
+    // 其餘變體（都是不存在的路徑，回 404）：用 OCR 額度，不會吃掉存檔額度
+    const others = ["/api/save/", "/api/Save", "/api/saveX", "/api/save%2F", "/api/nope"];
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) {
+      expect((await app.request(others[i % others.length]!, { headers: ip("203.0.113.30") })).status).toBe(404);
+    }
+    expect((await post(app, "/api/ocr", {}, ip("203.0.113.30"))).status).toBe(429);
+    expect((await post(app, "/api/save", {}, ip("203.0.113.30"))).status).toBe(400); // 存檔額度完全沒被動到
+
+    // 指向 /api/save 的寫法：查詢字串、百分比編碼，都算存檔額度，不會吃掉 OCR 額度
+    const saves = ["/api/save?x=1", "/api/%73ave", "/api/save"];
+    for (let i = 0; i < SAVE_RATE_LIMIT_MAX; i++) {
+      const res = await post(app, saves[i % saves.length]!, {}, ip("203.0.113.31"));
+      if (res.status !== 400) throw new Error(`第 ${i + 1} 次（${saves[i % saves.length]}）預期 400，實際 ${res.status}`);
+    }
+    expect((await post(app, "/api/save", {}, ip("203.0.113.31"))).status).toBe(429);
+    expect((await post(app, "/api/ocr", {}, ip("203.0.113.31"))).status).toBe(400); // OCR 額度完全沒被動到
   });
 
   it("視窗過後恢復（OCR 與存檔都是）", async () => {

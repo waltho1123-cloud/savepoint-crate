@@ -365,7 +365,8 @@ describe("SheetsClient（Google Sheets REST：讀表頭＋append）", () => {
     };
     const log = createCapturingLogger();
     const tokenProvider = new GoogleTokenProvider(parseServiceAccountCredentials(creds.json)!, { fetchImpl, log });
-    const client = new SheetsClient({ tokenProvider, spreadsheetId: "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A", sheetName: "商品主檔", fetchImpl, log });
+    // 這個測試的重點是換 token；配速（含 401 重送遵守間隔）另有專屬測試，這裡關掉以免重送時真的等 1 秒
+    const client = new SheetsClient({ tokenProvider, spreadsheetId: "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A", sheetName: "商品主檔", fetchImpl, log, appendMinIntervalMs: 0 });
 
     await expect(client.appendRow(row)).resolves.toEqual({ updatedRange: "'商品主檔'!A125:K125" });
     expect(appendCalls).toBe(2);
@@ -448,13 +449,22 @@ describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時�
    * 假時鐘：sleep(ms) 只讓時鐘前進 ms（不真的等待）；記錄每個 append／讀表頭請求「送出時」的假時鐘。
    * tokenStatuses 可依序指定每一次換 token 的狀態碼（預設全部成功）。
    */
-  function setupPaced(options: { google?: Parameters<typeof createGoogleMock>[0]; client?: Partial<SheetsClientOptions>; tokenStatuses?: number[] } = {}) {
+  function setupPaced(
+    options: {
+      google?: Parameters<typeof createGoogleMock>[0];
+      client?: Partial<SheetsClientOptions>;
+      tokenStatuses?: number[];
+      /** 前 N 次 append 直接丟網路錯誤（模擬連線失敗／逾時）。 */
+      appendThrows?: number;
+    } = {},
+  ) {
     const google = createGoogleMock(options.google);
     const log = createCapturingLogger();
     let clock = 5_000_000;
     const sleeps: number[] = [];
     const sentAt = { append: [] as number[], header: [] as number[] };
     let tokenCalls = 0;
+    let appendCalls = 0;
     const fetchImpl: typeof fetch = async (input, init) => {
       const url = urlOf(input);
       if (url === GOOGLE_TOKEN_URL) {
@@ -462,6 +472,7 @@ describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時�
         if (status && status !== 200) return jsonResponse({ error: "invalid_grant" }, status);
       } else if (url.includes(":append")) {
         sentAt.append.push(clock);
+        if (++appendCalls <= (options.appendThrows ?? 0)) throw new TypeError("fetch failed");
       } else if ((init?.method ?? "GET").toUpperCase() === "GET") {
         sentAt.header.push(clock);
       }
@@ -540,6 +551,56 @@ describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時�
     expect(second).toMatchObject({ status: "fulfilled" });
     expect(sentAt.append).toEqual([t0, t0 + 5000]); // 失敗的那筆沒有送出任何 append
     expect(sleeps).toEqual([]); // 沒送出的請求不佔用間隔：第 2 筆不必為它多等
+  });
+
+  it("401 之後的重送也是一次 append 請求：同樣等滿間隔才送，後面排隊的從重送時間起算", async () => {
+    // append 呼叫順序：[1] 第 1 筆首次（401）、[2] 第 1 筆重送（200）、[3] 第 2 筆（200）
+    const { client, sentAt, sleeps, now } = setupPaced({ google: { appendStatuses: [401] } });
+    const t0 = now();
+    const results = await Promise.all([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
+
+    expect(results).toEqual(Array(2).fill({ updatedRange: "'商品主檔'!A125:K125" }));
+    expect(sentAt.append).toEqual([t0, t0 + 1000, t0 + 2000]); // 首次、重送、下一筆：相鄰各 1000 ms
+    expect(sleeps).toEqual([1000, 1000]);
+  });
+
+  it("401 連續兩次（重送也失敗）：回 500，且不卡住後面的", async () => {
+    const { client, sentAt } = setupPaced({ google: { appendStatuses: [401, 401] } });
+    const [first, second] = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
+    expect(first).toMatchObject({ status: "rejected", reason: { status: 500 } });
+    expect(second).toMatchObject({ status: "fulfilled" });
+    expect(sentAt.append).toHaveLength(3);
+  });
+
+  // 回歸測試：失敗（不論哪種）之後一定要歸還佇列名額；否則連續失敗幾次後，/api/save 會一直回 503 直到重啟。
+  it.each([
+    ["Google 回 500", { google: { appendStatuses: [500, 500] } }],
+    ["Google 回 429", { google: { appendStatuses: [429, 429] } }],
+    ["連線失敗或逾時", { appendThrows: 2 }],
+    ["401 連續兩次（每筆首次與重送都失敗）", { google: { appendStatuses: [401, 401, 401, 401] } }],
+  ])("失敗後會歸還佇列名額：%s（appendMaxPending=2，連續兩筆失敗之後仍能再寫兩筆）", async (_name, scenario) => {
+    const { client } = setupPaced({ ...scenario, client: { appendMaxPending: 2 } });
+
+    const failed = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
+    expect(failed.map((r) => r.status)).toEqual(["rejected", "rejected"]);
+    for (const result of failed) expect((result as PromiseRejectedResult).reason.status).not.toBe(503); // 是上游失敗，不是佇列已滿
+
+    // 若名額沒有歸還，這兩筆會被擋成 503
+    const next = await Promise.allSettled([client.appendRow(rowOf("3")), client.appendRow(rowOf("4"))]);
+    expect(next.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
+  });
+
+  it("換不到 token 的失敗也會歸還名額（送出前就失敗）", async () => {
+    // token 呼叫順序：[1] 暖機（成功）、[2][3] 兩筆都換不到（400）、[4][5] 之後成功
+    const { client, tokenProvider, advance } = setupPaced({ tokenStatuses: [200, 400, 400, 200, 200], client: { appendMaxPending: 2 } });
+    await client.appendRow(rowOf("0")); // 暖機：快取表頭
+    tokenProvider.invalidate();
+    advance(5000);
+
+    const failed = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
+    expect(failed.map((r) => r.status)).toEqual(["rejected", "rejected"]);
+    const next = await Promise.allSettled([client.appendRow(rowOf("3")), client.appendRow(rowOf("4"))]);
+    expect(next.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
   });
 
   it("讀表頭不受配速限制：append 正在排隊等待時，別的請求的表頭讀取會立刻送出", async () => {

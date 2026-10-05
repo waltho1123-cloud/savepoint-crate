@@ -67,6 +67,9 @@ export function firstPublicIp(xForwardedFor: string): string | null {
   for (let i = entries.length - 1; i >= 0; i--) {
     const candidate = entries[i];
     if (!candidate) continue;
+    // IPv6 的 zone id（例如 fe80::1%eth0）不是代理附加的真實來源位址；node:net 的 isIP() 卻會接受它，
+    // 任意 "%…" 後綴會讓客戶端自創無限多個限流 key，也會讓 /healthz 把客戶端給的字串原樣回顯，所以一律略過。
+    if (candidate.includes("%")) continue;
     const version = isIP(candidate);
     if (version === 4 && !isPrivateIPv4(candidate)) return candidate;
     if (version === 6 && !isPrivateIPv6(candidate)) return candidate.toLowerCase();

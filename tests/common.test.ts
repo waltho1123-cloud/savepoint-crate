@@ -44,7 +44,26 @@ describe("sleep（至少等 ms 毫秒）", () => {
     expect(clock).toBe(1_000_100); // 總共剛好 100 ms
   });
 
-  it("系統時鐘被往回調（Date.now 一直沒前進）：最多睡 3 輪就放棄，不會等很久", async () => {
+  it("系統時鐘在睡眠中途被往回調 1 小時：每輪最多睡 ms，最多 3 輪（不會睡上一小時）", async () => {
+    let clock = 1_000_000;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
+    const delays: number[] = [];
+    vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      // 第 1 輪：只前進了 50 ms（還差 50）；第 2 輪：時鐘被往回調 1 小時；第 3 輪：正常前進
+      if (delays.length === 1) clock += 50;
+      else if (delays.length === 2) clock -= 3_600_000;
+      else clock += ms ?? 0;
+      fn();
+      return 0 as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout);
+
+    await sleep(100);
+    expect(delays).toEqual([100, 50, 100]); // 第 3 輪被夾限在 ms（100），而不是 3_600_050
+    expect(Math.max(...delays)).toBeLessThanOrEqual(100);
+  });
+
+  it("系統時鐘卡住不動（Date.now 一直沒前進）：最多睡 3 輪就放棄，不會等很久", async () => {
     vi.spyOn(Date, "now").mockImplementation(() => 1_000_000); // 時鐘卡住不動
     const delays: number[] = [];
     vi.spyOn(globalThis, "setTimeout").mockImplementation(((fn: () => void, ms?: number) => {

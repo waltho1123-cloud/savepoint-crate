@@ -50,6 +50,14 @@ describe("getClientIp（Zeabur 反向代理把真實 IP 附加在 X-Forwarded-Fo
     expect(firstPublicIp("::ffff:203.0.113.5")).toBe("::ffff:203.0.113.5");
   });
 
+  it("IPv6 zone id（%…）一律略過：不能讓客戶端用任意後綴自創限流 key，也不會被回顯", () => {
+    expect(firstPublicIp("2001:db8::1%eth0")).toBeNull();
+    expect(firstPublicIp("2001:db8::1%aaaa-attacker.controlled:text")).toBeNull();
+    expect(getClientIp("2001:db8::1%a", "198.51.100.7")).toBe("198.51.100.7");
+    // 最右邊是 zone id 位址時，繼續往左找真正的公開位址
+    expect(getClientIp("203.0.113.9, 2001:db8::1%a", undefined)).toBe("203.0.113.9");
+  });
+
   it("沒有 X-Forwarded-For 或整串都不是公開位址：退回連線位址，再退回 unknown", () => {
     expect(getClientIp(undefined, "127.0.0.1")).toBe("127.0.0.1");
     expect(getClientIp("10.0.0.1, 192.168.1.1", "172.20.0.3")).toBe("172.20.0.3");

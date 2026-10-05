@@ -22,10 +22,12 @@ IPAS 庫存盤點裝箱系統（`savepoint-crate`）：手機網頁拍照 OCR �
 - **限流**（每 IP 每分鐘，記憶體內）：`/api/ocr` 60 次（`OCR_RATE_LIMIT_MAX`）、`/api/save` 600 次（`SAVE_RATE_LIMIT_MAX`），各用自己的 `FixedWindowLimiter`、互不擠壓；其他 `/api/*` 路徑算進 OCR 的額度。常數在 `src/app.ts`。
 - **append 全域配速**（`src/sheets.ts`）：Google Sheets 寫入配額是每分鐘 60 次／使用者，所以 `SheetsClient` 把所有 `values.append` 排成一條佇列（promise chain 互斥鎖，先進先出）：一次一筆、相鄰兩筆「真正送出」的起始時間至少間隔 `APPEND_MIN_INTERVAL_MS`（1000 ms，可由建構參數 `appendMinIntervalMs` 覆寫）；前一筆失敗不卡後面（`finally` 放行）、送出前就失敗的不佔用間隔；讀表頭不受限；佇列上限 `APPEND_MAX_PENDING`（50，約 50 秒的等待，低於一般代理逾時）超過回 503。`now`／`sleep` 可注入，測試用假時鐘。
 - 回應格式：OCR 成功 `{success:true,data:{barcode,productName,gender,color,size}}`、存檔成功 `{success:true,range?}`，失敗 `{success:false,error}` ＋ 4xx/5xx；錯誤訊息（`ServiceError`）不得含金鑰、憑證或上游原始回應。
-- `/healthz` 的 `serviceAccountEmail` 只能是 `client_email`，絕不輸出 `private_key` 或憑證其他欄位。`clientIp` 與限流共用同一個 `clientIpOf()`（`getClientIp`：`X-Forwarded-For` 由右往左第一個公開位址 → TCP 連線位址 → `"unknown"`），用來在部署後驗證 Zeabur 反向代理的 IP 處理；改限流的 IP 判斷時兩處要一起改。
+- `/healthz` 的 `serviceAccountEmail` 只能是 `client_email`，絕不輸出 `private_key` 或憑證其他欄位。`clientIp` 與限流共用同一個 `clientIpOf()`（`getClientIp`：`X-Forwarded-For` 由右往左第一個公開位址 → TCP 連線位址 → `"unknown"`），用來在部署後驗證 Zeabur 反向代理的 IP 處理；改 `clientIpOf()`（或 `getClientIp`）會同時影響限流與 `/healthz`，要連 README 的部署驗證步驟與測試一起更新。`firstPublicIp` 會略過含 `%` 的位址（IPv6 zone id），避免客戶端自創無限多個限流 key 與回顯任意字串。
 - `index.html` 只允許改 `OCREngine.WEBHOOK_URL`（`/api/ocr`）與 `SaveEngine.SAVE_URL`（`/api/save`）兩個常數；其餘不動。
 - 金鑰只放環境變數（`.env` 已 gitignore）。`.env.example` 與測試只用佔位符／現場產生的測試金鑰；提交前 grep 一次金鑰特徵（OpenAI 金鑰樣式：`sk-` 後接 10 個以上英數字；PEM 私鑰標頭：`BEGIN` 空格 `PRIVATE KEY`）。
-- `values.append` 不自動重試（避免重複列），唯一例外是 401 換 token 後重送一次。
+- `values.append` 不自動重試（避免重複列），唯一例外是 401 換 token 後重送一次（重送前一樣等滿配速間隔）。
+- 優雅關閉：SIGTERM／SIGINT 後最多等 `SHUTDOWN_GRACE_MS`（25 秒）讓處理中與排隊中的存檔寫完，再結束。
+- `index.html` 沒有「同步中」的鎖定（提示 2.5 秒消失、「完成此箱」鈕仍可按），配速讓關箱同步變成約 (N−1) 秒——這是已知的前端缺口，改它需要使用者同意放寬「只改兩個常數」的規則（見 README「安全與限制」）。
 - 測試的 OpenAI／Google 一律 mock fetch、不讀 `.env`、不打外部網路（`tests/server.test.ts` 會在本機啟動服務並只連 127.0.0.1）。
 
 ## 部署
