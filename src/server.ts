@@ -4,8 +4,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createApp } from "./app.js";
+import { consoleLogger } from "./common.js";
 import { loadEnv } from "./env.js";
 import { parseServiceAccountCredentials } from "./google-auth.js";
+import { SettingsStore } from "./settings-store.js";
 
 /**
  * 收到 SIGTERM／SIGINT 後，最多等多久讓處理中（含排隊中的存檔）的請求完成才強制結束。
@@ -15,11 +17,11 @@ import { parseServiceAccountCredentials } from "./google-auth.js";
 const SHUTDOWN_GRACE_MS = 25_000;
 
 /**
- * 啟動入口：讀環境變數與 index.html → 建立 app → 監聽 0.0.0.0:${PORT}。
+ * 啟動入口：讀環境變數與 index.html → 開啟資料目錄（設定頁用，見 settings-store.ts）→ 建立 app → 監聽 0.0.0.0:${PORT}。
  * Zeabur 的反向代理固定打容器的 8080 並注入 PORT=8080，所以一律讀 process.env.PORT，不寫死埠號。
  * log 只印變數「名稱」，不印任何變數的值。
  */
-function main(): void {
+async function main(): Promise<void> {
   const env = loadEnv();
 
   // index.html 與 dist/ 同層的上一層（本機：專案根目錄；容器：/app）。
@@ -45,19 +47,32 @@ function main(): void {
     );
   }
 
-  // LINE 關箱通知是選填功能：三個變數都沒設定就完全靜默；只設定一半時提醒（名稱而已，不印值）。
-  const hasLineToken = env.LINE_CHANNEL_ACCESS_TOKEN !== "";
-  const hasLineGroup = env.LINE_GROUP_ID !== "";
-  if (hasLineToken !== hasLineGroup) {
-    console.warn("[config] 關箱 LINE 通知需要同時設定 LINE_CHANNEL_ACCESS_TOKEN 與 LINE_GROUP_ID（目前只設定了其中一個）：關箱時不會推播");
-  } else if (hasLineGroup && !env.LINE_GROUP_ID.startsWith("C")) {
-    console.warn("[config] LINE_GROUP_ID 看起來不是群組 ID（群組 ID 以 C 開頭）：推播可能會失敗");
-  }
-  if (env.LINE_CHANNEL_SECRET !== "" && !hasLineToken) {
-    console.warn("[config] 已設定 LINE_CHANNEL_SECRET 但沒有 LINE_CHANNEL_ACCESS_TOKEN：webhook 只能把群組 ID 寫進 log，無法回覆");
+  // 容器的設計是入口腳本以 root 啟動、修好 Volume 的擁有者後 su-exec 降權；若目前還是 root（例如平台用自訂的啟動指令
+  // 繞過了入口腳本），提醒一聲——node 行程不該以 root 執行。
+  if (typeof process.getuid === "function" && process.getuid() === 0) {
+    console.warn("[config] 目前以 root 身分執行：容器應該經過 scripts/docker-entrypoint.sh 降權成 appuser（uid 10001）；請檢查平台的啟動指令是否繞過了 ENTRYPOINT");
   }
 
-  const app = createApp({ env, indexHtml });
+  // 資料目錄（Volume）：不可用時 open() 會寫一行 error log，服務照常啟動，只有設定頁回 503。
+  const settings = await SettingsStore.open(resolve(env.DATA_DIR), { log: consoleLogger });
+
+  // LINE 關箱通知是選填功能，而且現在以設定頁的設定檔為主、環境變數只是備援：
+  // 設定檔裡已有 token 時，下面這些環境變數的提醒就沒有意義（整組都以設定檔為準），所以略過。
+  // 三個環境變數都沒設定就完全靜默；只設定一半時提醒（名稱而已，不印值）。
+  if (settings.data.line.channelAccessToken === "") {
+    const hasLineToken = env.LINE_CHANNEL_ACCESS_TOKEN !== "";
+    const hasLineGroup = env.LINE_GROUP_ID !== "";
+    if (hasLineToken !== hasLineGroup) {
+      console.warn("[config] 關箱 LINE 通知需要同時設定 LINE_CHANNEL_ACCESS_TOKEN 與 LINE_GROUP_ID（目前只設定了其中一個）：關箱時不會推播");
+    } else if (hasLineGroup && !env.LINE_GROUP_ID.startsWith("C")) {
+      console.warn("[config] LINE_GROUP_ID 看起來不是群組 ID（群組 ID 以 C 開頭）：推播可能會失敗");
+    }
+    if (env.LINE_CHANNEL_SECRET !== "" && !hasLineToken) {
+      console.warn("[config] 已設定 LINE_CHANNEL_SECRET 但沒有 LINE_CHANNEL_ACCESS_TOKEN：webhook 只能把群組 ID 寫進 log，無法回覆");
+    }
+  }
+
+  const app = createApp({ env, indexHtml, settings });
   const server = serve({ fetch: app.fetch, port: env.PORT, hostname: "0.0.0.0" }, (info) => {
     console.log(`savepoint-crate listening on port ${info.port} (${info.address})`);
   });
@@ -71,4 +86,7 @@ function main(): void {
   process.on("SIGTERM", shutdown);
 }
 
-main();
+main().catch((err: unknown) => {
+  console.error(`啟動失敗：${err instanceof Error ? err.message : String(err)}`);
+  process.exitCode = 1;
+});

@@ -88,8 +88,13 @@ describe("GET /healthz", () => {
       sheetsConfigured: true,
       serviceAccountEmail: creds.email,
       clientIp: "unknown", // app.request 沒有真實連線，也沒帶 X-Forwarded-For
+      requestIsHttps: false, // app.request 的網址是 http://localhost，也沒帶 X-Forwarded-Proto
+      dataDirWritable: false, // 沒有注入 settings store＝資料目錄不可用（設定頁相關的測試見 settings-*.test.ts）
+      dataDirMounted: null,
+      adminConfigured: false,
       lineConfigured: false,
       lineWebhookConfigured: false,
+      lineSource: null,
     });
   });
 
@@ -108,8 +113,13 @@ describe("GET /healthz", () => {
       sheetsConfigured: false,
       serviceAccountEmail: null,
       clientIp: "unknown",
+      requestIsHttps: false,
+      dataDirWritable: false,
+      dataDirMounted: null,
+      adminConfigured: false,
       lineConfigured: false,
       lineWebhookConfigured: false,
+      lineSource: null,
     });
   });
 
@@ -184,11 +194,16 @@ describe("GET /healthz", () => {
     const { app } = makeApp();
     const text = await (await app.request("/healthz")).text();
     expect(Object.keys(JSON.parse(text) as object).sort()).toEqual([
+      "adminConfigured",
       "clientIp",
+      "dataDirMounted",
+      "dataDirWritable",
       "lineConfigured",
+      "lineSource",
       "lineWebhookConfigured",
       "ok",
       "openaiConfigured",
+      "requestIsHttps",
       "serviceAccountEmail",
       "sheetsConfigured",
     ]);

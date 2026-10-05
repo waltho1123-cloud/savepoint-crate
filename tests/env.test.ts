@@ -14,6 +14,7 @@ describe("loadEnv", () => {
       LINE_CHANNEL_ACCESS_TOKEN: "",
       LINE_GROUP_ID: "",
       LINE_CHANNEL_SECRET: "",
+      DATA_DIR: "./data",
       PORT: 8080,
     });
   });
@@ -29,6 +30,7 @@ describe("loadEnv", () => {
       LINE_CHANNEL_ACCESS_TOKEN: "  line-token \n",
       LINE_GROUP_ID: " C0123456789abcdef0123456789abcdef ",
       LINE_CHANNEL_SECRET: "\tline-secret",
+      DATA_DIR: "  /app/data \n",
       PORT: "9090",
     });
     expect(env).toEqual({
@@ -41,6 +43,7 @@ describe("loadEnv", () => {
       LINE_CHANNEL_ACCESS_TOKEN: "line-token",
       LINE_GROUP_ID: "C0123456789abcdef0123456789abcdef",
       LINE_CHANNEL_SECRET: "line-secret",
+      DATA_DIR: "/app/data",
       PORT: 9090,
     });
   });
@@ -54,7 +57,9 @@ describe("loadEnv", () => {
       LINE_CHANNEL_ACCESS_TOKEN: "  ",
       LINE_GROUP_ID: "\n",
       LINE_CHANNEL_SECRET: "",
+      DATA_DIR: "   ",
     });
+    expect(env.DATA_DIR).toBe("./data");
     expect(env.LINE_CHANNEL_ACCESS_TOKEN).toBe("");
     expect(env.LINE_GROUP_ID).toBe("");
     expect(env.LINE_CHANNEL_SECRET).toBe("");

@@ -27,6 +27,12 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+# su-exec：入口腳本（scripts/docker-entrypoint.sh）以 root 啟動，只為了把 Volume 目錄修成 appuser 擁有，
+# 然後降權；之後的 node 行程不是 root。uid／gid 固定成 10001，換映像版本時 Volume 裡檔案的擁有者才不會變。
+RUN apk add --no-cache su-exec \
+    && addgroup -S -g 10001 appgroup \
+    && adduser -S -D -H -u 10001 -G appgroup -h /app -s /sbin/nologin appuser
+
 RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
 
 # runtime 只裝 production 依賴（hono、@hono/node-server），不含 typescript、vitest 等工具。
@@ -37,13 +43,18 @@ RUN pnpm install --frozen-lockfile --prod=true \
 COPY --from=build /app/dist ./dist
 # server.ts 從 dist/ 的上一層（/app）讀取 index.html。
 COPY index.html ./index.html
+COPY scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh
+RUN chmod 755 ./scripts/docker-entrypoint.sh
 
-RUN addgroup -S appgroup && adduser -S -G appgroup appuser
-USER appuser
+# 設定頁的資料目錄（settings.json 放這裡）：Zeabur Dashboard → 服務 → 硬碟（Volume）→ 掛載路徑填 /app/data。
+# 映像本身不含 data/；沒掛 Volume 時入口腳本仍會建出這個目錄（重新部署後內容會消失）。
+ENV DATA_DIR=/app/data
 
 # 坑 (b)：Zeabur 的反向代理固定打容器的 8080，並注入 PORT=8080（不看 EXPOSE）；
 # 程式一律讀 process.env.PORT（見 src/env.ts），這裡的 8080 只是本機沒有注入 PORT 時的預設值。
 ENV PORT=8080
 EXPOSE 8080
 
+# 注意：這裡刻意沒有 USER 指令——入口腳本需要 root 才能修正 Volume 的擁有者，之後它會自己降權成 appuser。
+ENTRYPOINT ["/app/scripts/docker-entrypoint.sh"]
 CMD ["node", "dist/server.js"]

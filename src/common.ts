@@ -23,14 +23,14 @@ export const silentLogger: Logger = {
   error: () => undefined,
 };
 
-export type ServiceErrorStatus = 400 | 401 | 413 | 429 | 500 | 502 | 503;
+export type ServiceErrorStatus = 400 | 401 | 403 | 409 | 413 | 415 | 429 | 500 | 502 | 503;
 
 /**
  * 可以直接回給前端的錯誤。
  *
  * - status：HTTP 狀態碼（4xx＝呼叫端的問題，5xx＝伺服器或上游的問題）。
  * - message：給使用者看的繁中訊息。**絕對不可**放金鑰、憑證、上游原始回應內文——
- *   這個服務沒有登入機制，任何人都看得到這些訊息。
+ *   除了 /settings 與 /api/settings* 之外，這個服務沒有登入機制，任何人都看得到這些訊息。
  */
 export class ServiceError extends Error {
   readonly status: ServiceErrorStatus;

@@ -9,8 +9,9 @@ import { buildMergedName } from "./sheets.js";
  *   - POST /api/box-closed：前端關箱、逐筆同步到商品主檔之後呼叫 → 組一則文字訊息 → push 到 LINE_GROUP_ID。
  *   - POST /api/line/webhook：給使用者取得群組 ID 用（bot 被加進群組、或在群組輸入「群組ID」時回覆該群組的 ID）。
  *
- * 參考 wiwi-inout-scan/src/line.ts 的 pushLineText 與簽章驗證寫法；差異：這個專案沒有 DB、沒有後台，
- * 設定一律只讀環境變數（見 env.ts），fetch 由呼叫端注入（測試時 mock）。
+ * 參考 wiwi-inout-scan/src/line.ts 的 pushLineText 與簽章驗證寫法；差異：這個專案沒有 DB，
+ * token／secret／群組 ID 由呼叫端（app.ts）依「設定頁的設定檔優先、環境變數備援」解析後傳進來
+ * （見 line-settings.ts），這個模組本身不讀環境變數、不碰檔案；fetch 由呼叫端注入（測試時 mock）。
  *
  * ⚠️ 安全：這個服務沒有登入機制，/api/box-closed 與其他端點一樣誰都能呼叫（只有限流與欄位長度上限）。
  * token、secret 絕不寫進 log 與回應；回給前端的失敗原因一律是這裡寫死的短句，不轉發 LINE 的原始回應。
@@ -18,6 +19,12 @@ import { buildMergedName } from "./sheets.js";
 
 export const LINE_PUSH_URL = "https://api.line.me/v2/bot/message/push";
 export const LINE_REPLY_URL = "https://api.line.me/v2/bot/message/reply";
+/** 查群組名稱：GET {這個網址}/{groupId}/summary。 */
+export const LINE_GROUP_URL = "https://api.line.me/v2/bot/group";
+/** 查群組名稱最多等 5 秒（best-effort，失敗只是名稱留空）。 */
+export const LINE_SUMMARY_TIMEOUT_MS = 5_000;
+/** 群組名稱存起來前最多留幾個字。 */
+export const GROUP_NAME_MAX_CHARS = 100;
 /** 對 LINE 的每個請求最多等 10 秒；推播不重試（避免重複通知）。 */
 export const LINE_REQUEST_TIMEOUT_MS = 10_000;
 /** 整則訊息的字數上限（LINE 的上限是 5000，留餘裕）；超過就先砍明細行數。 */
@@ -273,6 +280,31 @@ export async function replyLineText(deps: LineClientDeps, replyToken: string, te
   }
 }
 
+/**
+ * 查群組名稱（GET /v2/bot/group/{groupId}/summary）。best-effort：5 秒 timeout，任何失敗（沒有 token、群組 ID 格式不對、
+ * 機器人不在該群組、LINE 回非 2xx、連線錯誤）一律回空字串，不丟例外；失敗原因只寫 log（不含 token）。
+ */
+export async function fetchGroupName(deps: LineClientDeps, groupId: string): Promise<string> {
+  if (deps.token === "" || !GROUP_ID_RE.test(groupId)) return "";
+  try {
+    const res = await deps.fetchImpl(`${LINE_GROUP_URL}/${groupId}/summary`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${deps.token}` },
+      signal: AbortSignal.timeout(LINE_SUMMARY_TIMEOUT_MS),
+    });
+    const body = (await readJsonSafely(res)) as { groupName?: unknown; message?: unknown } | null;
+    if (!res.ok) {
+      const message = typeof body?.message === "string" ? ` ${safeLogText(body.message, deps.token)}` : "";
+      deps.log.warn(`[line] 查詢群組名稱失敗：HTTP ${res.status}${message}`);
+      return "";
+    }
+    return typeof body?.groupName === "string" ? oneLine(body.groupName).slice(0, GROUP_NAME_MAX_CHARS) : "";
+  } catch (err) {
+    deps.log.warn(`[line] 查詢群組名稱失敗（連線錯誤或逾時）：${describeError(err, [deps.token])}`);
+    return "";
+  }
+}
+
 export type BoxClosedOutcome =
   | { notified: true }
   | { notified: false; reason: "not_configured" }
@@ -315,7 +347,7 @@ export function verifyLineSignature(rawBody: Uint8Array, signature: string | und
 }
 
 /** LINE 群組 ID：C 開頭的英數字（實際是 C＋32 位十六進位；這裡寬鬆一點，只擋掉空白、控制字元等不該出現的字元）。 */
-const GROUP_ID_RE = /^C[0-9A-Za-z]{1,63}$/;
+export const GROUP_ID_RE = /^C[0-9A-Za-z]{1,63}$/;
 
 /** 文字去掉所有空白後等於「群組ID」（不分大小寫）：涵蓋「群組ID」「群組 ID」「 群組id 」等寫法。 */
 function isGroupIdKeyword(text: string): boolean {
@@ -329,16 +361,45 @@ interface LineWebhookEvent {
   message?: { type?: unknown; text?: unknown };
 }
 
-async function handleWebhookEvent(deps: LineClientDeps, raw: unknown): Promise<void> {
+/** webhook 收到的群組事件（只有 join 與 message 兩種會通知 onGroupEvent）。 */
+export interface LineGroupEvent {
+  groupId: string;
+  eventType: "join" | "message";
+}
+
+export interface LineWebhookDeps extends LineClientDeps {
+  /**
+   * 收到來自群組的 join／message 事件時呼叫（設定頁用來記錄「最近收到的群組」）。
+   * 與回覆並行執行；它丟的例外只寫 log，不影響其他事件與 webhook 的回應。
+   */
+  onGroupEvent?: (event: LineGroupEvent) => Promise<void>;
+}
+
+async function handleWebhookEvent(deps: LineWebhookDeps, raw: unknown): Promise<void> {
   if (typeof raw !== "object" || raw === null) return;
   const event = raw as LineWebhookEvent;
   if (event.source?.type !== "group") return;
   const groupId = event.source.groupId;
   if (typeof groupId !== "string" || !GROUP_ID_RE.test(groupId)) return;
 
+  const tasks: Array<Promise<void>> = [];
+  if (deps.onGroupEvent && (event.type === "join" || event.type === "message")) {
+    const eventType = event.type;
+    const onGroupEvent = deps.onGroupEvent;
+    tasks.push(
+      (async () => {
+        try {
+          await onGroupEvent({ groupId, eventType });
+        } catch (err) {
+          deps.log.error(`[line] 記錄群組事件失敗：${describeError(err, [deps.token])}`);
+        }
+      })(),
+    );
+  }
+
   let reply: string | null = null;
   if (event.type === "join") {
-    reply = `已加入，此群組 ID：${groupId}。請把它設定到 LINE_GROUP_ID。`;
+    reply = `已加入，此群組 ID：${groupId}。請到設定頁（/settings）選用這個群組，或把它設定到 LINE_GROUP_ID。`;
   } else if (
     event.type === "message" &&
     event.message?.type === "text" &&
@@ -347,24 +408,31 @@ async function handleWebhookEvent(deps: LineClientDeps, raw: unknown): Promise<v
   ) {
     reply = `此群組 ID：${groupId}`;
   }
-  if (reply === null) return; // 其他事件一律忽略（不回覆、不寫 log，群組裡一般的聊天訊息不會洗版）
-
-  // 處理到的事件（join、「群組ID」）把群組 ID 寫進 log：即使沒設 token、無法回覆，也能從 log 取得群組 ID。
-  deps.log.info(`[line] 事件 ${event.type} 來自 group ${groupId}`);
-
-  if (typeof event.replyToken !== "string" || event.replyToken === "") return;
-  if (deps.token === "") {
-    deps.log.warn("[line] 無法回覆群組 ID：LINE_CHANNEL_ACCESS_TOKEN 未設定（群組 ID 見上一行 log）");
-    return;
+  // 其他事件不回覆、不寫 log（群組裡一般的聊天訊息不會洗版）；回覆的事件（join、「群組ID」）才把群組 ID 寫進 log。
+  if (reply !== null) {
+    const replyText = reply;
+    tasks.push(
+      (async () => {
+        // 即使沒設 token、無法回覆，也能從 log 取得群組 ID。
+        deps.log.info(`[line] 事件 ${String(event.type)} 來自 group ${groupId}`);
+        if (typeof event.replyToken !== "string" || event.replyToken === "") return;
+        if (deps.token === "") {
+          deps.log.warn("[line] 無法回覆群組 ID：LINE channel access token 未設定（群組 ID 見上一行 log）");
+          return;
+        }
+        await replyLineText(deps, event.replyToken, replyText);
+      })(),
+    );
   }
-  await replyLineText(deps, event.replyToken, reply);
+  await Promise.all(tasks);
 }
 
 /**
- * 處理已通過簽章驗證的 webhook 內容：只處理群組來源的兩種事件——`join`（bot 被加進群組）與文字訊息
- * 「群組ID」／「群組 ID」——用 replyToken 回覆該群組的 ID；其他事件一律忽略。永不 throw。
+ * 處理已通過簽章驗證的 webhook 內容：只處理群組來源的事件——`join`（bot 被加進群組）與文字訊息
+ * 「群組ID」／「群組 ID」會用 replyToken 回覆該群組的 ID；join 與所有 message 事件另外通知 onGroupEvent
+ * （記錄最近收到的群組）；其他事件一律忽略。永不 throw。
  */
-export async function handleLineWebhookBody(deps: LineClientDeps, bodyText: string): Promise<void> {
+export async function handleLineWebhookBody(deps: LineWebhookDeps, bodyText: string): Promise<void> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(bodyText);

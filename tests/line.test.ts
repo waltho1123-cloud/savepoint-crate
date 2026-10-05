@@ -4,17 +4,23 @@ import { ServiceError } from "../src/common.js";
 import {
   BOX_CLOSED_MAX_DETAIL_LINES,
   buildBoxClosedMessage,
+  fetchGroupName,
   formatTaipeiTime,
+  GROUP_ID_RE,
+  GROUP_NAME_MAX_CHARS,
   handleLineWebhookBody,
+  LINE_GROUP_URL,
   LINE_MESSAGE_MAX_CHARS,
   LINE_PUSH_URL,
   LINE_REPLY_URL,
+  LINE_SUMMARY_TIMEOUT_MS,
   notifyBoxClosed,
   parseBoxClosedInput,
   pushLineText,
   replyLineText,
   verifyLineSignature,
   type BoxClosedInput,
+  type LineGroupEvent,
 } from "../src/line.js";
 import {
   createCapturingLogger,
@@ -562,7 +568,7 @@ describe("handleLineWebhookBody（取得群組 ID 的事件處理）", () => {
     expect(calls[0]!.url).toBe(LINE_REPLY_URL);
     expect(replyBody(calls)).toEqual({
       replyToken: "rt-join",
-      messages: [{ type: "text", text: `已加入，此群組 ID：${TEST_GROUP_ID}。請把它設定到 LINE_GROUP_ID。` }],
+      messages: [{ type: "text", text: `已加入，此群組 ID：${TEST_GROUP_ID}。請到設定頁（/settings）選用這個群組，或把它設定到 LINE_GROUP_ID。` }],
     });
     expect(log.lines).toContain(`[line] 事件 join 來自 group ${TEST_GROUP_ID}`);
   });
@@ -623,7 +629,7 @@ describe("handleLineWebhookBody（取得群組 ID 的事件處理）", () => {
     await handleLineWebhookBody(deps, body({ type: "join", replyToken: "r", source: groupSource }));
     expect(calls).toHaveLength(0);
     expect(log.lines[0]).toBe(`[line] 事件 join 來自 group ${TEST_GROUP_ID}`);
-    expect(log.lines[1]).toContain("LINE_CHANNEL_ACCESS_TOKEN 未設定");
+    expect(log.lines[1]).toContain("LINE channel access token 未設定");
   });
 
   it("一次帶多個事件：依序處理；其中一個回覆失敗不影響後面的", async () => {
@@ -657,5 +663,185 @@ describe("handleLineWebhookBody（取得群組 ID 的事件處理）", () => {
     await handleLineWebhookBody(deps, JSON.stringify(null));
     await handleLineWebhookBody(deps, "[]");
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe("handleLineWebhookBody：onGroupEvent（記錄最近收到的群組）", () => {
+  const groupSource = { type: "group", groupId: TEST_GROUP_ID };
+  const body = (...events: unknown[]) => JSON.stringify({ events });
+  function setup(onGroupEvent?: (event: LineGroupEvent) => Promise<void>) {
+    const { mock, calls } = createFetchMock(() => jsonResponse({}));
+    const log = createCapturingLogger();
+    return { deps: { fetchImpl: mock, log, token: TEST_LINE_TOKEN, ...(onGroupEvent ? { onGroupEvent } : {}) }, calls, log };
+  }
+
+  it("join 與（任何內容的）message 事件會通知，帶群組 ID 與事件類型", async () => {
+    const seen: LineGroupEvent[] = [];
+    const { deps } = setup(async (event) => void seen.push(event));
+    await handleLineWebhookBody(
+      deps,
+      body(
+        { type: "join", replyToken: "r1", source: groupSource },
+        { type: "message", replyToken: "r2", source: groupSource, message: { type: "text", text: "大家好" } },
+        { type: "message", replyToken: "r3", source: groupSource, message: { type: "sticker" } },
+        { type: "message", source: groupSource, message: { type: "image" } },
+      ),
+    );
+    expect(seen).toEqual([
+      { groupId: TEST_GROUP_ID, eventType: "join" },
+      { groupId: TEST_GROUP_ID, eventType: "message" },
+      { groupId: TEST_GROUP_ID, eventType: "message" },
+      { groupId: TEST_GROUP_ID, eventType: "message" },
+    ]);
+  });
+
+  it.each([
+    ["個人對話", { type: "message", source: { type: "user", userId: "Uabc" }, message: { type: "text", text: "hi" } }],
+    ["聊天室", { type: "message", source: { type: "room", roomId: "Rabc" }, message: { type: "text", text: "hi" } }],
+    ["leave 事件", { type: "leave", source: groupSource }],
+    ["memberJoined 事件", { type: "memberJoined", source: groupSource }],
+    ["postback 事件", { type: "postback", source: groupSource }],
+    ["follow 事件", { type: "follow", source: groupSource }],
+    ["群組 ID 格式不對", { type: "join", source: { type: "group", groupId: "C 不合法" } }],
+    ["沒有 source", { type: "join" }],
+  ])("不通知：%s", async (_name, event) => {
+    const onGroupEvent = vi.fn(async () => undefined);
+    const { deps } = setup(onGroupEvent);
+    await handleLineWebhookBody(deps, body(event));
+    expect(onGroupEvent).not.toHaveBeenCalled();
+  });
+
+  it("沒有 token（無法回覆）時照樣通知；沒有提供 onGroupEvent 時行為和以前一樣（只回覆）", async () => {
+    const onGroupEvent = vi.fn(async () => undefined);
+    const { mock } = createFetchMock(() => jsonResponse({}));
+    await handleLineWebhookBody({ fetchImpl: mock, log: createCapturingLogger(), token: "", onGroupEvent }, body({ type: "join", replyToken: "r", source: groupSource }));
+    expect(onGroupEvent).toHaveBeenCalledTimes(1);
+
+    const { deps, calls } = setup();
+    await handleLineWebhookBody(deps, body({ type: "join", replyToken: "r", source: groupSource }));
+    expect(calls).toHaveLength(1);
+  });
+
+  it("onGroupEvent 與回覆並行：回覆 API 還在等的時候 onGroupEvent 已經開始", async () => {
+    const order: string[] = [];
+    let releaseReply!: () => void;
+    const replyGate = new Promise<void>((resolve) => (releaseReply = resolve));
+    const { mock } = createFetchMock(async () => {
+      order.push("reply:start");
+      await replyGate;
+      order.push("reply:end");
+      return jsonResponse({});
+    });
+    const log = createCapturingLogger();
+    const onGroupEvent = async () => {
+      order.push("capture:start");
+      order.push("capture:end");
+    };
+    const done = handleLineWebhookBody({ fetchImpl: mock, log, token: TEST_LINE_TOKEN, onGroupEvent }, body({ type: "join", replyToken: "r", source: groupSource }));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(order).toEqual(["capture:start", "capture:end", "reply:start"]); // 回覆卡住，記錄已經完成
+    releaseReply();
+    await done;
+    expect(order.at(-1)).toBe("reply:end");
+  });
+
+  it("onGroupEvent 丟例外：只寫 log（不含 token），回覆照常送出，後面的事件照常處理，不丟例外", async () => {
+    const onGroupEvent = vi.fn(async (event: LineGroupEvent) => {
+      if (event.eventType === "join") throw new Error(`disk full (${TEST_LINE_TOKEN})`);
+    });
+    const { deps, calls, log } = setup(onGroupEvent);
+    await handleLineWebhookBody(
+      deps,
+      body(
+        { type: "join", replyToken: "r1", source: groupSource },
+        { type: "message", replyToken: "r2", source: groupSource, message: { type: "text", text: "群組ID" } },
+      ),
+    );
+    expect(calls.map((c) => (JSON.parse(c.body!) as { replyToken: string }).replyToken)).toEqual(["r1", "r2"]);
+    expect(onGroupEvent).toHaveBeenCalledTimes(2);
+    const logged = log.lines.join("\n");
+    expect(logged).toContain("[line] 記錄群組事件失敗");
+    expect(logged).not.toContain(TEST_LINE_TOKEN);
+  });
+});
+
+describe("fetchGroupName（查群組名稱）", () => {
+  function setup(handler: (url: string) => Response | Promise<Response>, token = TEST_LINE_TOKEN) {
+    const { mock, calls } = createFetchMock((call) => handler(call.url));
+    const log = createCapturingLogger();
+    return { deps: { fetchImpl: mock, log, token }, calls, log };
+  }
+
+  it("請求形狀：GET /v2/bot/group/{id}/summary、Bearer token、有 5 秒 timeout 的 signal；回傳 groupName", async () => {
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    const { deps, calls } = setup(() => jsonResponse({ groupId: TEST_GROUP_ID, groupName: "倉庫出貨群", pictureUrl: "https://example.test/x.png" }));
+    expect(await fetchGroupName(deps, TEST_GROUP_ID)).toBe("倉庫出貨群");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.url).toBe(`${LINE_GROUP_URL}/${TEST_GROUP_ID}/summary`);
+    expect(calls[0]!.url).toBe(`https://api.line.me/v2/bot/group/${TEST_GROUP_ID}/summary`);
+    expect(calls[0]!.headers.authorization).toBe(`Bearer ${TEST_LINE_TOKEN}`);
+    expect(calls[0]!.body).toBeUndefined();
+    expect(calls[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(timeout).toHaveBeenCalledWith(LINE_SUMMARY_TIMEOUT_MS);
+    expect(LINE_SUMMARY_TIMEOUT_MS).toBe(5000);
+  });
+
+  it("沒有 token 或群組 ID 格式不對：不呼叫 LINE，回空字串", async () => {
+    const noToken = setup(() => jsonResponse({ groupName: "x" }), "");
+    expect(await fetchGroupName(noToken.deps, TEST_GROUP_ID)).toBe("");
+    expect(noToken.calls).toHaveLength(0);
+
+    const { deps, calls } = setup(() => jsonResponse({ groupName: "x" }));
+    for (const bad of ["", "U0123456789abcdef0123456789abcdef", "C/../v2/bot/profile", "C abc", "C?x=1", "C#frag", `C${"a".repeat(64)}`, "c0123456789abcdef"]) {
+      expect(await fetchGroupName(deps, bad)).toBe("");
+    }
+    expect(calls).toHaveLength(0);
+    expect(GROUP_ID_RE.test(TEST_GROUP_ID)).toBe(true);
+  });
+
+  it.each([401, 403, 404, 429, 500])("LINE 回 %i：回空字串，log 有一行 warn（含狀態碼、不含 token）", async (status) => {
+    const { deps, log } = setup(() => jsonResponse({ message: `denied ${TEST_LINE_TOKEN}` }, status));
+    expect(await fetchGroupName(deps, TEST_GROUP_ID)).toBe("");
+    expect(log.lines).toHaveLength(1);
+    expect(log.lines[0]).toContain(`HTTP ${status}`);
+    expect(log.lines[0]).not.toContain(TEST_LINE_TOKEN);
+  });
+
+  it("回應不是 JSON、groupName 不是字串或不存在：回空字串", async () => {
+    for (const response of [
+      new Response("不是 JSON", { status: 200 }),
+      jsonResponse({ groupName: 123 }),
+      jsonResponse({}),
+      jsonResponse(null),
+      jsonResponse([]),
+    ]) {
+      const { deps } = setup(() => response);
+      expect(await fetchGroupName(deps, TEST_GROUP_ID)).toBe("");
+    }
+  });
+
+  it("群組名稱裡的控制字元（換行、Tab、NUL）換成空白，最多 100 字", async () => {
+    const { deps } = setup(() => jsonResponse({ groupName: "甲\n乙\t丙\u0000丁" }));
+    expect(await fetchGroupName(deps, TEST_GROUP_ID)).toBe("甲 乙 丙 丁");
+    const long = setup(() => jsonResponse({ groupName: "長".repeat(300) }));
+    expect(await fetchGroupName(long.deps, TEST_GROUP_ID)).toBe("長".repeat(GROUP_NAME_MAX_CHARS));
+    expect(GROUP_NAME_MAX_CHARS).toBe(100);
+  });
+
+  it("連線錯誤或逾時：回空字串、不丟例外；log 不含 token（即使錯誤訊息裡有）", async () => {
+    const { deps, log } = setup(() => {
+      throw new TypeError(`fetch failed ${TEST_LINE_TOKEN}`);
+    });
+    expect(await fetchGroupName(deps, TEST_GROUP_ID)).toBe("");
+    expect(log.lines).toHaveLength(1);
+    expect(log.lines[0]).toContain("連線錯誤或逾時");
+    expect(log.lines[0]).not.toContain(TEST_LINE_TOKEN);
+  });
+
+  it("群組名稱是空字串：回空字串（不當成錯誤）", async () => {
+    const { deps, log } = setup(() => jsonResponse({ groupName: "" }));
+    expect(await fetchGroupName(deps, TEST_GROUP_ID)).toBe("");
+    expect(log.lines).toEqual([]);
   });
 });

@@ -2,18 +2,22 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
+import { SetupCodeGuard } from "./auth.js";
 import { consoleLogger, describeError, ServiceError, sleep, type FetchLike, type Logger } from "./common.js";
 import type { AppEnv } from "./env.js";
 import { GoogleTokenProvider, parseServiceAccountCredentials } from "./google-auth.js";
+import { clientIpOf, isHttpsRequest, readJsonObject } from "./http.js";
+import { captureLineGroup, resolveLineConfig } from "./line-settings.js";
 import { handleLineWebhookBody, notifyBoxClosed, parseBoxClosedInput, verifyLineSignature } from "./line.js";
 import { parseImageInput, recognizeLabel } from "./ocr.js";
-import { FixedWindowLimiter, getClientIp } from "./rate-limit.js";
+import { FixedWindowLimiter, RATE_LIMIT_WINDOW_MS } from "./rate-limit.js";
+import { registerSettingsRoutes } from "./settings-routes.js";
+import { SettingsStore } from "./settings-store.js";
 import { buildSaveRow, parseSaveInput, SheetsClient } from "./sheets.js";
 
+export { RATE_LIMIT_WINDOW_MS };
 /** JSON body 上限（相機照片 base64 後約 100～300 KB，15 MB 已非常寬鬆）。 */
 export const MAX_BODY_BYTES = 15 * 1024 * 1024;
-/** 限流視窗：一分鐘。 */
-export const RATE_LIMIT_WINDOW_MS = 60_000;
 /** POST /api/ocr（以及其他非 /api/save 的 /api/* 路徑，含不存在的）每個 IP 每分鐘的請求上限。 */
 export const OCR_RATE_LIMIT_MAX = 60;
 /**
@@ -25,6 +29,8 @@ export const SAVE_RATE_LIMIT_MAX = 600;
 export const BOX_CLOSED_RATE_LIMIT_MAX = 60;
 /** POST /api/line/webhook（LINE 平台打來的 webhook）每個 IP 每分鐘的請求上限；有自己的額度。 */
 export const LINE_WEBHOOK_RATE_LIMIT_MAX = 120;
+/** /api/settings*（設定頁的 API）每個 IP 每分鐘的請求上限；有自己的額度。另有各自更嚴的限制，見 settings-routes.ts。 */
+export const SETTINGS_API_RATE_LIMIT_MAX = 60;
 
 export interface AppDeps {
   env: AppEnv;
@@ -37,41 +43,27 @@ export interface AppDeps {
   /** 目前時間（毫秒）；測試時注入以驗證限流視窗、快取過期與 append 視窗配額。 */
   now?: () => number;
   log?: Logger;
-}
-
-type NodeConnection = { incoming?: { socket?: { remoteAddress?: string } } };
-
-/**
- * 客戶端 IP 的判斷方式，限流與 GET /healthz 的 clientIp 共用同一個函式（規則見 rate-limit.ts 的 getClientIp）：
- * 由右往左取 X-Forwarded-For 的第一個公開位址；沒有就退回 TCP 連線位址；再沒有就是 "unknown"。
- */
-function clientIpOf(c: Context): string {
-  const connection = c.env as NodeConnection | undefined;
-  return getClientIp(c.req.header("x-forwarded-for"), connection?.incoming?.socket?.remoteAddress);
-}
-
-async function readJsonObject(c: Context): Promise<Record<string, unknown>> {
-  let parsed: unknown;
-  try {
-    parsed = await c.req.json();
-  } catch {
-    throw new ServiceError(400, "請求內容不是有效的 JSON");
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new ServiceError(400, "請求內容必須是 JSON 物件");
-  }
-  return parsed as Record<string, unknown>;
+  /**
+   * 設定檔儲存（DATA_DIR 底下的 settings.json，見 settings-store.ts）。不給就當作資料目錄不可用：
+   * 設定頁與設定 API 回 503，LINE 只讀環境變數。
+   */
+  settings?: SettingsStore;
+  /** 首次設定碼（測試時注入）；不給就隨機產生一組，並在尚未設定管理密碼時寫進 log。 */
+  setupCode?: SetupCodeGuard;
 }
 
 /**
  * 建立 Hono app（不碰 process.env、不開 port，方便測試）。
  *
  *   GET  /, /index.html  → 原本的 index.html（no-cache）
- *   GET  /healthz        → 設定狀態與服務帳號 email（不含任何金鑰）、呼叫端 IP（限流用的同一個判斷）
+ *   GET  /healthz        → 設定狀態與服務帳號 email（不含任何金鑰）、呼叫端 IP（限流用的同一個判斷）、資料目錄與 LINE 設定來源
  *   POST /api/ocr        → 取代 n8n webhook ipas-ocr
  *   POST /api/save       → 取代 n8n webhook ipas-save-product
  *   POST /api/box-closed → 關箱後推播到 LINE 群組（LINE 沒設定時靜默略過）
- *   POST /api/line/webhook → LINE webhook：在群組裡回覆該群組的 ID（需要 LINE_CHANNEL_SECRET）
+ *   POST /api/line/webhook → LINE webhook：在群組裡回覆該群組的 ID、記錄最近收到的群組（需要 channel secret）
+ *   GET  /settings、/api/settings*、POST /settings/*  → 設定頁與設定 API（見 settings-routes.ts，需要資料目錄／Volume）
+ *
+ * LINE 的 token、群組 ID、secret 先看設定頁存的設定檔（settings），沒有才退回環境變數（見 line-settings.ts）。
  */
 export function createApp(deps: AppDeps): Hono {
   const { env, indexHtml } = deps;
@@ -79,6 +71,16 @@ export function createApp(deps: AppDeps): Hono {
   const now = deps.now ?? (() => Date.now()); // 呼叫時才取 Date.now，測試用假計時器也攔得到
   const sleepFn = deps.sleep ?? sleep;
   const fetchImpl: FetchLike = deps.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
+  const settings = deps.settings ?? SettingsStore.unavailable();
+  // webhook 記錄群組的節流表（每個群組最後處理的時間，記憶體內、有上限）；見 line-settings.ts 的 captureLineGroup。
+  const captureThrottle = new Map<string, number>();
+  // 首次設定碼：尚未設定管理密碼時，每次啟動產生一組、寫進 log（設定頁的 setup 狀態要用它建立密碼）。
+  const announceSetupCode = (code: string): void =>
+    log.info(`[settings] 尚未設定管理密碼：請開啟 /settings，用設定碼 ${code} 建立密碼`);
+  const setupGuard = deps.setupCode ?? new SetupCodeGuard({ onRegenerate: announceSetupCode });
+  if (settings.writable && settings.data.admin === null && setupGuard.currentCode !== null) {
+    announceSetupCode(setupGuard.currentCode);
+  }
 
   // 憑證只解析一次；解析失敗（缺少或格式錯誤）時 sheets 為 null，/api/save 回 503。
   const credentials = parseServiceAccountCredentials(env.GOOGLE_SERVICE_ACCOUNT_CREDENTIALS);
@@ -98,10 +100,12 @@ export function createApp(deps: AppDeps): Hono {
   const saveLimiter = new FixedWindowLimiter(SAVE_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const boxClosedLimiter = new FixedWindowLimiter(BOX_CLOSED_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const lineWebhookLimiter = new FixedWindowLimiter(LINE_WEBHOOK_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const settingsApiLimiter = new FixedWindowLimiter(SETTINGS_API_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const limiterFor = (path: string): FixedWindowLimiter => {
     if (path === "/api/save") return saveLimiter;
     if (path === "/api/box-closed") return boxClosedLimiter;
     if (path === "/api/line/webhook") return lineWebhookLimiter;
+    if (path === "/api/settings" || path.startsWith("/api/settings/")) return settingsApiLimiter;
     return ocrLimiter; // /api/ocr 與其他（含不存在的）路徑
   };
 
@@ -117,18 +121,29 @@ export function createApp(deps: AppDeps): Hono {
   // 健康檢查：回「有沒有設定好」、服務帳號的 email（部署後要把試算表分享給它），以及呼叫端 IP。
   // clientIp 與限流用的是同一個判斷（clientIpOf）：部署後 curl 一次，就能確認 Zeabur 反向代理的
   // X-Forwarded-For 有被正確處理（應該是呼叫端自己的對外 IP，而不是代理的內部位址或所有人共用的同一個值）。
-  // lineConfigured：LINE token 與群組 ID 都有（關箱通知會推播）；lineWebhookConfigured：有 channel secret（webhook 啟用）。
+  // requestIsHttps：這個請求被判斷為 HTTPS（看 X-Forwarded-Proto；Zeabur 的反向代理要有送，登入 cookie 才會加 Secure），
+  // 和 clientIp 一樣是部署後 curl 一次就能確認代理行為的診斷欄位。
+  // dataDirWritable：資料目錄（Volume）可寫入，設定頁才能用；dataDirMounted：它是不是獨立掛載的磁碟（null＝判斷不出來；
+  // false＝只是容器內的暫存目錄，重新部署後設定會消失）；adminConfigured：已建立管理密碼。
+  // lineConfigured：關箱通知會推播（生效的設定裡有 token、群組 ID，且開關開著）；lineWebhookConfigured：有 channel secret
+  // （webhook 啟用）；lineSource：生效的 LINE 設定來自設定頁（settings）還是環境變數（env），都沒設定是 null。
   // 回應物件是逐欄位明確組出來的，不會帶出憑證的其他欄位（尤其是 private_key），也不含任何 LINE 設定的值。
   app.get("/healthz", (c) => {
     c.header("Cache-Control", "no-store");
+    const line = resolveLineConfig(env, settings.data);
     return c.json({
       ok: true,
       openaiConfigured: env.OPENAI_API_KEY !== "",
       sheetsConfigured: credentials !== null,
       serviceAccountEmail: credentials?.client_email ?? null,
       clientIp: clientIpOf(c),
-      lineConfigured: env.LINE_CHANNEL_ACCESS_TOKEN !== "" && env.LINE_GROUP_ID !== "",
-      lineWebhookConfigured: env.LINE_CHANNEL_SECRET !== "",
+      requestIsHttps: isHttpsRequest(c),
+      dataDirWritable: settings.writable,
+      dataDirMounted: settings.mounted,
+      adminConfigured: settings.data.admin !== null,
+      lineConfigured: line.notifyReady,
+      lineWebhookConfigured: line.webhookReady,
+      lineSource: line.source,
     });
   });
 
@@ -182,24 +197,39 @@ export function createApp(deps: AppDeps): Hono {
   // 失敗 {success:true,notified:false,reason:"not_configured"|"push_failed",error?}。
   app.post("/api/box-closed", async (c) => {
     const input = parseBoxClosedInput(await readJsonObject(c));
+    const line = resolveLineConfig(env, settings.data); // 每次都重新解析：設定頁存檔後立刻生效，不必重啟
     const outcome = await notifyBoxClosed(
-      { fetchImpl, log, token: env.LINE_CHANNEL_ACCESS_TOKEN, groupId: env.LINE_GROUP_ID, now },
+      // 設定頁的開關關著就當作沒設定群組（notifyBoxClosed 會靜默略過）
+      { fetchImpl, log, token: line.token, groupId: line.enabled ? line.groupId : "", now },
       input,
     );
     return c.json({ success: true, ...outcome });
   });
 
-  // 給使用者取得群組 ID 用的 LINE webhook：只有設定了 LINE_CHANNEL_SECRET 才啟用（否則 503）。
+  // 給使用者取得群組 ID 用的 LINE webhook：生效的設定裡有 channel secret 才啟用（否則 503）。
   // 一定要用「原始 body 的位元組」驗 X-Line-Signature（不能先 JSON 解析）；簽章不符回 401，驗證通過一律回 200。
+  // 群組的 join／message 事件另外記錄到設定檔的「最近收到的群組」（資料目錄不可用時略過），讓設定頁一鍵帶入群組 ID。
   app.post("/api/line/webhook", async (c) => {
-    if (env.LINE_CHANNEL_SECRET === "") throw new ServiceError(503, "LINE webhook 尚未啟用");
+    const line = resolveLineConfig(env, settings.data);
+    if (line.secret === "") throw new ServiceError(503, "LINE webhook 尚未啟用");
     const rawBody = Buffer.from(await c.req.arrayBuffer());
-    if (!verifyLineSignature(rawBody, c.req.header("x-line-signature"), env.LINE_CHANNEL_SECRET)) {
+    if (!verifyLineSignature(rawBody, c.req.header("x-line-signature"), line.secret)) {
       throw new ServiceError(401, "簽章驗證失敗");
     }
-    await handleLineWebhookBody({ fetchImpl, log, token: env.LINE_CHANNEL_ACCESS_TOKEN }, rawBody.toString("utf8"));
+    await handleLineWebhookBody(
+      {
+        fetchImpl,
+        log,
+        token: line.token,
+        onGroupEvent: (event) =>
+          captureLineGroup({ store: settings, fetchImpl, log, token: line.token, now, lastHandled: captureThrottle }, event),
+      },
+      rawBody.toString("utf8"),
+    );
     return c.json({ success: true });
   });
+
+  registerSettingsRoutes(app, { env, settings, setupGuard, fetchImpl, log, now, clientIp: clientIpOf });
 
   for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/line/webhook"]) {
     app.all(path, (c) => {

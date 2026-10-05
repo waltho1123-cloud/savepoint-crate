@@ -7,3 +7,5 @@ coverage/
 *.log
 npm-debug.log*
 .DS_Store
+# 設定頁的資料目錄（本機預設 ./data，含 settings.json 與損毀備份；內有 token 與密碼雜湊，絕不入版控）
+data/

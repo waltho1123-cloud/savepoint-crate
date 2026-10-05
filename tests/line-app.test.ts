@@ -370,7 +370,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
     expect(calls[0]!.headers.authorization).toBe(`Bearer ${TEST_LINE_TOKEN}`);
     expect(replyCall(calls)).toEqual({
       replyToken: "reply-token-join",
-      messages: [{ type: "text", text: `已加入，此群組 ID：${TEST_GROUP_ID}。請把它設定到 LINE_GROUP_ID。` }],
+      messages: [{ type: "text", text: `已加入，此群組 ID：${TEST_GROUP_ID}。請到設定頁（/settings）選用這個群組，或把它設定到 LINE_GROUP_ID。` }],
     });
     expect(log.lines).toContain(`[line] 事件 join 來自 group ${TEST_GROUP_ID}`);
   });
@@ -436,7 +436,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(0);
     expect(log.lines).toContain(`[line] 事件 join 來自 group ${TEST_GROUP_ID}`);
-    expect(log.lines.join("\n")).toContain("LINE_CHANNEL_ACCESS_TOKEN 未設定");
+    expect(log.lines.join("\n")).toContain("LINE channel access token 未設定");
   });
 
   it("回覆失敗（LINE 回 400 或連線錯誤）：仍回 200，log 不含 token", async () => {
