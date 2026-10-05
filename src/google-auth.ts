@@ -114,7 +114,7 @@ export class GoogleTokenProvider {
   ) {
     this.fetchImpl = options.fetchImpl;
     this.log = options.log;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? (() => Date.now()); // 呼叫時才取 Date.now，測試用假計時器也攔得到
     this.scope = options.scope ?? SHEETS_SCOPE;
     this.ttlMs = options.ttlMs ?? TOKEN_CACHE_MS;
     this.timeoutMs = options.timeoutMs ?? TOKEN_REQUEST_TIMEOUT_MS;

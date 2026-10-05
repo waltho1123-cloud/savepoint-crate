@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createApp, MAX_BODY_BYTES, RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS } from "../src/app.js";
+import { createApp, MAX_BODY_BYTES, OCR_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, SAVE_RATE_LIMIT_MAX } from "../src/app.js";
 import { loadEnv } from "../src/env.js";
 import { buildOcrRequestBody, parseImageInput } from "../src/ocr.js";
 import {
@@ -86,6 +86,7 @@ describe("GET /healthz", () => {
       openaiConfigured: true,
       sheetsConfigured: true,
       serviceAccountEmail: creds.email,
+      clientIp: "unknown", // app.request 沒有真實連線，也沒帶 X-Forwarded-For
     });
   });
 
@@ -103,6 +104,7 @@ describe("GET /healthz", () => {
       openaiConfigured: true,
       sheetsConfigured: false,
       serviceAccountEmail: null,
+      clientIp: "unknown",
     });
   });
 
@@ -121,10 +123,61 @@ describe("GET /healthz", () => {
     expect(((await (await app.request("/healthz")).json()) as { openaiConfigured: boolean }).openaiConfigured).toBe(false);
   });
 
+  describe("clientIp（與限流用的同一個判斷：X-Forwarded-For 由右往左取第一個公開位址，沒有就退回連線位址）", () => {
+    const clientIp = async (app: ReturnType<typeof createApp>, headers: Record<string, string> = {}, env?: unknown) =>
+      ((await (await app.request("/healthz", { headers }, env)).json()) as { clientIp: string }).clientIp;
+    // @hono/node-server 會把 Node 的 IncomingMessage 放在 c.env.incoming；這裡模擬真實連線位址
+    const connection = (remoteAddress: string) => ({ incoming: { socket: { remoteAddress } } });
+
+    it("帶 X-Forwarded-For：回公開位址（最右邊那個，左邊客戶端自填的不採信）", async () => {
+      const { app } = makeApp();
+      expect(await clientIp(app, { "x-forwarded-for": "203.0.113.9" })).toBe("203.0.113.9");
+      expect(await clientIp(app, { "x-forwarded-for": "198.51.100.1, 203.0.113.9" })).toBe("203.0.113.9");
+      // 代理鏈把內部位址附加在右邊時，略過私有位址
+      expect(await clientIp(app, { "x-forwarded-for": "203.0.113.9, 10.42.0.7, 100.64.0.2" }, connection("10.0.0.1"))).toBe("203.0.113.9");
+      expect(await clientIp(app, { "x-forwarded-for": "2001:db8::1" })).toBe("2001:db8::1");
+    });
+
+    it("不帶 X-Forwarded-For：回連線位址", async () => {
+      const { app } = makeApp();
+      expect(await clientIp(app, {}, connection("198.51.100.7"))).toBe("198.51.100.7");
+    });
+
+    it("X-Forwarded-For 整串都是私有位址或格式錯誤：退回連線位址", async () => {
+      const { app } = makeApp();
+      expect(await clientIp(app, { "x-forwarded-for": "10.0.0.5, 192.168.1.1" }, connection("172.20.0.3"))).toBe("172.20.0.3");
+      expect(await clientIp(app, { "x-forwarded-for": "garbage" }, connection("172.20.0.3"))).toBe("172.20.0.3");
+    });
+
+    it('什麼都沒有（沒有 X-Forwarded-For、也沒有連線位址）：回 "unknown"', async () => {
+      const { app } = makeApp();
+      expect(await clientIp(app)).toBe("unknown");
+      expect(await clientIp(app, {}, {})).toBe("unknown");
+    });
+
+    it("與限流用同一個判斷：healthz 回報的 IP 就是被計次的那個 IP", async () => {
+      const { app } = makeApp({ now: () => 1_000_000 });
+      // 用 X-Forwarded-For「203.0.113.20」把 OCR 額度用完
+      for (let i = 0; i <= OCR_RATE_LIMIT_MAX; i++) await post(app, "/api/ocr", {}, { "x-forwarded-for": "203.0.113.20" });
+      expect((await post(app, "/api/ocr", {}, { "x-forwarded-for": "198.51.100.99, 203.0.113.20" })).status).toBe(429);
+      // healthz 對同一組標頭回報的 IP，正是被擋下的那個
+      expect(await clientIp(app, { "x-forwarded-for": "198.51.100.99, 203.0.113.20" })).toBe("203.0.113.20");
+      // 換一個來源 IP：不受影響，healthz 也回報新的 IP
+      expect((await post(app, "/api/ocr", {}, { "x-forwarded-for": "203.0.113.21" })).status).toBe(400);
+      expect(await clientIp(app, { "x-forwarded-for": "203.0.113.21" })).toBe("203.0.113.21");
+    });
+  });
+
   it("絕不回傳 private_key 或憑證的其他欄位，也不含 OpenAI 金鑰", async () => {
     const { app } = makeApp();
     const text = await (await app.request("/healthz")).text();
-    expect(Object.keys(JSON.parse(text) as object).sort()).toEqual(["ok", "openaiConfigured", "serviceAccountEmail", "sheetsConfigured"]);
+    expect(Object.keys(JSON.parse(text) as object).sort()).toEqual([
+      "clientIp",
+      "ok",
+      "openaiConfigured",
+      "serviceAccountEmail",
+      "sheetsConfigured",
+    ]);
     for (const secret of [
       creds.privateKeyPem,
       "private_key",
@@ -417,18 +470,29 @@ describe("POST /api/save", () => {
     expect(google.calls).toHaveLength(0);
   });
 
+  it("連續兩筆存檔：第 2 筆依 APPEND_MIN_INTERVAL_MS 配速（createApp 有把 now／sleep 傳給 SheetsClient）", async () => {
+    const google = createGoogleMock();
+    vi.stubGlobal("fetch", google.mock);
+    const { app, sleep } = makeApp({ now: () => 1_000_000 }); // 時鐘不動 → 第 2 筆必須等滿一個間隔
+    expect((await post(app, "/api/save", payload)).status).toBe(200);
+    expect(sleep).not.toHaveBeenCalled(); // 第一筆不等待
+    expect((await post(app, "/api/save", payload)).status).toBe(200);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledWith(1000);
+  });
+
   it("GET /api/save → 405", async () => {
     const { app } = makeApp();
     expect((await app.request("/api/save")).status).toBe(405);
   });
 });
 
-describe("速率限制（/api/* 每 IP 每分鐘 60 次）", () => {
+describe("速率限制（OCR 每 IP 每分鐘 60 次、存檔每 IP 每分鐘 600 次，各自獨立計算）", () => {
   const ip = (address: string) => ({ "x-forwarded-for": address });
 
-  it("第 61 次回 429（含 Retry-After），不同 IP 不受影響", async () => {
+  it("OCR：第 61 次回 429（含 Retry-After），不同 IP 不受影響", async () => {
     const { app } = makeApp({ now: () => 1_000_000 });
-    for (let i = 0; i < RATE_LIMIT_MAX; i++) {
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) {
       const res = await post(app, "/api/ocr", {}, ip("203.0.113.1"));
       expect(res.status).toBe(400); // 通過限流，被輸入驗證擋下
     }
@@ -438,36 +502,80 @@ describe("速率限制（/api/* 每 IP 每分鐘 60 次）", () => {
     expect(await limited.json()).toMatchObject({ success: false });
 
     expect((await post(app, "/api/ocr", {}, ip("203.0.113.2"))).status).toBe(400);
-    expect(RATE_LIMIT_MAX).toBe(60);
+    expect(OCR_RATE_LIMIT_MAX).toBe(60);
     expect(RATE_LIMIT_WINDOW_MS).toBe(60_000);
   });
 
-  it("/api/save 與 /api/ocr 共用同一個額度", async () => {
+  it("存檔：第 601 次回 429（含 Retry-After），不同 IP 不受影響", async () => {
     const { app } = makeApp({ now: () => 1_000_000 });
-    for (let i = 0; i < RATE_LIMIT_MAX; i++) await post(app, i % 2 ? "/api/save" : "/api/ocr", {}, ip("203.0.113.3"));
-    expect((await post(app, "/api/save", {}, ip("203.0.113.3"))).status).toBe(429);
+    for (let i = 0; i < SAVE_RATE_LIMIT_MAX; i++) {
+      const res = await post(app, "/api/save", {}, ip("203.0.113.7"));
+      if (res.status !== 400) throw new Error(`第 ${i + 1} 次存檔請求預期通過限流（被輸入驗證擋成 400），實際 ${res.status}`);
+    }
+    const limited = await post(app, "/api/save", {}, ip("203.0.113.7"));
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBe("60");
+    expect(await limited.json()).toMatchObject({ success: false });
+
+    expect((await post(app, "/api/save", {}, ip("203.0.113.8"))).status).toBe(400);
+    expect(SAVE_RATE_LIMIT_MAX).toBe(600);
   });
 
-  it("視窗過後恢復", async () => {
+  it("OCR 與存檔各用自己的額度：OCR 用完不影響存檔，存檔用完也不影響 OCR", async () => {
+    const { app } = makeApp({ now: () => 1_000_000 });
+
+    // OCR 額度用完 → 存檔不受影響
+    for (let i = 0; i <= OCR_RATE_LIMIT_MAX; i++) await post(app, "/api/ocr", {}, ip("203.0.113.3"));
+    expect((await post(app, "/api/ocr", {}, ip("203.0.113.3"))).status).toBe(429);
+    expect((await post(app, "/api/save", {}, ip("203.0.113.3"))).status).toBe(400);
+
+    // 存檔額度用完 → 另一個 IP 的 OCR 不受影響，同 IP 的 OCR 額度也沒被存檔吃掉
+    for (let i = 0; i <= SAVE_RATE_LIMIT_MAX; i++) await post(app, "/api/save", {}, ip("203.0.113.4"));
+    expect((await post(app, "/api/save", {}, ip("203.0.113.4"))).status).toBe(429);
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) {
+      expect((await post(app, "/api/ocr", {}, ip("203.0.113.4"))).status).toBe(400);
+    }
+    expect((await post(app, "/api/ocr", {}, ip("203.0.113.4"))).status).toBe(429);
+  });
+
+  it("其他 /api/* 路徑（含不存在的）算進 OCR 的額度，不會吃掉存檔額度", async () => {
+    const { app } = makeApp({ now: () => 1_000_000 });
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) {
+      expect((await app.request("/api/nope", { headers: ip("203.0.113.5") })).status).toBe(404);
+    }
+    expect((await app.request("/api/nope", { headers: ip("203.0.113.5") })).status).toBe(429);
+    expect((await post(app, "/api/ocr", {}, ip("203.0.113.5"))).status).toBe(429);
+    expect((await post(app, "/api/save", {}, ip("203.0.113.5"))).status).toBe(400);
+  });
+
+  it("視窗過後恢復（OCR 與存檔都是）", async () => {
     let clock = 1_000_000;
     const { app } = makeApp({ now: () => clock });
-    for (let i = 0; i <= RATE_LIMIT_MAX; i++) await post(app, "/api/ocr", {}, ip("203.0.113.4"));
-    expect((await post(app, "/api/ocr", {}, ip("203.0.113.4"))).status).toBe(429);
+    for (let i = 0; i <= OCR_RATE_LIMIT_MAX; i++) await post(app, "/api/ocr", {}, ip("203.0.113.9"));
+    for (let i = 0; i <= SAVE_RATE_LIMIT_MAX; i++) await post(app, "/api/save", {}, ip("203.0.113.9"));
+    expect((await post(app, "/api/ocr", {}, ip("203.0.113.9"))).status).toBe(429);
+    expect((await post(app, "/api/save", {}, ip("203.0.113.9"))).status).toBe(429);
     clock += RATE_LIMIT_WINDOW_MS;
-    expect((await post(app, "/api/ocr", {}, ip("203.0.113.4"))).status).toBe(400);
+    expect((await post(app, "/api/ocr", {}, ip("203.0.113.9"))).status).toBe(400);
+    expect((await post(app, "/api/save", {}, ip("203.0.113.9"))).status).toBe(400);
   });
 
-  it("客戶端自己偽造 X-Forwarded-For 最左邊的值，無法換到新的額度", async () => {
+  it("客戶端自己偽造 X-Forwarded-For 最左邊的值，無法換到新的額度（OCR 與存檔都一樣）", async () => {
     const { app } = makeApp({ now: () => 1_000_000 });
-    for (let i = 0; i < RATE_LIMIT_MAX; i++) {
-      await post(app, "/api/ocr", {}, ip(`198.51.100.${i % 200}, 203.0.113.5`)); // 代理附加的真實 IP 在最右邊
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) {
+      await post(app, "/api/ocr", {}, ip(`198.51.100.${i % 200}, 203.0.113.10`)); // 代理附加的真實 IP 在最右邊
     }
-    expect((await post(app, "/api/ocr", {}, ip("192.0.2.77, 203.0.113.5"))).status).toBe(429);
+    expect((await post(app, "/api/ocr", {}, ip("192.0.2.77, 203.0.113.10"))).status).toBe(429);
+
+    for (let i = 0; i < SAVE_RATE_LIMIT_MAX; i++) {
+      await post(app, "/api/save", {}, ip(`198.51.100.${i % 200}, 203.0.113.11`));
+    }
+    expect((await post(app, "/api/save", {}, ip("192.0.2.77, 203.0.113.11"))).status).toBe(429);
   });
 
   it("/healthz 與靜態頁不受限流影響", async () => {
     const { app } = makeApp({ now: () => 1_000_000 });
-    for (let i = 0; i <= RATE_LIMIT_MAX + 5; i++) await post(app, "/api/ocr", {}, ip("203.0.113.6"));
+    for (let i = 0; i <= OCR_RATE_LIMIT_MAX + 5; i++) await post(app, "/api/ocr", {}, ip("203.0.113.6"));
     expect((await app.request("/healthz", { headers: ip("203.0.113.6") })).status).toBe(200);
     expect((await app.request("/", { headers: ip("203.0.113.6") })).status).toBe(200);
   });

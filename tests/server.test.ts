@@ -55,13 +55,25 @@ describe("src/server.ts（實際啟動行程）", () => {
       expect(index.status).toBe(200);
       expect(await index.text()).toBe(readFileSync(resolve(repoRoot, "index.html"), "utf8"));
 
+      // 沒帶 X-Forwarded-For：clientIp 是真實的 TCP 連線位址（@hono/node-server 的 c.env.incoming.socket）
       const health = await fetch(`http://127.0.0.1:${port}/healthz`);
       expect(await health.json()).toEqual({
         ok: true,
         openaiConfigured: true,
         sheetsConfigured: false,
         serviceAccountEmail: null,
+        clientIp: "127.0.0.1",
       });
+
+      // 帶 X-Forwarded-For：取最右邊的公開位址（左邊客戶端自填的不採信）
+      const forwarded = await fetch(`http://127.0.0.1:${port}/healthz`, {
+        headers: { "x-forwarded-for": "198.51.100.1, 203.0.113.9, 10.42.0.7" },
+      });
+      expect(((await forwarded.json()) as { clientIp: string }).clientIp).toBe("203.0.113.9");
+
+      // X-Forwarded-For 只有私有位址：退回連線位址
+      const privateOnly = await fetch(`http://127.0.0.1:${port}/healthz`, { headers: { "x-forwarded-for": "10.0.0.5" } });
+      expect(((await privateOnly.json()) as { clientIp: string }).clientIp).toBe("127.0.0.1");
 
       // 啟動警告只列出變數名稱，不含任何值
       expect(output).toContain("GOOGLE_SERVICE_ACCOUNT_CREDENTIALS 無法解析");

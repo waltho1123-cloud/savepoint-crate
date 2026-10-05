@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { ServiceError } from "../src/common.js";
 import { GoogleTokenProvider, parseServiceAccountCredentials } from "../src/google-auth.js";
 import {
+  APPEND_MAX_PENDING,
+  APPEND_MIN_INTERVAL_MS,
   buildMergedName,
   buildSaveRow,
   HEADER_CACHE_MS,
@@ -13,12 +15,14 @@ import {
   SheetsClient,
   toSheetCell,
   type SaveRow,
+  type SheetsClientOptions,
 } from "../src/sheets.js";
 import {
   createCapturingLogger,
   createGoogleMock,
   FULL_HEADER,
   GOOGLE_TOKEN_URL,
+  jsonResponse,
   makeCredentials,
   SHEETS_BASE,
   TEST_ACCESS_TOKEN,
@@ -229,6 +233,7 @@ describe("SheetsClient（Google Sheets REST：讀表頭＋append）", () => {
       fetchImpl: google.mock,
       log,
       now,
+      appendMinIntervalMs: 0, // 這組測試不是在測配速（配速另有專屬的 describe），關掉以免同一個假時刻的多次 append 互相等待
     });
     return { client, calls: google.calls, log, advance: (ms: number) => void (clock += ms) };
   }
@@ -428,5 +433,212 @@ describe("SheetsClient（Google Sheets REST：讀表頭＋append）", () => {
     expect(error.message).toContain(hint);
     expect(error.message).not.toContain("stub error"); // 不轉發上游訊息
     expect(log.lines.join("\n")).toContain(`HTTP ${googleStatus}`);
+  });
+});
+
+
+describe("SheetsClient：append 全域配速（相鄰兩次 append 的起始時間至少間隔 1000 ms）", () => {
+  const SPREADSHEET_ID = "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A";
+  const rowOf = (seqNo: string) =>
+    buildSaveRow(parseSaveInput({ seqNo, barcode: "1801080204", productName: "第五代溫灸刷毛圓領發熱衣", quantity: 1 }));
+
+  const urlOf = (input: string | URL | Request) => (typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+
+  /**
+   * 假時鐘：sleep(ms) 只讓時鐘前進 ms（不真的等待）；記錄每個 append／讀表頭請求「送出時」的假時鐘。
+   * tokenStatuses 可依序指定每一次換 token 的狀態碼（預設全部成功）。
+   */
+  function setupPaced(options: { google?: Parameters<typeof createGoogleMock>[0]; client?: Partial<SheetsClientOptions>; tokenStatuses?: number[] } = {}) {
+    const google = createGoogleMock(options.google);
+    const log = createCapturingLogger();
+    let clock = 5_000_000;
+    const sleeps: number[] = [];
+    const sentAt = { append: [] as number[], header: [] as number[] };
+    let tokenCalls = 0;
+    const fetchImpl: typeof fetch = async (input, init) => {
+      const url = urlOf(input);
+      if (url === GOOGLE_TOKEN_URL) {
+        const status = options.tokenStatuses?.[tokenCalls++];
+        if (status && status !== 200) return jsonResponse({ error: "invalid_grant" }, status);
+      } else if (url.includes(":append")) {
+        sentAt.append.push(clock);
+      } else if ((init?.method ?? "GET").toUpperCase() === "GET") {
+        sentAt.header.push(clock);
+      }
+      return google.mock(input, init);
+    };
+    const now = () => clock;
+    const sleep = async (ms: number) => {
+      sleeps.push(ms);
+      clock += ms;
+    };
+    const tokenProvider = new GoogleTokenProvider(parseServiceAccountCredentials(creds.base64)!, { fetchImpl, log, now });
+    const client = new SheetsClient({
+      tokenProvider,
+      spreadsheetId: SPREADSHEET_ID,
+      sheetName: "商品主檔",
+      fetchImpl,
+      log,
+      now,
+      sleep,
+      ...options.client,
+    });
+    return { client, google, log, sleeps, sentAt, now, tokenProvider, advance: (ms: number) => void (clock += ms) };
+  }
+
+  it("三筆同時送出：第 2、3 筆分別延後 1000／2000 ms，並依先進先出的順序寫入", async () => {
+    const { client, google, sleeps, sentAt, now } = setupPaced();
+    const t0 = now();
+    const results = await Promise.all([client.appendRow(rowOf("1")), client.appendRow(rowOf("2")), client.appendRow(rowOf("3"))]);
+
+    expect(results).toEqual(Array(3).fill({ updatedRange: "'商品主檔'!A125:K125" }));
+    expect(sentAt.append).toEqual([t0, t0 + 1000, t0 + 2000]); // 第 1 筆立刻送；第 2、3 筆延後 1000／2000 ms
+    expect(sleeps).toEqual([1000, 1000]);
+    const order = google.calls.filter((c) => c.url.includes(":append")).map((c) => (JSON.parse(c.body!) as { values: string[][] }).values[0]![0]);
+    expect(order).toEqual(["1", "2", "3"]);
+    expect(APPEND_MIN_INTERVAL_MS).toBe(1000);
+  });
+
+  it("單筆不等待；距離上一筆不到一個間隔時，只補足差額", async () => {
+    const { client, sleeps, sentAt, advance, now } = setupPaced();
+    const t0 = now();
+    await client.appendRow(rowOf("1"));
+    expect(sleeps).toEqual([]); // 單筆不等待
+    expect(sentAt.append).toEqual([t0]);
+
+    advance(APPEND_MIN_INTERVAL_MS); // 剛好滿一個間隔：不必等
+    await client.appendRow(rowOf("2"));
+    expect(sleeps).toEqual([]);
+
+    advance(400); // 只過了 400 ms：只補足剩下的 600 ms
+    await client.appendRow(rowOf("3"));
+    expect(sleeps).toEqual([600]);
+    expect(sentAt.append).toEqual([t0, t0 + 1000, t0 + 2000]);
+  });
+
+  it("第 1 筆失敗（Google 回 500）後，第 2 筆仍正常送出（不被卡住），起始時間仍間隔 1000 ms", async () => {
+    const { client, sentAt, sleeps, now } = setupPaced({ google: { appendStatuses: [500] } });
+    const t0 = now();
+    const [first, second] = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
+
+    expect(first).toMatchObject({ status: "rejected", reason: { status: 502 } });
+    expect(second).toEqual({ status: "fulfilled", value: { updatedRange: "'商品主檔'!A125:K125" } });
+    expect(sentAt.append).toEqual([t0, t0 + 1000]);
+    expect(sleeps).toEqual([1000]);
+  });
+
+  it("第 1 筆在送出前就失敗（換不到 token）：不會卡住第 2 筆，也不佔用間隔（第 2 筆不必多等）", async () => {
+    // token 呼叫順序：[1] 暖機那筆（成功）、[2] 第 1 筆（400 失敗）、[3] 第 2 筆（成功）
+    const { client, sentAt, sleeps, advance, now, tokenProvider } = setupPaced({ tokenStatuses: [200, 400, 200] });
+    const t0 = now();
+    await client.appendRow(rowOf("0")); // 暖機：換 token、快取表頭
+    tokenProvider.invalidate(); // 讓接下來的兩筆都要重新換 token
+    advance(5000); // 距離暖機那筆已超過一個間隔，所以正常情況下不需要等待
+
+    const [first, second] = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2"))]);
+    expect(first).toMatchObject({ status: "rejected", reason: { status: 500 } });
+    expect(second).toMatchObject({ status: "fulfilled" });
+    expect(sentAt.append).toEqual([t0, t0 + 5000]); // 失敗的那筆沒有送出任何 append
+    expect(sleeps).toEqual([]); // 沒送出的請求不佔用間隔：第 2 筆不必為它多等
+  });
+
+  it("讀表頭不受配速限制：append 正在排隊等待時，別的請求的表頭讀取會立刻送出", async () => {
+    const google = createGoogleMock();
+    const log = createCapturingLogger();
+    let clock = 5_000_000;
+    const gates: Array<() => void> = []; // 每個 sleep 都停在這裡，由測試手動放行
+    const sleep = (ms: number) =>
+      new Promise<void>((resolve) => {
+        gates.push(() => {
+          clock += ms;
+          resolve();
+        });
+      });
+    const now = () => clock;
+    const headerReads = () => google.calls.filter((c) => c.method === "GET" && c.url.startsWith(SHEETS_BASE)).length;
+    const appends = () => google.calls.filter((c) => c.url.includes(":append")).length;
+    const tokenProvider = new GoogleTokenProvider(parseServiceAccountCredentials(creds.base64)!, { fetchImpl: google.mock, log, now });
+    const client = new SheetsClient({
+      tokenProvider,
+      spreadsheetId: SPREADSHEET_ID,
+      sheetName: "商品主檔",
+      fetchImpl: google.mock,
+      log,
+      now,
+      sleep,
+      headerTtlMs: 0, // 表頭不快取：每次 appendRow 都重新讀一次
+    });
+
+    const a = client.appendRow(rowOf("1"));
+    await vi.waitFor(() => expect(appends()).toBe(1)); // A 立刻送出
+    const b = client.appendRow(rowOf("2"));
+    await vi.waitFor(() => expect(gates).toHaveLength(1)); // B 讀完表頭，正在排隊等待配速
+    expect(headerReads()).toBe(2);
+    expect(appends()).toBe(1);
+
+    const c = client.appendRow(rowOf("3")); // B 還在等的時候，C 的表頭讀取不該被擋住
+    await vi.waitFor(() => expect(headerReads()).toBe(3));
+    expect(appends()).toBe(1);
+
+    gates.shift()!(); // 放行 B
+    await b;
+    await vi.waitFor(() => expect(gates).toHaveLength(1)); // 接著 C 排隊等待
+    gates.shift()!();
+    await Promise.all([a, c]);
+    expect(appends()).toBe(3);
+  });
+
+  it("排隊上限：超過 appendMaxPending 的請求立刻回 503，不影響已排隊的；佇列清空後恢復", async () => {
+    const { client, sentAt, log } = setupPaced({ client: { appendMaxPending: 2 } });
+    const results = await Promise.allSettled([client.appendRow(rowOf("1")), client.appendRow(rowOf("2")), client.appendRow(rowOf("3"))]);
+
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled", "rejected"]);
+    expect(results[2]).toMatchObject({ reason: { status: 503, message: "目前等待寫入的筆數過多，請稍後再試" } });
+    expect(sentAt.append).toHaveLength(2);
+    expect(log.lines.join("\n")).toContain("append 佇列已滿（2/2）");
+
+    await expect(client.appendRow(rowOf("4"))).resolves.toEqual({ updatedRange: "'商品主檔'!A125:K125" }); // 恢復
+    expect(sentAt.append).toHaveLength(3);
+    expect(APPEND_MAX_PENDING).toBe(50);
+  });
+
+  it("appendMinIntervalMs 可由建構參數覆寫（0 代表不配速）", async () => {
+    const custom = setupPaced({ client: { appendMinIntervalMs: 250 } });
+    await Promise.all([custom.client.appendRow(rowOf("1")), custom.client.appendRow(rowOf("2"))]);
+    expect(custom.sleeps).toEqual([250]);
+
+    const off = setupPaced({ client: { appendMinIntervalMs: 0 } });
+    await Promise.all([off.client.appendRow(rowOf("1")), off.client.appendRow(rowOf("2")), off.client.appendRow(rowOf("3"))]);
+    expect(off.sleeps).toEqual([]);
+  });
+
+  it("不注入 now／sleep（正式環境的預設值）：配速同樣有效（以 vitest 假計時器驗證，不真的等待）", async () => {
+    vi.useFakeTimers();
+    try {
+      const google = createGoogleMock();
+      const log = createCapturingLogger();
+      const sentAt: number[] = [];
+      const fetchImpl: typeof fetch = async (input, init) => {
+        if (urlOf(input).includes(":append")) sentAt.push(Date.now());
+        return google.mock(input, init);
+      };
+      const tokenProvider = new GoogleTokenProvider(parseServiceAccountCredentials(creds.base64)!, { fetchImpl, log });
+      const client = new SheetsClient({ tokenProvider, spreadsheetId: SPREADSHEET_ID, sheetName: "商品主檔", fetchImpl, log }); // 沒給 now／sleep
+      const t0 = Date.now();
+      const all = Promise.all([client.appendRow(rowOf("1")), client.appendRow(rowOf("2")), client.appendRow(rowOf("3"))]);
+      await vi.advanceTimersByTimeAsync(2000);
+      await all;
+      expect(sentAt).toEqual([t0, t0 + 1000, t0 + 2000]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("系統時鐘被往回調時，最多只等一個間隔（不會因此卡很久）", async () => {
+    const { client, sleeps, advance } = setupPaced();
+    await client.appendRow(rowOf("1"));
+    advance(-60_000);
+    await client.appendRow(rowOf("2"));
+    expect(sleeps).toEqual([1000]);
   });
 });

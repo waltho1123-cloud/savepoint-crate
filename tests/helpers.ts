@@ -91,7 +91,10 @@ export interface GoogleMockOptions {
   /** 試算表第 1 列；null 代表整列是空的（API 回應沒有 values）。預設是完整的 11 欄。 */
   header?: string[] | null;
   headerStatus?: number;
+  /** 所有 append 請求的回應狀態碼（預設 200）。 */
   appendStatus?: number;
+  /** 依序指定每一次 append 請求的狀態碼（第 1 次用 [0]、第 2 次用 [1]…）；超出的次數改用 appendStatus。 */
+  appendStatuses?: number[];
   /** append 回應的 updates.updatedRange；null 代表回應沒有 updates。 */
   updatedRange?: string | null;
   tokenStatus?: number;
@@ -101,6 +104,7 @@ export function createGoogleMock(options: GoogleMockOptions = {}) {
   const base = `https://sheets.googleapis.com/v4/spreadsheets/${options.spreadsheetId ?? DEFAULT_GOOGLE_SHEET_ID}`;
   const header = options.header === undefined ? FULL_HEADER : options.header;
   const updatedRange = options.updatedRange === undefined ? "'商品主檔'!A125:K125" : options.updatedRange;
+  let appendCount = 0;
   return createFetchMock((call) => {
     if (call.url === GOOGLE_TOKEN_URL) {
       if (options.tokenStatus && options.tokenStatus !== 200) {
@@ -119,8 +123,9 @@ export function createGoogleMock(options: GoogleMockOptions = {}) {
       );
     }
     if (call.method === "POST" && call.url.startsWith(`${base}/values/`) && call.url.includes(":append")) {
-      if (options.appendStatus && options.appendStatus !== 200) {
-        return jsonResponse({ error: { code: options.appendStatus, message: "stub error", status: "STUB" } }, options.appendStatus);
+      const appendStatus = options.appendStatuses?.[appendCount++] ?? options.appendStatus;
+      if (appendStatus && appendStatus !== 200) {
+        return jsonResponse({ error: { code: appendStatus, message: "stub error", status: "STUB" } }, appendStatus);
       }
       return jsonResponse({
         spreadsheetId: options.spreadsheetId ?? DEFAULT_GOOGLE_SHEET_ID,

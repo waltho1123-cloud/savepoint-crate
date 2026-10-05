@@ -19,7 +19,7 @@
 | 方法與路徑 | 說明 |
 |---|---|
 | `GET /`、`GET /index.html` | 回傳 `index.html`（`Cache-Control: no-cache`）。 |
-| `GET /healthz` | 回 `{ ok, openaiConfigured, sheetsConfigured, serviceAccountEmail }`。`serviceAccountEmail` 是從 `GOOGLE_SERVICE_ACCOUNT_CREDENTIALS` 解析出的 `client_email`（缺少或解析失敗時為 `null`），部署後用它知道要把試算表分享給誰；**絕不**回傳 `private_key` 或憑證其他欄位。 |
+| `GET /healthz` | 回 `{ ok, openaiConfigured, sheetsConfigured, serviceAccountEmail, clientIp }`。`serviceAccountEmail` 是從 `GOOGLE_SERVICE_ACCOUNT_CREDENTIALS` 解析出的 `client_email`（缺少或解析失敗時為 `null`），部署後用它知道要把試算表分享給誰；**絕不**回傳 `private_key` 或憑證其他欄位。`clientIp` 是**限流用的同一個判斷**所得到的呼叫端 IP（`X-Forwarded-For` 由右往左第一個公開位址；沒有就是 TCP 連線位址；再沒有就是 `"unknown"`），部署後 curl 一次就能確認 Zeabur 反向代理的處理是否正確（見「部署」）。 |
 | `POST /api/ocr` | 請求 `{ "image": "data:image/jpeg;base64,...", "boxId": "BOX-001" }`。成功 `{ "success": true, "data": { "barcode", "productName", "gender", "color", "size" } }`。 |
 | `POST /api/save` | 請求 `{ seqNo, date, boxId, barcode, productName, gender, color, size, quantity, time }`（與原 n8n webhook 相同）。成功 `{ "success": true, "range": "'商品主檔'!A125:K125" }`；`range` 取自 Sheets API `values.append` 回應的 `updates.updatedRange`，拿不到時省略該欄位。 |
 
@@ -29,10 +29,10 @@
 |---|---|
 | 400 | JSON 格式錯誤、缺少 `image`、`image` 不是合法 data URL、`/api/save` 欄位型別不對或整筆都是空的 |
 | 413 | 請求內容超過 15 MB |
-| 429 | 同一個 IP 一分鐘內超過 60 次（所有 `/api/*` 共用額度；回應帶 `Retry-After`） |
+| 429 | 同一個 IP 一分鐘內超過額度：`/api/ocr` 60 次、`/api/save` 600 次，兩者各自計算（其他 `/api/*` 路徑算進 OCR 的額度）；回應帶 `Retry-After` |
 | 500 | 試算表／憑證設定問題：表頭缺必要欄位（訊息會列出缺哪欄）、服務帳號沒有權限或憑證無效、找不到試算表或分頁 |
 | 502 | OpenAI 或 Google 暫時失敗（OCR 已自動重試一次）、OpenAI 回傳內容無法解析 |
-| 503 | 伺服器尚未設定 `OPENAI_API_KEY`（OCR）或 Google 憑證（存檔） |
+| 503 | 伺服器尚未設定 `OPENAI_API_KEY`（OCR）或 Google 憑證（存檔）；或同時排隊等待寫入的存檔超過 50 筆 |
 
 ## 環境變數
 
@@ -60,7 +60,8 @@
    缺少任何一欄會回 500 並說明缺哪欄，**不會**默默寫到錯的位置。表頭從 A1 開始、不要在最前面留空欄。
 3. **快取**：表頭讀取結果快取 5 分鐘（缺欄造成失敗時會立刻清掉快取）。改了表頭後，最多等 5 分鐘生效。
 4. **寫入方式**：`values.append`，範圍 `'商品主檔'!A1`，`valueInputOption=USER_ENTERED`、`insertDataOption=INSERT_ROWS`——內容會像使用者手動輸入一樣被試算表解析。若要保留商品編號的前導 0，請把該欄格式設成「純文字」。
-5. 專案內的 `商品主檔範本.csv` 是**舊版範本（只有 9 欄，缺 `合併品名`、`數量`）**，不能直接當新表頭用，請以上面的 11 欄為準。
+5. **寫入速度**：Google Sheets API 的寫入配額是每分鐘 60 次／使用者（服務帳號算一個使用者），所以伺服器把所有 append 排成一條**全域**佇列：一次只送一筆，相鄰兩筆的**起始時間**至少間隔 1 秒（見「安全與限制」的「限流與寫入速度」）。讀表頭不受影響。
+6. 專案內的 `商品主檔範本.csv` 是**舊版範本（只有 9 欄，缺 `合併品名`、`數量`）**，不能直接當新表頭用，請以上面的 11 欄為準。
 
 ## 本機開發
 
@@ -94,14 +95,18 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 - **pnpm 版本**：`package.json` 的 `packageManager`、Dockerfile 的 `corepack prepare pnpm@…`、產生 `pnpm-lock.yaml` 的 pnpm 三者必須同版（目前 9.15.9），否則 `--frozen-lockfile` 會失敗。
 - 在服務的環境變數頁設定上表的變數（至少 `OPENAI_API_KEY`、`GOOGLE_SERVICE_ACCOUNT_CREDENTIALS`）。**改環境變數後容器不會自動重啟**：請重啟服務，並用 `GET /healthz` 確認 `openaiConfigured`、`sheetsConfigured` 都變成 `true`；若仍是 `false`（重啟沒有帶到新增的變數），改為重新部署。
 - 本機驗證映像：`docker build -t savepoint-crate:local .`，再 `docker run --rm -p 8080:8080 -e OPENAI_API_KEY=x -e GOOGLE_SERVICE_ACCOUNT_CREDENTIALS=x savepoint-crate:local`。
-- 部署後檢查：runtime log 出現 `savepoint-crate listening on port 8080`；`GET /healthz` 的 `openaiConfigured`、`sheetsConfigured` 皆為 `true`，並把 `serviceAccountEmail` 加為試算表編輯者；最後在頁面實際拍一張標籤、關一個箱子確認有寫進試算表。
+- 部署後檢查：
+  1. runtime log 出現 `savepoint-crate listening on port 8080`。
+  2. `curl -s https://<網域>/healthz`：`openaiConfigured`、`sheetsConfigured` 皆為 `true`，並把 `serviceAccountEmail` 加為試算表編輯者。
+  3. **確認反向代理的 IP 處理**：同一個 `/healthz` 回應的 `clientIp` 應該是你自己的對外 IP（可與「我的 IP」網站比對）。如果看到 `10.x`、`172.16–31.x`、`192.168.x`、`100.64–127.x` 這類內部位址或 `"unknown"`，或不同人 curl 得到同一個值，代表 `X-Forwarded-For` 沒有被正確取得，**所有使用者會共用同一個限流額度**，需要先處理再上線。
+  4. 最後在頁面實際拍一張標籤、關一個箱子，確認有寫進試算表。
 
 ## 回滾
 
 依影響範圍由小到大：
 
 1. **平台層**：在 Zeabur 把服務回到前一個成功的部署（舊的純靜態頁，仍打 n8n webhook）。
-2. **程式碼層**：`git revert` 這次改版的 commit（把 `index.html` 與整個後端一起退回純靜態頁）。
+2. **程式碼層**：`git revert` 改版相關的所有 commit（把 `index.html` 與整個後端一起退回純靜態頁），或直接用改版前的最後一個 commit `db5c061`（純靜態頁）重新部署。
 3. **只退回 n8n 後端**：把 `index.html` 裡兩個常數改回
    - `OCREngine.WEBHOOK_URL = 'https://waltho1123.zeabur.app/webhook/ipas-ocr'`
    - `SaveEngine.SAVE_URL = 'https://waltho1123.zeabur.app/webhook/ipas-save-product'`
@@ -124,12 +129,18 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 | 存檔輸入驗證 | 不檢查 | 欄位只接受字串／數字、單欄 ≤ 1000 字、`barcode` 與 `productName` 至少一個非空 |
 | 公式字元 | 以 `=`、`+`、`-`、`@` 開頭的文字會被試算表當公式執行 | 這類文字前面加單引號（顯示內容不變）；純數字（含負數）不受影響 |
 | 回應 `range` | 無 | `/api/save` 成功時多帶 `range` |
+| 寫入速度 | 每筆各自寫入，沒有節流 | 所有 append 全域排隊，相鄰兩筆起始時間 ≥ 1 秒（Google 寫入配額每分鐘 60 次／使用者）。一個 N 筆的箱子，關箱同步至少要 N 秒 |
 | `color`、`size` 是 JSON 數字時的合併品名 | JavaScript 會把兩個數字相加（例如 `-1` 與 `5` 得到 `(4)`） | 一律當文字串接（得到 `(-15)`）。前端永遠送字串，不會觸發 |
 
 ## 安全與限制
 
-- **沒有登入機制**，與原 n8n webhook 相同：任何知道網址的人都能呼叫 `/api/*`。已做的防護：每 IP 每分鐘 60 次（記憶體內，服務重啟即重置；IP 取 `X-Forwarded-For` 由右往左第一個公開位址）、15 MB body 上限、存檔欄位驗證與公式字元處理、錯誤訊息不帶金鑰。若需要更嚴格的存取控制，請另外規劃（例如在前面加存取閘道）。
-- **限流與配額的實務影響**：所有 `/api/*` 共用同一個每 IP 每分鐘 60 次的額度（`src/app.ts` 的 `RATE_LIMIT_MAX`），拍照辨識也算在內；而前端關箱時是**逐筆**（循序）呼叫 `/api/save`。同一個出口 IP（例如倉庫同一個網路）有多人同時作業，或一個箱子的商品種類數加上同一分鐘內的拍照次數超過 60 時，後面的請求會被擋成 429，前端顯示「部分同步」而箱子仍會鎖定。另外 Google Sheets API 的寫入配額預設是每分鐘 60 次／使用者（服務帳號算一個使用者；每專案 300 次，超過回 429，來源：developers.google.com/workspace/sheets/api/limits，2026-10-05 查閱），所以單一箱子一分鐘內寫入超過 60 列時，即使調高本服務的限流，後面的列也會被 Google 擋下（本服務回 502、不自動重試）。若現場常有這種大箱子，需要讓前端改成批次送出（超出這次改版範圍），或在伺服器端加排隊限速。
+- **沒有登入機制**，與原 n8n webhook 相同：任何知道網址的人都能呼叫 `/api/*`。已做的防護：每 IP 每分鐘限流（OCR 60 次、存檔 600 次，各自計算；記憶體內，服務重啟即重置；IP 取 `X-Forwarded-For` 由右往左第一個公開位址）、15 MB body 上限、存檔欄位驗證與公式字元處理、錯誤訊息不帶金鑰。若需要更嚴格的存取控制，請另外規劃（例如在前面加存取閘道）。
+- **限流與寫入速度**：
+  - **限流（每 IP 每分鐘）**：`/api/ocr` 60 次（`OCR_RATE_LIMIT_MAX`）、`/api/save` 600 次（`SAVE_RATE_LIMIT_MAX`），兩個額度**各自獨立計算**——關箱時前端是逐筆、循序送出，不會被拍照的次數擠壓。其他 `/api/*` 路徑（含不存在的）算進 OCR 的額度。常數在 `src/app.ts`。同一個出口 IP（例如倉庫同一個網路）的人共用一份額度。
+  - **寫入速度（真正的瓶頸）**：Google Sheets API 的寫入配額預設是每分鐘 60 次／使用者（服務帳號算一個使用者；每專案 300 次，超過回 429；來源：developers.google.com/workspace/sheets/api/limits，2026-10-05 查閱）。所以伺服器把所有 `values.append` 排成一條**全域**佇列（整個程序共用、不分來源請求，先進先出）：一次只送一筆，相鄰兩筆的**起始時間**至少間隔 1 秒（`src/sheets.ts` 的 `APPEND_MIN_INTERVAL_MS`，建構 `SheetsClient` 時可用 `appendMinIntervalMs` 覆寫）；前一筆不論成功或失敗都不會卡住後面的；讀表頭不受影響。
+  - **實務影響**：一個箱子有 N 筆商品，關箱同步至少要 N 秒（50 筆約 50 秒，期間畫面停在「正在同步到商品主檔…」）；多人同時關箱會互相排隊，整體速度仍是每秒 1 筆。Google 若回應很慢（單次 timeout 20 秒），後面排隊的請求也會跟著等。
+  - **配額邊緣**：不間斷地連續寫入時，1 秒間隔剛好是每分鐘 60 次，正好壓在 Google 配額邊緣。如果實際看到 `/api/save` 回 502、且 log 出現 `[sheets] POST 失敗：HTTP 429`，請把 `APPEND_MIN_INTERVAL_MS` 調大一點（例如 1200）。
+  - **排隊上限**：同時排隊（含正在送出）的 append 超過 `APPEND_MAX_PENDING`（50）筆時，新的請求直接回 503「目前等待寫入的筆數過多」。以每秒 1 筆計，50 筆最多等約 50 秒，仍低於一般反向代理 60 秒左右的逾時；若等得更久，前端會先看到失敗、伺服器之後卻還是寫入，使用者重送就變成重複列。正常使用時前端是逐筆等回應才送下一筆，佇列長度頂多等於同時關箱的人數。
 - **不開 CORS**：頁面與 API 同源。
 - **`/api/save` 的 `values.append` 不自動重試**：逾時或 5xx 時無法確定有沒有寫進去，重試可能造成重複列；失敗時前端會提示，請到試算表確認後再補送。
 - log 不記請求內容（圖片、商品資料）與任何金鑰；上游失敗只記狀態碼與錯誤類型／代碼（Google 讀表頭失敗時另記其簡短錯誤訊息，方便判斷是分頁名稱還是權限問題；append 失敗不記訊息，因為可能回顯欄位值）。
@@ -139,9 +150,9 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 ```
 index.html              原本的前端頁面（只有 OCR／存檔兩個端點常數改成 /api/ocr、/api/save）
 src/server.ts           啟動入口（讀環境變數與 index.html，監聽 0.0.0.0:PORT）
-src/app.ts              Hono app：路由、限流、body 上限、錯誤處理
+src/app.ts              Hono app：路由、限流（OCR／存檔各自額度）、body 上限、錯誤處理
 src/ocr.ts              OCR：prompt、請求組裝、OpenAI 呼叫（timeout、重試）、回應解析
-src/sheets.ts           存檔：欄位整理、合併品名、表頭對應、Sheets REST（讀表頭＋append）
+src/sheets.ts           存檔：欄位整理、合併品名、表頭對應、Sheets REST（讀表頭＋append）、append 全域配速
 src/google-auth.ts      服務帳號 JWT（RS256）換 token、憑證解析（JSON／base64）
 src/rate-limit.ts       固定視窗限流與客戶端 IP 判斷
 src/env.ts              環境變數載入

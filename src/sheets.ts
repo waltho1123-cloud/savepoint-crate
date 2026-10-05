@@ -2,6 +2,7 @@ import {
   describeError,
   readJsonSafely,
   ServiceError,
+  sleep,
   type FetchLike,
   type Logger,
 } from "./common.js";
@@ -183,6 +184,22 @@ const SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets";
 export const HEADER_CACHE_MS = 5 * 60 * 1000;
 const SHEETS_REQUEST_TIMEOUT_MS = 20_000;
 
+/**
+ * Google Sheets API 的寫入配額是「每分鐘每使用者 60 次」（服務帳號＝一個使用者，超過回 429；
+ * 來源：https://developers.google.com/workspace/sheets/api/limits ，2026-10-05 查閱）。
+ * 所以整個程序的 append 請求排成一條佇列，相鄰兩次的「起始時間」至少間隔這麼久。
+ * 注意：不間斷地連續寫入時，1000 ms 剛好是每分鐘 60 次，正好壓在配額邊緣；
+ * 如果實際看到 Google 回 429，請把間隔調大一點（例如 1200 ms）。
+ */
+export const APPEND_MIN_INTERVAL_MS = 1000;
+/**
+ * 同時在佇列中（含正在送出）的 append 上限。正常使用時前端是逐筆等回應才送下一筆，
+ * 佇列長度頂多等於同時關箱的人數（個位數）；超過上限就直接回 503，避免異常流量讓請求越積越多、等待時間失控。
+ * 以每秒 1 筆計，50 筆最多等約 50 秒，仍低於一般反向代理 60 秒左右的逾時（等得比代理逾時還久，
+ * 前端會先看到失敗、伺服器之後卻還是寫入了，使用者重送就會變成重複列）。
+ */
+export const APPEND_MAX_PENDING = 50;
+
 export interface SheetsClientOptions {
   tokenProvider: GoogleTokenProvider;
   spreadsheetId: string;
@@ -190,8 +207,14 @@ export interface SheetsClientOptions {
   fetchImpl: FetchLike;
   log: Logger;
   now?: () => number;
+  /** append 配速時的等待函式；測試時注入以免真的等待（通常同時讓假時鐘前進）。 */
+  sleep?: (ms: number) => Promise<void>;
   headerTtlMs?: number;
   timeoutMs?: number;
+  /** 相鄰兩次 append 請求的最小起始間隔（毫秒）；預設 APPEND_MIN_INTERVAL_MS。 */
+  appendMinIntervalMs?: number;
+  /** 同時排隊（含正在送出）的 append 上限；預設 APPEND_MAX_PENDING。 */
+  appendMaxPending?: number;
 }
 
 export interface AppendResult {
@@ -221,6 +244,9 @@ function mapGoogleError(status: number, sheetName: string): ServiceError {
  *   修好表頭後下一筆就會重新讀取。
  * - append 不自動重試（逾時或 5xx 時無法確定有沒有寫進去，重試可能造成重複列）；
  *   唯一的例外是 401（授權過期，請求尚未執行）：換新 token 後重送一次。
+ * - append 全域配速：同一個 SheetsClient 實例內（server.ts 只建一個 app，所以等於整個程序）、不分來源請求，
+ *   append 一次只送一筆，且相鄰兩筆的起始時間至少間隔 appendMinIntervalMs（見 APPEND_MIN_INTERVAL_MS 的說明）。
+ *   讀表頭不受這個限制。
  */
 export class SheetsClient {
   private headerCache: { header: string[]; fetchedAt: number } | null = null;
@@ -231,8 +257,17 @@ export class SheetsClient {
   private readonly fetchImpl: FetchLike;
   private readonly log: Logger;
   private readonly now: () => number;
+  private readonly sleepFn: (ms: number) => Promise<void>;
   private readonly headerTtlMs: number;
   private readonly timeoutMs: number;
+  private readonly appendMinIntervalMs: number;
+  private readonly appendMaxPending: number;
+  /** append 佇列的尾端：下一筆 append 要等它完成（成功或失敗都會放行）才能開始。 */
+  private appendTail: Promise<void> = Promise.resolve();
+  /** 目前在佇列中（含正在送出）的 append 數量。 */
+  private pendingAppends = 0;
+  /** 最近一次「真正送出」append 請求的時間（毫秒）；null＝還沒送過。 */
+  private lastAppendSentAt: number | null = null;
 
   constructor(options: SheetsClientOptions) {
     this.tokenProvider = options.tokenProvider;
@@ -240,9 +275,12 @@ export class SheetsClient {
     this.sheetName = options.sheetName;
     this.fetchImpl = options.fetchImpl;
     this.log = options.log;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? (() => Date.now()); // 呼叫時才取 Date.now，測試用假計時器也攔得到
+    this.sleepFn = options.sleep ?? sleep;
     this.headerTtlMs = options.headerTtlMs ?? HEADER_CACHE_MS;
     this.timeoutMs = options.timeoutMs ?? SHEETS_REQUEST_TIMEOUT_MS;
+    this.appendMinIntervalMs = options.appendMinIntervalMs ?? APPEND_MIN_INTERVAL_MS;
+    this.appendMaxPending = options.appendMaxPending ?? APPEND_MAX_PENDING;
   }
 
   async appendRow(row: SaveRow): Promise<AppendResult> {
@@ -261,10 +299,11 @@ export class SheetsClient {
     const url =
       `${SHEETS_API}/${encodeURIComponent(this.spreadsheetId)}/values/${encodeURIComponent(range)}:append` +
       "?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS";
-    const json = (await this.request("POST", url, {
-      majorDimension: "ROWS",
-      values: [mapped.values.map(toSheetCell)],
-    })) as { updates?: { updatedRange?: unknown } } | null;
+    const payload = { majorDimension: "ROWS", values: [mapped.values.map(toSheetCell)] };
+    // 讀表頭（上面的 getHeader）不經過配速；只有 append 這一步排隊。
+    const json = (await this.paceAppend((markSent) => this.request("POST", url, payload, markSent))) as {
+      updates?: { updatedRange?: unknown };
+    } | null;
 
     const updatedRange = json?.updates?.updatedRange;
     return typeof updatedRange === "string" && updatedRange !== "" ? { updatedRange } : {};
@@ -296,12 +335,57 @@ export class SheetsClient {
     return Array.isArray(firstRow) ? firstRow.map((cell) => String(cell ?? "")) : [];
   }
 
-  private async request(method: "GET" | "POST", url: string, body?: unknown): Promise<unknown> {
+  /**
+   * append 全域配速：把所有 append 請求排成一條佇列（先進先出），一次只送一筆，且距離上一筆「真正送出」至少
+   * appendMinIntervalMs；需要等的時候只補足差額。task 收到的 markSent 要在 fetch 被呼叫之後立刻呼叫，用來記錄送出時間。
+   *
+   * 這是一個簡單的非同步互斥鎖（promise chain）：每筆 append 先等前一筆的 promise，結束時（不論成功或失敗）
+   * 在 finally 放行下一筆，所以前一筆失敗不會卡住後面的。送出前就失敗的（例如換不到 token）不會更新送出時間，
+   * 後面的也就不必為它多等。
+   */
+  private async paceAppend<T>(task: (markSent: () => void) => Promise<T>): Promise<T> {
+    if (this.pendingAppends >= this.appendMaxPending) {
+      this.log.warn(`[sheets] append 佇列已滿（${this.pendingAppends}/${this.appendMaxPending}），拒絕這次寫入`);
+      throw new ServiceError(503, "目前等待寫入的筆數過多，請稍後再試");
+    }
+    this.pendingAppends += 1;
+    const previous = this.appendTail;
+    let release!: () => void;
+    this.appendTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    try {
+      await previous;
+      if (this.lastAppendSentAt !== null) {
+        // 最多只等一個間隔：萬一系統時鐘被往回調，不會因此卡住很久。
+        const waitMs = Math.min(
+          this.appendMinIntervalMs,
+          this.lastAppendSentAt + this.appendMinIntervalMs - this.now(),
+        );
+        if (waitMs > 0) await this.sleepFn(waitMs);
+      }
+      return await task(() => {
+        this.lastAppendSentAt = this.now();
+      });
+    } finally {
+      this.pendingAppends -= 1;
+      release();
+    }
+  }
+
+  /**
+   * 送出一次 Google 請求（含 401 時換 token 重送一次）。onSend 會在「每次 fetch 被呼叫之後、等待回應之前」立刻被呼叫，
+   * 讓 append 配速記錄真正的送出時間（換 token 所花的時間不會算進間隔裡）。
+   * 記錄放在 fetch 被呼叫「之後」而不是之前：這樣記錄的時間一定不早於 fetch 實際被呼叫的時間，
+   * 下一筆的等待目標（記錄時間＋間隔）就一定不早於「上一筆 fetch 被呼叫的時間＋間隔」，
+   * 以毫秒時鐘從外面量測相鄰兩筆 fetch 被呼叫的時間差，也不會因為毫秒進位而少 1 ms。
+   */
+  private async request(method: "GET" | "POST", url: string, body?: unknown, onSend?: () => void): Promise<unknown> {
     for (let attempt = 1; attempt <= 2; attempt++) {
       const token = await this.tokenProvider.getToken();
       let res: Response;
       try {
-        res = await this.fetchImpl(url, {
+        const pending = this.fetchImpl(url, {
           method,
           headers: {
             Authorization: `Bearer ${token}`,
@@ -310,6 +394,8 @@ export class SheetsClient {
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: AbortSignal.timeout(this.timeoutMs),
         });
+        onSend?.();
+        res = await pending;
       } catch (err) {
         this.log.error(`[sheets] ${method} 連線失敗或逾時：${describeError(err)}`);
         throw new ServiceError(502, "Google 試算表連線失敗或逾時，請稍後再試");

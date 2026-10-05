@@ -11,9 +11,15 @@ import { buildSaveRow, parseSaveInput, SheetsClient } from "./sheets.js";
 
 /** JSON body 上限（相機照片 base64 後約 100～300 KB，15 MB 已非常寬鬆）。 */
 export const MAX_BODY_BYTES = 15 * 1024 * 1024;
-/** /api/* 每個 IP 每分鐘的請求上限。 */
-export const RATE_LIMIT_MAX = 60;
+/** 限流視窗：一分鐘。 */
 export const RATE_LIMIT_WINDOW_MS = 60_000;
+/** POST /api/ocr（以及其他非 /api/save 的 /api/* 路徑，含不存在的）每個 IP 每分鐘的請求上限。 */
+export const OCR_RATE_LIMIT_MAX = 60;
+/**
+ * POST /api/save 每個 IP 每分鐘的請求上限。關箱時前端是逐筆、循序送出，額度與拍照辨識分開計算，
+ * 才不會被拍照的次數擠壓。真正決定寫入速度的是 sheets.ts 的 append 配速（Google 寫入配額），不是這個數字。
+ */
+export const SAVE_RATE_LIMIT_MAX = 600;
 
 export interface AppDeps {
   env: AppEnv;
@@ -21,14 +27,23 @@ export interface AppDeps {
   indexHtml: string;
   /** 預設用全域 fetch（每次呼叫時才取 globalThis.fetch，所以測試用 vi.stubGlobal 也攔得到）。 */
   fetchImpl?: FetchLike;
-  /** OCR 重試之間的等待；測試時注入以免真的等 1 秒。 */
+  /** OCR 重試之間、以及 Google append 配速時的等待；測試時注入以免真的等待。 */
   sleep?: (ms: number) => Promise<void>;
-  /** 目前時間（毫秒）；測試時注入以驗證限流視窗與快取過期。 */
+  /** 目前時間（毫秒）；測試時注入以驗證限流視窗、快取過期與 append 配速。 */
   now?: () => number;
   log?: Logger;
 }
 
 type NodeConnection = { incoming?: { socket?: { remoteAddress?: string } } };
+
+/**
+ * 客戶端 IP 的判斷方式，限流與 GET /healthz 的 clientIp 共用同一個函式（規則見 rate-limit.ts 的 getClientIp）：
+ * 由右往左取 X-Forwarded-For 的第一個公開位址；沒有就退回 TCP 連線位址；再沒有就是 "unknown"。
+ */
+function clientIpOf(c: Context): string {
+  const connection = c.env as NodeConnection | undefined;
+  return getClientIp(c.req.header("x-forwarded-for"), connection?.incoming?.socket?.remoteAddress);
+}
 
 async function readJsonObject(c: Context): Promise<Record<string, unknown>> {
   let parsed: unknown;
@@ -47,14 +62,14 @@ async function readJsonObject(c: Context): Promise<Record<string, unknown>> {
  * 建立 Hono app（不碰 process.env、不開 port，方便測試）。
  *
  *   GET  /, /index.html  → 原本的 index.html（no-cache）
- *   GET  /healthz        → 設定狀態（不含任何金鑰）
+ *   GET  /healthz        → 設定狀態與服務帳號 email（不含任何金鑰）、呼叫端 IP（限流用的同一個判斷）
  *   POST /api/ocr        → 取代 n8n webhook ipas-ocr
  *   POST /api/save       → 取代 n8n webhook ipas-save-product
  */
 export function createApp(deps: AppDeps): Hono {
   const { env, indexHtml } = deps;
   const log = deps.log ?? consoleLogger;
-  const now = deps.now ?? Date.now;
+  const now = deps.now ?? (() => Date.now()); // 呼叫時才取 Date.now，測試用假計時器也攔得到
   const sleepFn = deps.sleep ?? sleep;
   const fetchImpl: FetchLike = deps.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
 
@@ -68,9 +83,12 @@ export function createApp(deps: AppDeps): Hono {
         fetchImpl,
         log,
         now,
+        sleep: sleepFn,
       })
     : null;
-  const limiter = new FixedWindowLimiter(RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  // OCR 與存檔各用自己的限流額度（每 IP 每分鐘），互不擠壓。
+  const ocrLimiter = new FixedWindowLimiter(OCR_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const saveLimiter = new FixedWindowLimiter(SAVE_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
 
   const app = new Hono();
 
@@ -81,7 +99,9 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/", serveIndex);
   app.get("/index.html", serveIndex);
 
-  // 健康檢查：只回「有沒有設定好」與服務帳號的 email（部署後要把試算表分享給它）。
+  // 健康檢查：回「有沒有設定好」、服務帳號的 email（部署後要把試算表分享給它），以及呼叫端 IP。
+  // clientIp 與限流用的是同一個判斷（clientIpOf）：部署後 curl 一次，就能確認 Zeabur 反向代理的
+  // X-Forwarded-For 有被正確處理（應該是呼叫端自己的對外 IP，而不是代理的內部位址或所有人共用的同一個值）。
   // 回應物件是逐欄位明確組出來的，不會帶出憑證的其他欄位（尤其是 private_key）。
   app.get("/healthz", (c) => {
     c.header("Cache-Control", "no-store");
@@ -90,14 +110,15 @@ export function createApp(deps: AppDeps): Hono {
       openaiConfigured: env.OPENAI_API_KEY !== "",
       sheetsConfigured: credentials !== null,
       serviceAccountEmail: credentials?.client_email ?? null,
+      clientIp: clientIpOf(c),
     });
   });
 
-  // /api/* 限流：每 IP 每分鐘 60 次（所有 /api/* 請求都計次，包含格式錯誤的）。
+  // /api/* 限流（每 IP 每分鐘）：/api/save 用自己的額度（SAVE_RATE_LIMIT_MAX）；
+  // 其餘（/api/ocr 與不存在的路徑）共用 OCR 的額度（OCR_RATE_LIMIT_MAX）。所有請求都計次，包含格式錯誤的。
   app.use("/api/*", async (c, next) => {
-    const connection = c.env as NodeConnection | undefined;
-    const ip = getClientIp(c.req.header("x-forwarded-for"), connection?.incoming?.socket?.remoteAddress);
-    const { allowed, retryAfterSeconds } = limiter.hit(ip, now());
+    const limiter = c.req.path === "/api/save" ? saveLimiter : ocrLimiter;
+    const { allowed, retryAfterSeconds } = limiter.hit(clientIpOf(c), now());
     if (!allowed) {
       c.header("Retry-After", String(retryAfterSeconds));
       return c.json({ success: false, error: "請求過於頻繁，請稍後再試" }, 429);
