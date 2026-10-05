@@ -864,9 +864,9 @@ const CameraEngine = {
   }
 };
 
-// ========== OCREngine (n8n + OpenAI Vision) ==========
+// ========== OCREngine (後端 /api/ocr → OpenAI Vision) ==========
 const OCREngine = {
-  WEBHOOK_URL: 'https://waltho1123.zeabur.app/webhook/ipas-ocr',
+  WEBHOOK_URL: '/api/ocr',
 
   async recognize(imageDataUrl, boxId) {
     if (!imageDataUrl) return null;
@@ -887,9 +887,9 @@ const OCREngine = {
   }
 };
 
-// ========== SaveEngine (n8n save to Google Sheets) ==========
+// ========== SaveEngine (後端 /api/save → Google Sheets) ==========
 const SaveEngine = {
-  SAVE_URL: 'https://waltho1123.zeabur.app/webhook/ipas-save-product',
+  SAVE_URL: '/api/save',
 
   async saveBoxItems(box) {
     if (!box || box.items.length === 0) return { success: false, error: '無資料可儲存' };

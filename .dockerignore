@@ -1,0 +1,16 @@
+node_modules
+dist
+coverage
+.env
+.env.*
+!.env.example
+*.log
+.git
+.gitignore
+.DS_Store
+docs
+tests
+README.md
+CLAUDE.md
+vitest.config.ts
+商品主檔範本.csv

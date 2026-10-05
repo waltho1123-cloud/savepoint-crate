@@ -1,0 +1,52 @@
+/**
+ * 環境變數載入。
+ *
+ * 設計取捨：缺少 OPENAI_API_KEY／GOOGLE_SERVICE_ACCOUNT_CREDENTIALS 時服務**仍會啟動**
+ * （靜態頁與 /healthz 照常），只是對應端點回 503；這樣部署到 Zeabur 後即使金鑰還沒填，
+ * 也能開 /healthz 看到「哪一項還沒設定」，不會變成反覆崩潰重啟。
+ * 絕不在 log 或錯誤訊息裡印出任何變數的值。
+ */
+
+export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com";
+export const DEFAULT_OPENAI_MODEL = "gpt-5.6-luna";
+export const DEFAULT_GOOGLE_SHEET_ID = "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A";
+export const DEFAULT_GOOGLE_SHEET_NAME = "商品主檔";
+export const DEFAULT_PORT = 8080;
+
+export interface AppEnv {
+  /** 空字串＝未設定（/api/ocr 回 503）。 */
+  OPENAI_API_KEY: string;
+  /** OpenAI 相容端點，已去掉尾端斜線、不含 /v1。 */
+  OPENAI_BASE_URL: string;
+  OPENAI_MODEL: string;
+  /** 服務帳號金鑰 JSON 原文或其 base64；空字串＝未設定（/api/save 回 503）。 */
+  GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: string;
+  GOOGLE_SHEET_ID: string;
+  GOOGLE_SHEET_NAME: string;
+  PORT: number;
+}
+
+type EnvSource = Record<string, string | undefined>;
+
+function pick(source: EnvSource, key: string, fallback: string): string {
+  const value = source[key];
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : fallback;
+}
+
+function parsePort(raw: string | undefined): number {
+  if (typeof raw !== "string" || raw.trim() === "") return DEFAULT_PORT;
+  const n = Number(raw.trim());
+  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : DEFAULT_PORT;
+}
+
+export function loadEnv(source: EnvSource = process.env): AppEnv {
+  return {
+    OPENAI_API_KEY: pick(source, "OPENAI_API_KEY", ""),
+    OPENAI_BASE_URL: pick(source, "OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL).replace(/\/+$/, ""),
+    OPENAI_MODEL: pick(source, "OPENAI_MODEL", DEFAULT_OPENAI_MODEL),
+    GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: pick(source, "GOOGLE_SERVICE_ACCOUNT_CREDENTIALS", ""),
+    GOOGLE_SHEET_ID: pick(source, "GOOGLE_SHEET_ID", DEFAULT_GOOGLE_SHEET_ID),
+    GOOGLE_SHEET_NAME: pick(source, "GOOGLE_SHEET_NAME", DEFAULT_GOOGLE_SHEET_NAME),
+    PORT: parsePort(source.PORT),
+  };
+}
