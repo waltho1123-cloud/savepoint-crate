@@ -92,6 +92,8 @@ describe("GET /healthz", () => {
       dataDirWritable: false, // 沒有注入 settings store＝資料目錄不可用（設定頁相關的測試見 settings-*.test.ts）
       dataDirMounted: null,
       adminConfigured: false,
+      adminCount: 0,
+      legacyAdminPending: false,
       lineConfigured: false,
       lineWebhookConfigured: false,
       lineSource: null,
@@ -117,6 +119,8 @@ describe("GET /healthz", () => {
       dataDirWritable: false,
       dataDirMounted: null,
       adminConfigured: false,
+      adminCount: 0,
+      legacyAdminPending: false,
       lineConfigured: false,
       lineWebhookConfigured: false,
       lineSource: null,
@@ -195,9 +199,11 @@ describe("GET /healthz", () => {
     const text = await (await app.request("/healthz")).text();
     expect(Object.keys(JSON.parse(text) as object).sort()).toEqual([
       "adminConfigured",
+      "adminCount",
       "clientIp",
       "dataDirMounted",
       "dataDirWritable",
+      "legacyAdminPending",
       "lineConfigured",
       "lineSource",
       "lineWebhookConfigured",

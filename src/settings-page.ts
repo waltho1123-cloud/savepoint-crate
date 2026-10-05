@@ -1,11 +1,14 @@
+import type { AdminPublic } from "./admins.js";
 import type { SettingsView } from "./line-settings.js";
 import { formatTaipeiTime } from "./line.js";
 import { DATA_DIR_UNAVAILABLE_MESSAGE } from "./settings-store.js";
 
 /**
- * 設定頁（GET /settings）的 HTML：伺服器端組字串，不用任何前端框架。三種狀態＋資料目錄不可用：
- *   unavailable → 沒有資料目錄（要掛 Volume）；setup → 還沒設定管理密碼；login → 已有密碼、尚未登入；settings → 已登入。
- * 所有動態內容（群組名稱、網址、群組 ID…）一律經過 escapeHtml；頁面內的 script 是固定字串、靠 CSP nonce 執行，
+ * 設定頁（GET /settings）的 HTML：伺服器端組字串，不用任何前端框架。五種狀態：
+ *   unavailable → 沒有資料目錄（要掛 Volume）；setup → 全新安裝，用設定碼建立第一位管理員；
+ *   upgrade → 還有舊版的單一管理密碼，要升級成管理員帳號；login → 已有管理員、尚未登入（Email＋密碼）；
+ *   settings → 已登入（LINE 設定、管理員帳號管理、我的帳號）。
+ * 所有動態內容（姓名、Email、群組名稱、網址、群組 ID…）一律經過 escapeHtml；頁面內的 script 是固定字串、靠 CSP nonce 執行，
  * 不使用 inline 事件屬性。
  */
 
@@ -57,14 +60,15 @@ h2{font-size:1.05rem;margin:0 0 .5rem}
 .sub{color:var(--muted);margin:0 0 .6rem;font-size:.9rem}
 .card{background:var(--card);border-radius:var(--radius);padding:18px 18px 16px;margin:14px 0;box-shadow:0 8px 32px rgba(14,120,180,.08)}
 label{display:block;font-weight:600;font-size:.9rem;margin:14px 0 6px}
-input[type=text],input[type=password]{width:100%;min-height:44px;padding:10px 12px;font-size:1rem;border:1.5px solid var(--line);border-radius:var(--radius-sm);background:#fff;color:var(--text)}
-input[type=text]:focus,input[type=password]:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(58,181,236,.23)}
+input[type=text],input[type=password],input[type=email]{width:100%;min-height:44px;padding:10px 12px;font-size:1rem;border:1.5px solid var(--line);border-radius:var(--radius-sm);background:#fff;color:var(--text)}
+input[type=text]:focus,input[type=password]:focus,input[type=email]:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(58,181,236,.23)}
 .mono{font-family:'SF Mono','Fira Code',ui-monospace,monospace;font-size:.88rem;word-break:break-all}
 .check{display:flex;align-items:center;gap:8px;font-weight:500;margin:10px 0 0;font-size:.95rem}
 .check input{width:20px;height:20px;margin:0}
 .btn{min-height:44px;padding:0 18px;border:0;border-radius:var(--radius-sm);font-size:1rem;font-weight:600;cursor:pointer;background:#e3eef6;color:var(--text)}
 .btn.primary{background:var(--primary);color:#fff}
 .btn.small{min-height:36px;padding:0 12px;font-size:.9rem}
+.btn.danger{background:#fde4e9;color:#be123c}
 .btn:disabled{opacity:.55;cursor:not-allowed}
 .row{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
 .msg{margin:12px 0 0;padding:10px 12px;border-radius:var(--radius-sm);font-size:.92rem}
@@ -84,6 +88,13 @@ input[type=text]:focus,input[type=password]:focus{outline:none;border-color:var(
 .gname{font-weight:600}
 .urlbox{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
 .urlbox code{flex:1 1 220px;padding:10px 12px;background:#f3f8fb;border-radius:var(--radius-sm)}
+.tablewrap{overflow-x:auto;margin:10px -4px 0}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+th,td{text-align:left;padding:8px 6px;vertical-align:middle;border-top:1px solid var(--line)}
+th{font-size:.8rem;color:var(--muted);font-weight:600;border-top:0;white-space:nowrap}
+td.actions{white-space:nowrap}
+td.actions .btn{margin:2px 6px 2px 0}
+.me{color:var(--muted);font-size:.85rem}
 [hidden]{display:none!important}
 `;
 
@@ -135,16 +146,25 @@ const SCRIPT = `
     var pw = $('setup-password').value;
     if (pw !== $('setup-password2').value) { say('setup-msg', '兩次輸入的密碼不一致', false); return; }
     btn.disabled = true;
-    request('POST', '/settings/setup', { setupCode: $('setup-code').value, password: pw }).then(function (r) {
+    request('POST', '/settings/setup', { setupCode: $('setup-code').value, name: $('setup-name').value, email: $('setup-email').value, password: pw }).then(function (r) {
       if (r.ok) { location.reload(); return; }
       say('setup-msg', failText(r), false);
       btn.disabled = false;
     }, function () { offline('setup-msg', btn); });
   });
 
+  onSubmit('upgrade-form', function (btn) {
+    btn.disabled = true;
+    request('POST', '/settings/upgrade', { currentPassword: $('upgrade-password').value, name: $('upgrade-name').value, email: $('upgrade-email').value }).then(function (r) {
+      if (r.ok) { location.reload(); return; }
+      say('upgrade-msg', failText(r), false);
+      btn.disabled = false;
+    }, function () { offline('upgrade-msg', btn); });
+  });
+
   onSubmit('login-form', function (btn) {
     btn.disabled = true;
-    request('POST', '/settings/login', { password: $('login-password').value }).then(function (r) {
+    request('POST', '/settings/login', { email: $('login-email').value, password: $('login-password').value }).then(function (r) {
       if (r.ok) { location.reload(); return; }
       say('login-msg', failText(r), false);
       btn.disabled = false;
@@ -217,6 +237,89 @@ const SCRIPT = `
     } catch (e) { done(false); }
   });
 
+  // ---- 管理員帳號管理：表格上的按鈕（事件委派）與共用的編輯面板（新增／編輯／重設密碼）
+  var editor = $('admin-editor');
+  var mode = null;
+  var targetId = null;
+  function setRow(id, visible) { var el = $(id); if (el) el.hidden = !visible; }
+  function openEditor(nextMode, id, name, email) {
+    mode = nextMode;
+    targetId = id;
+    var withProfile = nextMode === 'add' || nextMode === 'edit';
+    var withPassword = nextMode === 'add' || nextMode === 'reset';
+    $('ae-title').textContent = nextMode === 'add' ? '新增管理員' : (nextMode === 'edit' ? '編輯管理員' : '重設密碼：' + email);
+    setRow('ae-row-name', withProfile);
+    setRow('ae-row-email', withProfile);
+    setRow('ae-row-password', withPassword);
+    $('ae-name').value = nextMode === 'edit' ? name : '';
+    $('ae-email').value = nextMode === 'edit' ? email : '';
+    $('ae-password').value = '';
+    $('ae-password2').value = '';
+    $('ae-msg').hidden = true;
+    $('ae-submit').disabled = false;
+    editor.hidden = false;
+    editor.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    var first = withProfile ? $('ae-name') : $('ae-password');
+    if (first) first.focus();
+  }
+  function closeEditor() { if (editor) editor.hidden = true; mode = null; targetId = null; }
+  function adminResult(r, btn) {
+    if (sessionLost(r)) return;
+    if (r.ok) { location.reload(); return; }
+    say('admin-msg', failText(r), false);
+    if (btn) btn.disabled = false;
+  }
+
+  var addBtn = $('admin-add');
+  if (addBtn) addBtn.addEventListener('click', function () { openEditor('add', null, '', ''); });
+  var cancelBtn = $('ae-cancel');
+  if (cancelBtn) cancelBtn.addEventListener('click', closeEditor);
+
+  var table = $('admin-table');
+  if (table) table.addEventListener('click', function (event) {
+    var btn = event.target && event.target.closest ? event.target.closest('button[data-admin-action]') : null;
+    if (!btn || btn.disabled) return;
+    var action = btn.getAttribute('data-admin-action');
+    var id = btn.getAttribute('data-id');
+    var name = btn.getAttribute('data-name') || '';
+    var email = btn.getAttribute('data-email') || '';
+    if (action === 'edit') { openEditor('edit', id, name, email); return; }
+    if (action === 'reset') { openEditor('reset', id, name, email); return; }
+    if (action === 'toggle') {
+      var next = btn.getAttribute('data-status') === 'active' ? 'disabled' : 'active';
+      if (next === 'disabled' && !window.confirm('確定要停用 ' + email + ' 嗎？\\n對方會立刻被登出，也無法再登入，直到你重新啟用。')) return;
+      btn.disabled = true;
+      request('POST', '/api/admins/' + id + '/status', { status: next }).then(function (r) { adminResult(r, btn); }, function () { offline('admin-msg', btn); });
+      return;
+    }
+    if (action === 'delete') {
+      if (!window.confirm('確定要刪除 ' + email + ' 嗎？\\n這個動作無法復原。')) return;
+      btn.disabled = true;
+      request('DELETE', '/api/admins/' + id, {}).then(function (r) { adminResult(r, btn); }, function () { offline('admin-msg', btn); });
+    }
+  });
+
+  onSubmit('admin-form', function (btn) {
+    var pw = $('ae-password').value;
+    if ((mode === 'add' || mode === 'reset') && pw !== $('ae-password2').value) { say('ae-msg', '兩次輸入的密碼不一致', false); return; }
+    var req;
+    if (mode === 'add') req = request('POST', '/api/admins', { name: $('ae-name').value, email: $('ae-email').value, password: pw });
+    else if (mode === 'edit') req = request('PATCH', '/api/admins/' + targetId, { name: $('ae-name').value, email: $('ae-email').value });
+    else if (mode === 'reset') req = request('POST', '/api/admins/' + targetId + '/password', { newPassword: pw });
+    else return;
+    btn.disabled = true;
+    req.then(function (r) {
+      if (sessionLost(r)) return;
+      if (r.ok) {
+        if (mode === 'reset') { say('ae-msg', '密碼已重設；對方所有裝置上的登入都已失效', true); setTimeout(function () { location.reload(); }, 900); return; }
+        location.reload();
+        return;
+      }
+      say('ae-msg', failText(r), false);
+      btn.disabled = false;
+    }, function () { offline('ae-msg', btn); });
+  });
+
   onSubmit('password-form', function (btn) {
     var next = $('new-password').value;
     if (next !== $('new-password2').value) { say('password-msg', '兩次輸入的新密碼不一致', false); return; }
@@ -228,7 +331,7 @@ const SCRIPT = `
         $('current-password').value = '';
         $('new-password').value = '';
         $('new-password2').value = '';
-        say('password-msg', '密碼已更新；其他裝置上的登入已全部失效', true);
+        say('password-msg', '密碼已更新；你在其他裝置上的登入已全部失效（這個瀏覽器維持登入）', true);
         return;
       }
       say('password-msg', failText(r), false);
@@ -257,7 +360,7 @@ function layout(ctx: PageContext, body: string): string {
 <body>
 <main class="wrap">
 <h1>savepoint-crate 設定</h1>
-<p class="sub">管理 LINE 群組通知與管理密碼</p>
+<p class="sub">管理 LINE 群組通知與管理員帳號</p>
 ${ctx.insecure ? INSECURE_NOTICE : ""}
 ${body}
 </main>
@@ -283,17 +386,41 @@ export function renderSetupPage(ctx: PageContext): string {
   return layout(
     ctx,
     `<section class="card">
-<h2>第一次使用：建立管理密碼</h2>
+<h2>第一次使用：建立第一位管理員</h2>
 <p class="muted">請輸入服務啟動時寫在記錄（Zeabur：服務 → 記錄）裡的設定碼——找「[settings] 尚未設定管理密碼」那一行。設定碼只存在記憶體，每次服務重新啟動都會產生新的一組。</p>
 <form id="setup-form" autocomplete="off">
 <label for="setup-code">設定碼</label>
 <input type="text" id="setup-code" placeholder="XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="20" required>
-<label for="setup-password">新密碼（至少 10 個字元）</label>
+<label for="setup-name">姓名</label>
+<input type="text" id="setup-name" autocomplete="name" maxlength="50" required>
+<label for="setup-email">Email（之後用它登入）</label>
+<input type="email" id="setup-email" autocomplete="username" spellcheck="false" maxlength="254" required>
+<label for="setup-password">密碼（至少 10 個字元）</label>
 <input type="password" id="setup-password" autocomplete="new-password" minlength="10" maxlength="200" required>
 <label for="setup-password2">再輸入一次密碼</label>
 <input type="password" id="setup-password2" autocomplete="new-password" minlength="10" maxlength="200" required>
-<div class="row"><button type="submit" class="btn primary">建立密碼並登入</button></div>
+<div class="row"><button type="submit" class="btn primary">建立管理員並登入</button></div>
 <p id="setup-msg" class="msg" role="status" hidden></p>
+</form>
+</section>`,
+  );
+}
+
+export function renderUpgradePage(ctx: PageContext): string {
+  return layout(
+    ctx,
+    `<section class="card">
+<h2>升級為管理員帳號</h2>
+<p class="muted">這個系統已改成「管理員帳號」制：每位管理員有自己的姓名、Email 與密碼。請輸入<strong>目前使用的管理密碼</strong>，再填入你的姓名與 Email，建立第一位管理員——<strong>密碼沿用目前這個，不需要重設</strong>，LINE 設定與其他資料都不會動。升級後舊的單一密碼與舊的登入會失效，之後用 Email 與密碼登入，並可以在「管理員」區塊新增其他管理員。</p>
+<form id="upgrade-form" autocomplete="off">
+<label for="upgrade-password">目前的管理密碼</label>
+<input type="password" id="upgrade-password" autocomplete="current-password" maxlength="200" required>
+<label for="upgrade-name">姓名</label>
+<input type="text" id="upgrade-name" autocomplete="name" maxlength="50" required>
+<label for="upgrade-email">Email（之後用它登入）</label>
+<input type="email" id="upgrade-email" autocomplete="username" spellcheck="false" maxlength="254" required>
+<div class="row"><button type="submit" class="btn primary">升級並登入</button></div>
+<p id="upgrade-msg" class="msg" role="status" hidden></p>
 </form>
 </section>`,
   );
@@ -305,12 +432,14 @@ export function renderLoginPage(ctx: PageContext): string {
     `<section class="card">
 <h2>登入</h2>
 <form id="login-form">
-<label for="login-password">管理密碼</label>
+<label for="login-email">Email</label>
+<input type="email" id="login-email" autocomplete="username" spellcheck="false" maxlength="254" required>
+<label for="login-password">密碼</label>
 <input type="password" id="login-password" autocomplete="current-password" maxlength="200" required>
 <div class="row"><button type="submit" class="btn primary">登入</button></div>
 <p id="login-msg" class="msg" role="status" hidden></p>
 </form>
-<p class="muted">忘記密碼：到 Zeabur 服務的終端機刪除 <span class="mono">/app/data/settings.json</span> 後重新啟動服務，再用新的設定碼重設（LINE 設定也會一併清除，需要重填）。</p>
+<p class="muted">忘記密碼：請其他管理員在「管理員」區塊幫你重設。所有管理員都登入不了時，請參考 README 的「忘記所有密碼時的復原方式」（需要動到 Volume 裡的設定檔，有風險，請先讀完說明）。</p>
 </section>`,
   );
 }
@@ -345,6 +474,7 @@ function renderStatus(view: SettingsView): string {
   else chips.push(chip("bad", "LINE 關箱通知：設定未完成"));
   chips.push(chip(eff.lineWebhookConfigured ? "ok" : "bad", eff.lineWebhookConfigured ? "Webhook：已啟用" : "Webhook：缺少 Channel secret"));
   chips.push(chip("", `設定來源：${eff.source === "settings" ? "設定頁" : eff.source === "env" ? "環境變數（備援）" : "尚未設定"}`));
+  chips.push(chip("", `管理員：${view.adminCount} 位`));
   const mountWarning =
     view.dataDirWritable && view.dataDirMounted === false
       ? `<p class="note warn">這個資料目錄看起來不是掛載的 Volume，服務重新部署後設定會消失。請在 Zeabur 掛載 Volume 到 <span class="mono">/app/data</span>。</p>`
@@ -424,9 +554,73 @@ ${body}
 </section>`;
 }
 
-function renderAccountCard(): string {
+function renderAdminRow(admin: AdminPublic, meId: string): string {
+  const isMe = admin.id === meId;
+  const active = admin.status === "active";
+  const data = `data-id="${escapeHtml(admin.id)}" data-name="${escapeHtml(admin.name)}" data-email="${escapeHtml(admin.email)}"`;
+  const lastLogin = admin.lastLoginAt ? formatSeenAt(admin.lastLoginAt) : "—";
+  // 對自己：只能編輯姓名／Email；重設密碼請用「我的帳號」、不能停用或刪除自己（伺服器端也會擋）
+  const selfHint = ' disabled title="不能對自己的帳號這麼做"';
+  return `<tr>
+<td>${escapeHtml(admin.name)}${isMe ? ' <span class="me">（你）</span>' : ""}</td>
+<td class="mono">${escapeHtml(admin.email)}</td>
+<td>${active ? '<span class="chip ok">啟用</span>' : '<span class="chip bad">停用</span>'}</td>
+<td>${escapeHtml(lastLogin)}</td>
+<td class="actions">
+<button type="button" class="btn small" data-admin-action="edit" ${data}>編輯</button>
+<button type="button" class="btn small" data-admin-action="reset" ${data}${isMe ? selfHint : ""}>重設密碼</button>
+<button type="button" class="btn small" data-admin-action="toggle" data-status="${active ? "active" : "disabled"}" ${data}${isMe ? selfHint : ""}>${active ? "停用" : "啟用"}</button>
+<button type="button" class="btn small danger" data-admin-action="delete" ${data}${isMe ? selfHint : ""}>刪除</button>
+</td>
+</tr>`;
+}
+
+function renderAdminsCard(view: SettingsView, admins: ReadonlyArray<AdminPublic>): string {
+  const rows = admins.map((admin) => renderAdminRow(admin, view.me.id)).join("\n");
   return `<section class="card">
-<h2>管理密碼</h2>
+<h2>管理員</h2>
+<p class="muted">每位管理員用自己的 Email 與密碼登入。停用或重設密碼會立刻讓對方所有裝置上的登入失效；不能停用或刪除自己，也不能停用或刪除最後一位啟用中的管理員。</p>
+<div class="tablewrap">
+<table id="admin-table">
+<thead><tr><th>姓名</th><th>Email</th><th>狀態</th><th>最後登入</th><th>操作</th></tr></thead>
+<tbody>
+${rows}
+</tbody>
+</table>
+</div>
+<div class="row"><button type="button" class="btn primary" id="admin-add">新增管理員</button></div>
+<p id="admin-msg" class="msg" role="status" hidden></p>
+</section>
+<section class="card" id="admin-editor" hidden>
+<h2 id="ae-title">新增管理員</h2>
+<form id="admin-form" autocomplete="off">
+<div id="ae-row-name">
+<label for="ae-name">姓名</label>
+<input type="text" id="ae-name" autocomplete="off" maxlength="50">
+</div>
+<div id="ae-row-email">
+<label for="ae-email">Email（登入帳號）</label>
+<input type="email" id="ae-email" autocomplete="off" spellcheck="false" maxlength="254">
+</div>
+<div id="ae-row-password">
+<label for="ae-password">密碼（至少 10 個字元）</label>
+<input type="password" id="ae-password" autocomplete="new-password" minlength="10" maxlength="200">
+<label for="ae-password2">再輸入一次密碼</label>
+<input type="password" id="ae-password2" autocomplete="new-password" minlength="10" maxlength="200">
+</div>
+<div class="row">
+<button type="submit" class="btn primary" id="ae-submit">儲存</button>
+<button type="button" class="btn" id="ae-cancel">取消</button>
+</div>
+<p id="ae-msg" class="msg" role="status" hidden></p>
+</form>
+</section>`;
+}
+
+function renderAccountCard(view: SettingsView): string {
+  return `<section class="card">
+<h2>我的帳號</h2>
+<p class="muted">姓名：<strong id="me-name">${escapeHtml(view.me.name)}</strong><br>Email：<strong id="me-email" class="mono">${escapeHtml(view.me.email)}</strong>（要修改姓名或 Email，請用上面「管理員」表格裡自己那一列的「編輯」）</p>
 <form id="password-form" autocomplete="off">
 <label for="current-password">目前的密碼</label>
 <input type="password" id="current-password" autocomplete="current-password" maxlength="200" required>
@@ -435,15 +629,18 @@ function renderAccountCard(): string {
 <label for="new-password2">再輸入一次新密碼</label>
 <input type="password" id="new-password2" autocomplete="new-password" minlength="10" maxlength="200" required>
 <div class="row">
-<button type="submit" class="btn primary">更改密碼</button>
+<button type="submit" class="btn primary">變更我的密碼</button>
 <button type="button" class="btn" id="logout">登出</button>
 </div>
-<p class="muted">更改密碼後，其他裝置上的登入會全部失效。</p>
+<p class="muted">變更密碼後，你在其他裝置上的登入會全部失效（其他管理員不受影響）。</p>
 <p id="password-msg" class="msg" role="status" hidden></p>
 </form>
 </section>`;
 }
 
-export function renderSettingsPage(ctx: PageContext, view: SettingsView): string {
-  return layout(ctx, [renderStatus(view), renderLineCard(view), renderWebhookCard(ctx), renderCapturedCard(view), renderAccountCard()].join("\n"));
+export function renderSettingsPage(ctx: PageContext, view: SettingsView, admins: ReadonlyArray<AdminPublic>): string {
+  return layout(
+    ctx,
+    [renderStatus(view), renderLineCard(view), renderWebhookCard(ctx), renderCapturedCard(view), renderAdminsCard(view, admins), renderAccountCard(view)].join("\n"),
+  );
 }

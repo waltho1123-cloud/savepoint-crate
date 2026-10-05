@@ -23,7 +23,7 @@ export const silentLogger: Logger = {
   error: () => undefined,
 };
 
-export type ServiceErrorStatus = 400 | 401 | 403 | 409 | 413 | 415 | 429 | 500 | 502 | 503;
+export type ServiceErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 415 | 429 | 500 | 502 | 503;
 
 /**
  * 可以直接回給前端的錯誤。

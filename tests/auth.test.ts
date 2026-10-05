@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createSessionToken,
+  DUMMY_PASSWORD_HASH,
   generateSetupCode,
   hashPassword,
   PASSWORD_MAX_LENGTH,
@@ -121,76 +122,150 @@ describe("validateNewPassword", () => {
   });
 });
 
-describe("session cookie 值（HMAC 簽章）", () => {
+describe("session cookie 值（HMAC 簽章，綁定帳號與 sessionVersion）", () => {
   const secret = "ab".repeat(32);
   const now = 1_800_000_000_000;
+  const ACCOUNT = "0123456789abcdef0123456789abcdef";
+  const OTHER_ACCOUNT = "fedcba9876543210fedcba9876543210";
 
-  it("格式是 <到期時間>.<亂數>.<HMAC>，到期時間是現在加 7 天，每次的亂數都不同", () => {
-    const a = createSessionToken(secret, now);
-    const b = createSessionToken(secret, now);
-    const [expires, nonce, mac] = a.split(".") as [string, string, string];
+  it("格式是 <到期時間>.<帳號 id>.<sessionVersion>.<亂數>.<HMAC>，到期時間是現在加 7 天，每次的亂數都不同", () => {
+    const a = createSessionToken(secret, ACCOUNT, 3, now);
+    const b = createSessionToken(secret, ACCOUNT, 3, now);
+    const [expires, id, version, nonce, mac] = a.split(".") as [string, string, string, string, string];
     expect(Number(expires)).toBe(now + SESSION_TTL_MS);
     expect(SESSION_TTL_MS).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(id).toBe(ACCOUNT);
+    expect(version).toBe("3");
     expect(nonce).toMatch(/^[A-Za-z0-9_-]{16}$/);
     expect(mac).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(a.split(".")).toHaveLength(5);
     expect(a).not.toBe(b);
   });
 
-  it("HMAC 是以 sessionSecret（十六進位轉成位元組）為金鑰、對「<到期時間>.<亂數>」做 SHA-256、base64url", () => {
-    const token = createSessionToken(secret, now);
-    const [expires, nonce, mac] = token.split(".") as [string, string, string];
-    const expected = createHmac("sha256", Buffer.from(secret, "hex")).update(`${expires}.${nonce}`).digest("base64url");
-    expect(mac).toBe(expected);
+  it("HMAC 是以 sessionSecret（十六進位轉成位元組）為金鑰、對「<到期時間>.<帳號 id>.<sessionVersion>.<亂數>」做 SHA-256、base64url", () => {
+    const token = createSessionToken(secret, ACCOUNT, 7, now);
+    const parts = token.split(".") as [string, string, string, string, string];
+    const expected = createHmac("sha256", Buffer.from(secret, "hex")).update(parts.slice(0, 4).join(".")).digest("base64url");
+    expect(parts[4]).toBe(expected);
+  });
+
+  it("驗證通過時回傳簽在裡面的帳號 id 與 sessionVersion", () => {
+    const token = createSessionToken(secret, ACCOUNT, 12, now);
+    expect(verifySessionToken(token, secret, now)).toEqual({ accountId: ACCOUNT, sessionVersion: 12 });
+    expect(verifySessionToken(createSessionToken(secret, OTHER_ACCOUNT, 1, now), secret, now)).toEqual({ accountId: OTHER_ACCOUNT, sessionVersion: 1 });
   });
 
   it("有效期內通過；到期時間當下（含）與之後都不通過", () => {
-    const token = createSessionToken(secret, now);
-    expect(verifySessionToken(token, secret, now)).toBe(true);
-    expect(verifySessionToken(token, secret, now + SESSION_TTL_MS - 1)).toBe(true);
-    expect(verifySessionToken(token, secret, now + SESSION_TTL_MS)).toBe(false);
-    expect(verifySessionToken(token, secret, now + SESSION_TTL_MS + 1)).toBe(false);
+    const token = createSessionToken(secret, ACCOUNT, 1, now);
+    expect(verifySessionToken(token, secret, now)).not.toBeNull();
+    expect(verifySessionToken(token, secret, now + SESSION_TTL_MS - 1)).not.toBeNull();
+    expect(verifySessionToken(token, secret, now + SESSION_TTL_MS)).toBeNull();
+    expect(verifySessionToken(token, secret, now + SESSION_TTL_MS + 1)).toBeNull();
   });
 
-  it("換一把金鑰（改密碼時會換）就全部失效", () => {
-    const token = createSessionToken(secret, now);
-    expect(verifySessionToken(token, "cd".repeat(32), now)).toBe(false);
+  it("換一把簽章金鑰就全部失效", () => {
+    const token = createSessionToken(secret, ACCOUNT, 1, now);
+    expect(verifySessionToken(token, "cd".repeat(32), now)).toBeNull();
   });
 
-  it("任何一段被改過都不通過：到期時間延長、亂數、簽章的任一字元", () => {
-    const token = createSessionToken(secret, now);
-    const [expires, nonce, mac] = token.split(".") as [string, string, string];
-    expect(verifySessionToken(`${Number(expires) + 86_400_000}.${nonce}.${mac}`, secret, now)).toBe(false); // 想把到期時間往後延
-    expect(verifySessionToken(`${expires}.${nonce.slice(0, -1)}${nonce.endsWith("A") ? "B" : "A"}.${mac}`, secret, now)).toBe(false);
+  it("任何一段被改過都不通過：到期時間延長、換成別的帳號 id、把 sessionVersion 改大、亂數、簽章的任一字元", () => {
+    const token = createSessionToken(secret, ACCOUNT, 2, now);
+    const [expires, id, version, nonce, mac] = token.split(".") as [string, string, string, string, string];
+    const make = (e = expires, i = id, v = version, n = nonce, m = mac) => `${e}.${i}.${v}.${n}.${m}`;
+    expect(verifySessionToken(make(String(Number(expires) + 86_400_000)), secret, now)).toBeNull(); // 想把到期時間往後延
+    expect(verifySessionToken(make(undefined, OTHER_ACCOUNT), secret, now)).toBeNull(); // 想冒充別的帳號
+    expect(verifySessionToken(make(undefined, undefined, "3"), secret, now)).toBeNull(); // 想把 sessionVersion 改成新的
+    expect(verifySessionToken(make(undefined, undefined, "1"), secret, now)).toBeNull();
+    expect(verifySessionToken(make(undefined, undefined, undefined, `${nonce.slice(0, -1)}${nonce.endsWith("A") ? "B" : "A"}`), secret, now)).toBeNull();
     const flipped = mac.startsWith("A") ? `B${mac.slice(1)}` : `A${mac.slice(1)}`;
-    expect(verifySessionToken(`${expires}.${nonce}.${flipped}`, secret, now)).toBe(false);
+    expect(verifySessionToken(make(undefined, undefined, undefined, undefined, flipped), secret, now)).toBeNull();
     const flippedEnd = mac.endsWith("A") ? `${mac.slice(0, -1)}B` : `${mac.slice(0, -1)}A`;
-    expect(verifySessionToken(`${expires}.${nonce}.${flippedEnd}`, secret, now)).toBe(false);
+    expect(verifySessionToken(make(undefined, undefined, undefined, undefined, flippedEnd), secret, now)).toBeNull();
+  });
+
+  it("舊格式（升級成管理員帳號之前的 <到期>.<亂數>.<簽章> 三段式）一律視為未登入，即使簽章本身是對的", () => {
+    const expires = String(now + SESSION_TTL_MS);
+    const nonce = "AAAAAAAAAAAAAAAA";
+    const mac = createHmac("sha256", Buffer.from(secret, "hex")).update(`${expires}.${nonce}`).digest("base64url");
+    expect(`${expires}.${nonce}.${mac}`.split(".")).toHaveLength(3);
+    expect(verifySessionToken(`${expires}.${nonce}.${mac}`, secret, now)).toBeNull();
   });
 
   it("格式不對一律不通過（不丟例外）", () => {
-    const token = createSessionToken(secret, now);
-    const [expires, nonce, mac] = token.split(".") as [string, string, string];
+    const token = createSessionToken(secret, ACCOUNT, 1, now);
+    const [expires, id, version, nonce, mac] = token.split(".") as [string, string, string, string, string];
     const bad: Array<string | undefined> = [
       undefined,
       "",
       "garbage",
       "a.b",
-      `${expires}.${nonce}`, // 少簽章
+      `${expires}.${id}.${version}.${nonce}`, // 少簽章
       `${token}.extra`, // 多一段
-      `abc.${nonce}.${mac}`, // 到期時間不是數字
-      `-5.${nonce}.${mac}`,
-      `${expires}.${nonce}.${mac.slice(0, 42)}`, // 簽章太短
-      `${expires}.${nonce}.${mac}A`, // 簽章太長
-      `${expires}..${mac}`, // 亂數是空的
-      `${expires}.${nonce}.${mac.replace(/.$/, "!")}`, // 非法字元
-      "1".repeat(17) + `.${nonce}.${mac}`, // 到期時間位數過多
+      `abc.${id}.${version}.${nonce}.${mac}`, // 到期時間不是數字
+      `-5.${id}.${version}.${nonce}.${mac}`,
+      `${expires}.${id.slice(0, 31)}.${version}.${nonce}.${mac}`, // 帳號 id 太短
+      `${expires}.${id.toUpperCase()}.${version}.${nonce}.${mac}`, // 帳號 id 要是小寫十六進位
+      `${expires}.${"g".repeat(32)}.${version}.${nonce}.${mac}`, // 帳號 id 不是十六進位
+      `${expires}.${id}.abc.${nonce}.${mac}`, // sessionVersion 不是數字
+      `${expires}.${id}.-1.${nonce}.${mac}`,
+      `${expires}.${id}..${nonce}.${mac}`, // sessionVersion 是空的
+      `${expires}.${id}.${"9".repeat(17)}.${nonce}.${mac}`, // sessionVersion 位數過多
+      `${expires}.${id}.${version}.${nonce}.${mac.slice(0, 42)}`, // 簽章太短
+      `${expires}.${id}.${version}.${nonce}.${mac}A`, // 簽章太長
+      `${expires}.${id}.${version}..${mac}`, // 亂數是空的
+      `${expires}.${id}.${version}.${nonce}.${mac.replace(/.$/, "!")}`, // 非法字元
+      "1".repeat(17) + `.${id}.${version}.${nonce}.${mac}`, // 到期時間位數過多
     ];
-    for (const value of bad) expect(verifySessionToken(value, secret, now)).toBe(false);
+    for (const value of bad) expect(verifySessionToken(value, secret, now)).toBeNull();
+  });
+
+  it("帳號 id 必須是 32 個小寫十六進位字元：即使簽章是對的，太短、太長、大寫、含非十六進位字元、空的都不通過", () => {
+    const sign = (accountId: string) => {
+      const expires = String(now + SESSION_TTL_MS);
+      const mac = createHmac("sha256", Buffer.from(secret, "hex")).update(`${expires}.${accountId}.1.AAAAAAAAAAAAAAAA`).digest("base64url");
+      return `${expires}.${accountId}.1.AAAAAAAAAAAAAAAA.${mac}`;
+    };
+    expect(verifySessionToken(sign(ACCOUNT), secret, now)).toEqual({ accountId: ACCOUNT, sessionVersion: 1 }); // 對照組：格式對就通過
+    for (const bad of [ACCOUNT.slice(1), `${ACCOUNT}0`, ACCOUNT.toUpperCase(), `g${ACCOUNT.slice(1)}`, "", "admin", "x".repeat(40)]) {
+      expect(verifySessionToken(sign(bad), secret, now), JSON.stringify(bad)).toBeNull();
+    }
+  });
+
+  it("sessionVersion 很大（十位數以上，仍是安全整數）只要簽章是對的就通過；不是安全整數就不通過", () => {
+    const sign = (version: string) => {
+      const expires = String(now + SESSION_TTL_MS);
+      const mac = createHmac("sha256", Buffer.from(secret, "hex")).update(`${expires}.${ACCOUNT}.${version}.AAAAAAAAAAAAAAAA`).digest("base64url");
+      return `${expires}.${ACCOUNT}.${version}.AAAAAAAAAAAAAAAA.${mac}`;
+    };
+    expect(verifySessionToken(sign("1234567890123"), secret, now)).toEqual({ accountId: ACCOUNT, sessionVersion: 1234567890123 });
+    expect(verifySessionToken(sign("9007199254740991"), secret, now)).toEqual({ accountId: ACCOUNT, sessionVersion: 9007199254740991 });
+    expect(verifySessionToken(sign("9007199254740993"), secret, now)).toBeNull(); // 超過安全整數
+  });
+
+  it("sessionVersion 必須 ≥ 1：即使簽章是對的，0 也不通過", () => {
+    const expires = String(now + SESSION_TTL_MS);
+    const nonce = "AAAAAAAAAAAAAAAA";
+    const mac = createHmac("sha256", Buffer.from(secret, "hex")).update(`${expires}.${ACCOUNT}.0.${nonce}`).digest("base64url");
+    expect(verifySessionToken(`${expires}.${ACCOUNT}.0.${nonce}.${mac}`, secret, now)).toBeNull();
   });
 
   it("用別人自己簽的（金鑰不同）token 無法通過：偽造的簽章不行", () => {
-    const forged = createSessionToken("00".repeat(32), now);
-    expect(verifySessionToken(forged, secret, now)).toBe(false);
+    const forged = createSessionToken("00".repeat(32), ACCOUNT, 1, now);
+    expect(verifySessionToken(forged, secret, now)).toBeNull();
+  });
+});
+
+describe("DUMMY_PASSWORD_HASH（登入時查無帳號也要跑一次 scrypt 用的假雜湊）", () => {
+  it("是形狀正確的 scrypt 雜湊（參數與正式雜湊相同），任何密碼都驗證不過，且確實會花一次 scrypt 的時間", async () => {
+    expect(DUMMY_PASSWORD_HASH).toMatch(/^scrypt\$16384\$8\$1\$[A-Za-z0-9_-]{22}\$[A-Za-z0-9_-]{43}$/);
+    const real = await hashPassword("some password 123");
+    expect(DUMMY_PASSWORD_HASH.split("$").slice(0, 4)).toEqual(real.split("$").slice(0, 4)); // N、r、p 一樣
+    const started = performance.now();
+    for (const guess of ["", "password", "admin", "test-admin-password-123", "x".repeat(200)]) {
+      expect(await verifyPassword(guess, DUMMY_PASSWORD_HASH)).toBe(false);
+    }
+    // 五次完整的 scrypt（N=16384、r=8）至少要幾十毫秒；若被當成格式錯誤而提早回 false（不跑 scrypt）會快上幾個數量級
+    expect(performance.now() - started).toBeGreaterThan(30);
   });
 });
 

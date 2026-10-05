@@ -3,8 +3,19 @@ import type { Context, Hono, Next } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 
+import { registerAdminRoutes, type AdminRouteKit } from "./admin-routes.js";
+import {
+  emailForLog,
+  newAdminId,
+  normalizeEmail,
+  parseNameAndEmail,
+  parseNewAccountInput,
+  requireActorInDraft,
+  toPublicAdmin,
+} from "./admins.js";
 import {
   createSessionToken,
+  DUMMY_PASSWORD_HASH,
   hashPassword,
   PASSWORD_MAX_LENGTH,
   SESSION_COOKIE_NAME,
@@ -16,7 +27,7 @@ import {
 } from "./auth.js";
 import { ServiceError, type FetchLike, type Logger } from "./common.js";
 import type { AppEnv } from "./env.js";
-import { isHttpsRequest, isInsecurePublicRequest, publicOrigin, readJsonObject } from "./http.js";
+import { isHttpsRequest, isInsecurePublicRequest, publicOrigin, readJsonObject, readString } from "./http.js";
 import { buildSettingsView, resolveLineConfig } from "./line-settings.js";
 import { fetchGroupName, formatTaipeiTime, GROUP_ID_RE, pushLineText } from "./line.js";
 import { ConcurrencyGate, FixedWindowLimiter, RATE_LIMIT_WINDOW_MS } from "./rate-limit.js";
@@ -26,16 +37,17 @@ import {
   renderSettingsPage,
   renderSetupPage,
   renderUnavailablePage,
+  renderUpgradePage,
 } from "./settings-page.js";
-import { DATA_DIR_UNAVAILABLE_MESSAGE, type SettingsStore } from "./settings-store.js";
+import { DATA_DIR_UNAVAILABLE_MESSAGE, type AdminAccount, type SettingsStore } from "./settings-store.js";
 
-/** POST /settings/setup（用設定碼建立管理密碼）每個 IP 每分鐘的請求上限（每次嘗試都算，不論對錯）。 */
+/** POST /settings/setup（用設定碼建立第一位管理員）每個 IP 每分鐘的請求上限（每次嘗試都算，不論對錯）。 */
 export const SETUP_RATE_LIMIT_MAX = 5;
-/** POST /settings/login 與 POST /settings/password（都要驗密碼）共用的額度：每個 IP 每分鐘。 */
+/** POST /settings/login、/settings/upgrade、/settings/password（都要驗密碼）共用的額度：每個 IP 每分鐘。 */
 export const LOGIN_RATE_LIMIT_MAX = 10;
 /** POST /api/settings/line/test（發測試訊息到 LINE 群組）每個 IP 每分鐘的上限，避免登入後被拿來洗版群組。 */
 export const TEST_PUSH_RATE_LIMIT_MAX = 6;
-/** /settings/* 與 /api/settings/* 的 JSON 內容上限（全都是很小的表單）。 */
+/** /settings/*、/api/settings/*、/api/admins* 的 JSON 內容上限（全都是很小的表單）。 */
 export const SETTINGS_BODY_MAX_BYTES = 16 * 1024;
 /** token／secret 的長度上限（LINE 的 channel access token 約 170 字元）。 */
 export const LINE_CREDENTIAL_MAX_CHARS = 1000;
@@ -124,27 +136,27 @@ function assertJsonXhr(c: Context): void {
   if (c.req.header("x-requested-with") !== "XMLHttpRequest") throw new ServiceError(403, "缺少必要的請求標頭");
 }
 
-function readString(body: Record<string, unknown>, key: string): string {
-  const value = body[key];
-  return typeof value === "string" ? value : "";
-}
-
 // ===================================================================== 路由
+
+/** 登入失敗一律回這個訊息：不透露是帳號不存在、已停用，還是密碼不對。 */
+const LOGIN_FAILED_MESSAGE = "帳號或密碼不正確";
 
 /**
  * 設定頁與設定 API：
  *
- *   GET  /settings               → 設定頁（HTML）
- *   POST /settings/setup         → 用啟動 log 裡的一次性設定碼建立管理密碼（並登入）
- *   POST /settings/login         → 密碼登入（發 sp_session cookie）
+ *   GET  /settings               → 設定頁（HTML）：資料目錄不可用／建立第一位管理員（設定碼）／升級舊版密碼／登入／設定
+ *   POST /settings/setup         → 用啟動 log 裡的一次性設定碼建立第一位管理員（姓名、Email、密碼；並登入）
+ *   POST /settings/upgrade       → 把舊版的單一管理密碼升級成第一位管理員（目前的密碼、姓名、Email；並登入）
+ *   POST /settings/login         → Email＋密碼登入（發 sp_session cookie）
  *   POST /settings/logout        → 登出（清 cookie）
- *   POST /settings/password      → 更改管理密碼（既有的登入全部失效，並重新登入目前這個瀏覽器）
- *   GET  /api/settings           → 目前設定（token／secret 只回「已設定」與尾碼）
+ *   POST /settings/password      → 更改「自己」的密碼（自己所有的登入全部失效，並重新登入目前這個瀏覽器）
+ *   GET  /api/settings           → 目前設定（token／secret 只回「已設定」與尾碼；另有 me）
  *   PUT  /api/settings/line      → 儲存 LINE 設定
  *   POST /api/settings/line/test → 推播一則測試訊息到已儲存的群組
+ *   /api/admins*                 → 管理員帳號管理（見 admin-routes.ts）
  *
  * 資料目錄不可用時，全部回 503。需要登入的 API 沒登入回 401。
- * 所有會改動狀態的端點（POST／PUT）一律用下面的 mutate() 註冊：它在處理器之前統一檢查資料目錄、
+ * 所有會改動狀態的端點（POST／PUT／PATCH／DELETE）一律用下面的 mutate() 註冊：它在處理器之前統一檢查資料目錄、
  * Content-Type 與 X-Requested-With——新增端點時照這個寫法，就不會漏掉 CSRF 防護（tests/settings-auth.test.ts
  * 會走訪 app.routes，檢查每一條非 GET 的設定路由都擋得住沒帶標頭的請求）。
  */
@@ -158,13 +170,24 @@ export function registerSettingsRoutes(app: Hono, deps: SettingsRouteDeps): void
   const requireWritable = (): void => {
     if (!settings.writable) throw new ServiceError(503, DATA_DIR_UNAVAILABLE_MESSAGE);
   };
-  const hasSession = (c: Context): boolean =>
-    verifySessionToken(getCookie(c, SESSION_COOKIE_NAME), settings.data.sessionSecret, now());
-  const requireSession = (c: Context): void => {
-    if (!hasSession(c)) throw new ServiceError(401, "請先登入");
+  /**
+   * 這個請求的登入者：cookie 簽章與到期都通過，而且帳號還在、啟用中、sessionVersion 和簽在 cookie 裡的相符。
+   * 舊格式的 cookie（升級前的三段式）、已被停用／刪除的帳號、重設過密碼的帳號的舊 cookie 都回 null。
+   */
+  const sessionAccount = (c: Context): Readonly<AdminAccount> | null => {
+    const claims = verifySessionToken(getCookie(c, SESSION_COOKIE_NAME), settings.data.sessionSecret, now());
+    if (!claims) return null;
+    const account = settings.data.admins.find((admin) => admin.id === claims.accountId);
+    if (!account || account.status !== "active" || account.sessionVersion !== claims.sessionVersion) return null;
+    return account;
   };
-  const issueSession = (c: Context): void => {
-    setCookie(c, SESSION_COOKIE_NAME, createSessionToken(settings.data.sessionSecret, now()), {
+  const requireActor = (c: Context): Readonly<AdminAccount> => {
+    const account = sessionAccount(c);
+    if (!account) throw new ServiceError(401, "請先登入");
+    return account;
+  };
+  const issueSession = (c: Context, account: Pick<AdminAccount, "id" | "sessionVersion">): void => {
+    setCookie(c, SESSION_COOKIE_NAME, createSessionToken(settings.data.sessionSecret, account.id, account.sessionVersion, now()), {
       httpOnly: true,
       sameSite: "Lax",
       path: "/",
@@ -185,12 +208,20 @@ export function registerSettingsRoutes(app: Hono, deps: SettingsRouteDeps): void
     if (!result.ok) throw new ServiceError(429, "目前驗證請求過多，請稍後再試");
     return result.value;
   };
-  /** 安全相關事件的 log（來源 IP 已經過 getClientIp 驗證，只會是合法 IP 或 "unknown"）；絕不帶密碼或設定碼。 */
-  const audit = (c: Context, message: string): void => log.warn(`[settings] ${message}（來源 ${deps.clientIp(c)}）`);
+  /**
+   * 審計 log：`[admins] <操作者 email> <動作> <對象 email>（來源 <ip>）`（登入這類沒有對象的事件就沒有對象那一段）。email 都是驗證過格式（或固定佔位字串）的，
+   * 不會把使用者填的任意字串原樣寫進 log；絕不帶密碼。失敗事件用 warn。
+   */
+  const audit = (c: Context, actorEmail: string, action: string, targetEmail: string | null, options: { detail?: string; failed?: boolean } = {}): void => {
+    const line = `[admins] ${actorEmail} ${action}${targetEmail === null ? "" : ` ${targetEmail}`}${options.detail ?? ""}（來源 ${deps.clientIp(c)}）`;
+    if (options.failed) log.warn(line);
+    else log.info(line);
+  };
 
   const tooLarge = (c: Context) => c.json({ success: false, error: "請求內容過大" }, 413);
-  app.use("/settings/*", bodyLimit({ maxSize: SETTINGS_BODY_MAX_BYTES, onError: tooLarge }));
-  app.use("/api/settings/*", bodyLimit({ maxSize: SETTINGS_BODY_MAX_BYTES, onError: tooLarge }));
+  for (const pattern of ["/settings/*", "/api/settings/*", "/api/admins", "/api/admins/*"]) {
+    app.use(pattern, bodyLimit({ maxSize: SETTINGS_BODY_MAX_BYTES, onError: tooLarge }));
+  }
 
   /** 狀態變更端點的共用檢查：資料目錄可用 → 只收 application/json → 要有 X-Requested-With。 */
   const guardMutation = async (c: Context, next: Next): Promise<void> => {
@@ -200,8 +231,15 @@ export function registerSettingsRoutes(app: Hono, deps: SettingsRouteDeps): void
     c.header("Cache-Control", "no-store");
     await next();
   };
-  const mutate = (method: "post" | "put", path: string, handler: (c: Context) => Response | Promise<Response>): void => {
+  const mutate = (method: "post" | "put" | "patch" | "delete", path: string, handler: (c: Context) => Response | Promise<Response>): void => {
     app[method](path, guardMutation, handler);
+  };
+  /** 其他方法一律 405（要放在處理器之後註冊）。methods 是 Allow 標頭的內容，例如 "GET, POST"。 */
+  const allow = (path: string, methods: string): void => {
+    app.all(path, (c) => {
+      c.header("Allow", methods);
+      return c.json({ success: false, error: `此端點只接受 ${methods}` }, 405);
+    });
   };
 
   // ---------------------------------------------------------------- 頁面
@@ -210,50 +248,131 @@ export function registerSettingsRoutes(app: Hono, deps: SettingsRouteDeps): void
     for (const [name, value] of Object.entries(pageSecurityHeaders(nonce))) c.header(name, value);
     const ctx = { nonce, origin: publicOrigin(c), insecure: isInsecurePublicRequest(c) };
     if (!settings.writable) return c.html(renderUnavailablePage(ctx), 503);
-    if (!settings.data.admin) return c.html(renderSetupPage(ctx));
-    if (!hasSession(c)) return c.html(renderLoginPage(ctx));
-    return c.html(renderSettingsPage(ctx, buildSettingsView(env, settings)));
+    const data = settings.data;
+    if (data.admins.length === 0) return c.html(data.admin ? renderUpgradePage(ctx) : renderSetupPage(ctx));
+    const me = sessionAccount(c);
+    if (!me) return c.html(renderLoginPage(ctx));
+    return c.html(renderSettingsPage(ctx, buildSettingsView(env, settings, me), data.admins.map(toPublicAdmin)));
   };
   app.get("/settings", page);
   app.get("/settings/", page);
 
-  // ---------------------------------------------------------------- 建立密碼／登入／登出／改密碼
+  // ---------------------------------------------------------------- 建立第一位管理員／升級／登入／登出／改自己的密碼
   mutate("post", "/settings/setup", async (c) => {
     const limited = hit(setupLimiter, c);
     if (limited) return limited;
-    if (settings.data.admin) throw new ServiceError(409, "已經建立過管理密碼，請直接登入");
+    if (settings.data.admins.length > 0) throw new ServiceError(409, "已經建立過管理員帳號，請直接登入");
+    if (settings.data.admin) throw new ServiceError(409, "這裡還是舊版的單一管理密碼：請改用目前的密碼升級成管理員帳號");
     const body = await readJsonObject(c);
     if (!setupGuard.verify(readString(body, "setupCode"))) {
-      audit(c, "建立密碼失敗：設定碼不正確");
+      audit(c, "（尚未有帳號）", "建立第一位管理員失敗：設定碼不正確", null, { failed: true });
       throw new ServiceError(403, "設定碼不正確");
     }
-    const password = readString(body, "password");
-    const problem = validateNewPassword(password);
-    if (problem) throw new ServiceError(400, problem);
-    const passwordHash = await gated(() => hashPassword(password));
+    const input = parseNewAccountInput(body);
+    const passwordHash = await gated(() => hashPassword(input.password));
+    const iso = new Date(now()).toISOString();
+    const account: AdminAccount = {
+      id: newAdminId(),
+      name: input.name,
+      email: input.email,
+      passwordHash,
+      status: "active",
+      sessionVersion: 1,
+      createdAt: iso,
+      updatedAt: iso,
+      lastLoginAt: iso,
+    };
     await settings.update((draft) => {
-      if (draft.admin) throw new ServiceError(409, "已經建立過管理密碼，請直接登入"); // 兩個請求同時進來時，後到的在這裡擋下
-      draft.admin = { passwordHash, updatedAt: new Date(now()).toISOString() };
+      if (draft.admins.length > 0 || draft.admin) throw new ServiceError(409, "已經建立過管理員帳號，請直接登入"); // 兩個請求同時進來時，後到的在這裡擋下
+      draft.admins.push(account);
     });
     setupGuard.consume();
-    issueSession(c);
-    log.info("[settings] 管理密碼已建立");
+    issueSession(c, account);
+    audit(c, account.email, "建立第一位管理員", account.email);
+    return c.json({ success: true });
+  });
+
+  mutate("post", "/settings/upgrade", async (c) => {
+    const limited = hit(loginLimiter, c);
+    if (limited) return limited;
+    const legacy = settings.data.admin;
+    if (!legacy || settings.data.admins.length > 0) throw new ServiceError(409, "沒有需要升級的舊版管理密碼");
+    const body = await readJsonObject(c);
+    const profile = parseNameAndEmail(body);
+    const currentPassword = readString(body, "currentPassword");
+    const passwordOk = currentPassword.length <= PASSWORD_MAX_LENGTH && (await gated(() => verifyPassword(currentPassword, legacy.passwordHash)));
+    if (!passwordOk) {
+      audit(c, profile.email, "升級管理員帳號失敗：目前的密碼不正確", profile.email, { failed: true });
+      throw new ServiceError(401, "目前的密碼不正確");
+    }
+    const iso = new Date(now()).toISOString();
+    // 沿用同一個密碼雜湊（不要求重設密碼）；sessionSecret、line、lineCaptured 與其他欄位完全不動
+    const account: AdminAccount = {
+      id: newAdminId(),
+      name: profile.name,
+      email: profile.email,
+      passwordHash: legacy.passwordHash,
+      status: "active",
+      sessionVersion: 1,
+      createdAt: iso,
+      updatedAt: iso,
+      lastLoginAt: iso,
+    };
+    await settings.update((draft) => {
+      // 鎖內重新確認：兩個升級請求同時進來、或舊密碼在驗證期間被換掉，後到的在這裡擋下
+      if (!draft.admin || draft.admins.length > 0 || draft.admin.passwordHash !== legacy.passwordHash) {
+        throw new ServiceError(409, "沒有需要升級的舊版管理密碼");
+      }
+      draft.admins.push(account);
+      draft.admin = null; // 舊的單一密碼只保留到升級完成為止
+    });
+    issueSession(c, account);
+    audit(c, account.email, "升級為管理員帳號", account.email);
     return c.json({ success: true });
   });
 
   mutate("post", "/settings/login", async (c) => {
     const limited = hit(loginLimiter, c);
     if (limited) return limited;
-    const admin = settings.data.admin;
-    if (!admin) throw new ServiceError(400, "尚未設定管理密碼，請先用設定碼建立密碼");
-    const password = readString(await readJsonObject(c), "password");
-    const ok = password.length <= PASSWORD_MAX_LENGTH && (await gated(() => verifyPassword(password, admin.passwordHash)));
-    if (!ok) {
-      audit(c, "登入失敗：密碼不正確");
-      throw new ServiceError(401, "密碼不正確");
+    const data = settings.data;
+    if (data.admins.length === 0) {
+      if (data.admin) throw new ServiceError(409, "系統已改為管理員帳號制：請先用目前的管理密碼升級成管理員帳號");
+      throw new ServiceError(400, "尚未建立管理員，請先用設定碼建立第一位管理員");
     }
-    issueSession(c);
-    log.info(`[settings] 登入成功（來源 ${deps.clientIp(c)}）`);
+    const body = await readJsonObject(c);
+    const email = normalizeEmail(body.email);
+    const password = readString(body, "password");
+    const account = email === null ? undefined : data.admins.find((admin) => admin.email === email);
+    const usable = account !== undefined && account.status === "active";
+    // 一律跑一次 scrypt：查無帳號、帳號停用、Email 格式不對都拿固定的假雜湊驗，回應時間不洩漏帳號存不存在
+    const passwordOk = await gated(() => verifyPassword(password, usable ? account.passwordHash : DUMMY_PASSWORD_HASH));
+    if (!usable || !passwordOk || password.length > PASSWORD_MAX_LENGTH) {
+      audit(c, emailForLog(body.email), "登入失敗", null, { failed: true });
+      throw new ServiceError(401, LOGIN_FAILED_MESSAGE);
+    }
+    const iso = new Date(now()).toISOString();
+    let sessionVersion = account.sessionVersion;
+    try {
+      await settings.update((draft) => {
+        // 鎖內重新確認：驗證密碼期間帳號被停用、刪除或重設密碼，這次登入就作廢
+        const live = draft.admins.find((admin) => admin.id === account.id);
+        if (!live || live.status !== "active" || live.passwordHash !== account.passwordHash) {
+          throw new ServiceError(401, LOGIN_FAILED_MESSAGE);
+        }
+        live.lastLoginAt = iso;
+        sessionVersion = live.sessionVersion;
+      });
+    } catch (error) {
+      if (!(error instanceof ServiceError) || error.status !== 500) throw error;
+      // 寫檔失敗（Volume 滿了或變成唯讀）：lastLoginAt 只是方便查看的紀錄，登入本身不該因為它失敗（舊版的登入也不寫檔）。
+      // 記一行警告，照樣讓這位管理員登入；記憶體裡的設定沒有被換掉，所以這裡再確認一次帳號此刻仍然有效。
+      const live = settings.data.admins.find((admin) => admin.id === account.id);
+      if (!live || live.status !== "active" || live.passwordHash !== account.passwordHash) throw new ServiceError(401, LOGIN_FAILED_MESSAGE);
+      sessionVersion = live.sessionVersion;
+      log.warn(`[admins] ${account.email} 登入成功，但無法更新最後登入時間：${error.message}`);
+    }
+    issueSession(c, { id: account.id, sessionVersion });
+    audit(c, account.email, "登入成功", null);
     return c.json({ success: true });
   });
 
@@ -263,44 +382,46 @@ export function registerSettingsRoutes(app: Hono, deps: SettingsRouteDeps): void
   });
 
   mutate("post", "/settings/password", async (c) => {
-    requireSession(c);
+    const actor = requireActor(c);
     const limited = hit(loginLimiter, c);
     if (limited) return limited;
-    const admin = settings.data.admin;
-    if (!admin) throw new ServiceError(400, "尚未設定管理密碼");
     const body = await readJsonObject(c);
     const currentPassword = readString(body, "currentPassword");
     const newPassword = readString(body, "newPassword");
-    const currentOk =
-      currentPassword.length <= PASSWORD_MAX_LENGTH && (await gated(() => verifyPassword(currentPassword, admin.passwordHash)));
+    const currentOk = currentPassword.length <= PASSWORD_MAX_LENGTH && (await gated(() => verifyPassword(currentPassword, actor.passwordHash)));
     if (!currentOk) {
-      audit(c, "更改密碼失敗：目前的密碼不正確");
+      audit(c, actor.email, "變更自己的密碼失敗：目前的密碼不正確", actor.email, { failed: true });
       throw new ServiceError(403, "目前的密碼不正確");
     }
     const problem = validateNewPassword(newPassword);
     if (problem) throw new ServiceError(400, problem);
     if (newPassword === currentPassword) throw new ServiceError(400, "新密碼不能和目前的密碼相同");
     const passwordHash = await gated(() => hashPassword(newPassword));
+    let sessionVersion = actor.sessionVersion;
     await settings.update((draft) => {
-      draft.admin = { passwordHash, updatedAt: new Date(now()).toISOString() };
-      draft.sessionSecret = randomBytes(32).toString("hex"); // 換掉簽章金鑰：所有已發出的登入 cookie 一起失效
+      const me = requireActorInDraft(draft, actor);
+      if (me.passwordHash !== actor.passwordHash) throw new ServiceError(409, "密碼剛剛被更改過了，請重新整理後再試");
+      me.passwordHash = passwordHash;
+      me.sessionVersion += 1; // 這個帳號所有舊的登入 cookie 一起失效（其他管理員不受影響）
+      me.updatedAt = new Date(now()).toISOString();
+      sessionVersion = me.sessionVersion;
     });
-    issueSession(c); // 用新的金鑰重新發給目前這個瀏覽器
-    log.info("[settings] 管理密碼已更新，既有的登入已全部失效");
+    issueSession(c, { id: actor.id, sessionVersion }); // 用新的 sessionVersion 重新發給目前這個瀏覽器
+    audit(c, actor.email, "變更自己的密碼", actor.email);
     return c.json({ success: true });
   });
 
   // ---------------------------------------------------------------- 設定 API
   app.get("/api/settings", (c) => {
     requireWritable();
-    requireSession(c);
+    const me = requireActor(c);
     c.header("Cache-Control", "no-store");
     c.header("X-Content-Type-Options", "nosniff");
-    return c.json({ success: true, data: buildSettingsView(env, settings) });
+    return c.json({ success: true, data: buildSettingsView(env, settings, me) });
   });
 
   mutate("put", "/api/settings/line", async (c) => {
-    requireSession(c);
+    const actor = requireActor(c);
     const patch = parseLinePatch(await readJsonObject(c));
 
     // 群組名稱：只有「群組 ID 或 token 變了」或「名稱還是空的」才向 LINE 查，不是每次存檔都查。
@@ -322,6 +443,8 @@ export function registerSettingsRoutes(app: Hono, deps: SettingsRouteDeps): void
     }
 
     await settings.update((draft) => {
+      // 讀請求內容與向 LINE 查群組名稱都要時間：這段期間操作者可能已被停用、刪除或重設密碼——和其他改動狀態的端點一樣，在鎖內重新確認
+      requireActorInDraft(draft, actor);
       const line = draft.line;
       if (patch.enabled !== undefined) line.enabled = patch.enabled;
       if (patch.clearToken) line.channelAccessToken = "";
@@ -341,12 +464,12 @@ export function registerSettingsRoutes(app: Hono, deps: SettingsRouteDeps): void
       ((patch.secret !== undefined && patch.secret !== before.channelSecret) || (patch.clearSecret && before.channelSecret !== "")) && "secret",
       patch.groupId !== undefined && patch.groupId !== before.groupId && "群組 ID",
     ].filter((item): item is string => typeof item === "string");
-    log.info(`[settings] LINE 設定已更新（${changed.length > 0 ? changed.join("、") : "沒有欄位變更"}）`);
-    return c.json({ success: true, data: buildSettingsView(env, settings) });
+    log.info(`[settings] ${actor.email} 更新了 LINE 設定（${changed.length > 0 ? changed.join("、") : "沒有欄位變更"}）`);
+    return c.json({ success: true, data: buildSettingsView(env, settings, actor) });
   });
 
   mutate("post", "/api/settings/line/test", async (c) => {
-    requireSession(c);
+    requireActor(c);
     const limited = hit(testPushLimiter, c);
     if (limited) return limited;
     const line = resolveLineConfig(env, settings.data);
@@ -357,15 +480,13 @@ export function registerSettingsRoutes(app: Hono, deps: SettingsRouteDeps): void
     return c.json({ success: true, notified: true });
   });
 
+  // ---------------------------------------------------------------- 管理員帳號管理（/api/admins*）
+  const kit: AdminRouteKit = { settings, now, requireWritable, requireActor, gated, audit, mutate, allow };
+  registerAdminRoutes(app, kit);
+
   // 其他方法一律 405（要放在上面的處理器之後）。
-  const allow = (path: string, method: string): void => {
-    app.all(path, (c) => {
-      c.header("Allow", method);
-      return c.json({ success: false, error: `此端點只接受 ${method}` }, 405);
-    });
-  };
   allow("/settings", "GET");
-  for (const path of ["/settings/setup", "/settings/login", "/settings/logout", "/settings/password", "/api/settings/line/test"]) {
+  for (const path of ["/settings/setup", "/settings/upgrade", "/settings/login", "/settings/logout", "/settings/password", "/api/settings/line/test"]) {
     allow(path, "POST");
   }
   allow("/api/settings", "GET");

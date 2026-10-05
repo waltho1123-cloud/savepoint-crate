@@ -10,8 +10,10 @@ import {
   findMountPoint,
   newSettingsData,
   parseSettingsText,
+  serializeSettings,
   SETTINGS_FILE_NAME,
   SettingsStore,
+  type AdminAccount,
 } from "../src/settings-store.js";
 import { createCapturingLogger } from "./helpers.js";
 import { cleanupTempDirs, makeTempDir } from "./settings-helpers.js";
@@ -34,8 +36,8 @@ describe("SettingsStore.open：第一次啟動", () => {
     expect(await modeOf(file)).toBe(0o600);
     const saved = await readSettings(dir);
     expect(saved).toEqual({
-      version: 1,
-      admin: null,
+      version: 2,
+      admins: [], // 新檔沒有舊版的單一密碼，所以不會寫出 admin 欄位
       sessionSecret: expect.stringMatching(/^[0-9a-f]{64}$/),
       line: { enabled: true, channelAccessToken: "", channelSecret: "", groupId: "", groupName: "", updatedAt: "" },
       lineCaptured: [],
@@ -208,6 +210,21 @@ describe("SettingsStore.update", () => {
   });
 });
 
+/** 一筆合法的管理員資料（測試損毀案例時拿來改壞其中一個欄位）。 */
+function validAdmin(): Record<string, unknown> {
+  return {
+    id: "a".repeat(32),
+    name: "管理員",
+    email: "admin@example.test",
+    passwordHash: "scrypt$16384$8$1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA",
+    status: "active",
+    sessionVersion: 1,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+    lastLoginAt: null,
+  };
+}
+
 describe("SettingsStore.open：損毀的設定檔", () => {
   const FIXED_NOW = Date.parse("2026-10-05T10:45:30.123Z");
 
@@ -224,7 +241,7 @@ describe("SettingsStore.open：損毀的設定檔", () => {
     const backup = `${file}.corrupt-20261005T104530Z`;
     expect(await readFile(backup, "utf8")).toBe('{"version":1, "admin": {broken');
     expect(await modeOf(backup)).toBe(0o600);
-    expect((await readSettings(dir)).version).toBe(1); // 新檔
+    expect((await readSettings(dir)).version).toBe(2); // 新檔
     expect(log.lines.join("\n")).toContain("內容損毀");
     expect(log.lines.join("\n")).toContain("settings.json.corrupt-20261005T104530Z");
     expect((await readdir(dir)).sort()).toEqual([SETTINGS_FILE_NAME, "settings.json.corrupt-20261005T104530Z"]);
@@ -251,7 +268,9 @@ describe("SettingsStore.open：損毀的設定檔", () => {
 
   const baseSecret = "a".repeat(64);
   it.each([
-    ["版本不符（未來的版本）", { version: 2, sessionSecret: baseSecret }],
+    ["版本不認得（未來的版本）", { version: 3, sessionSecret: baseSecret }],
+    ["版本不認得（0）", { version: 0, sessionSecret: baseSecret }],
+    ["版本是字串", { version: "2", sessionSecret: baseSecret }],
     ["沒有 version", { sessionSecret: baseSecret }],
     ["根不是物件（陣列）", []],
     ["根是字串", "settings"],
@@ -264,6 +283,18 @@ describe("SettingsStore.open：損毀的設定檔", () => {
     ["line.channelAccessToken 型別錯誤", { version: 1, sessionSecret: baseSecret, line: { channelAccessToken: 123 } }],
     ["line.enabled 不是布林", { version: 1, sessionSecret: baseSecret, line: { enabled: "yes" } }],
     ["lineCaptured 不是陣列", { version: 1, sessionSecret: baseSecret, lineCaptured: {} }],
+    ["admins 不是陣列", { version: 2, sessionSecret: baseSecret, admins: {} }],
+    ["admins 裡有不是物件的項目", { version: 2, sessionSecret: baseSecret, admins: ["x"] }],
+    ["管理員的 id 格式不對", { version: 2, sessionSecret: baseSecret, admins: [{ ...validAdmin(), id: "short" }] }],
+    ["管理員缺少姓名", { version: 2, sessionSecret: baseSecret, admins: [{ ...validAdmin(), name: undefined }] }],
+    ["管理員的 Email 是空的", { version: 2, sessionSecret: baseSecret, admins: [{ ...validAdmin(), email: "  " }] }],
+    ["管理員的密碼雜湊不是 scrypt 格式", { version: 2, sessionSecret: baseSecret, admins: [{ ...validAdmin(), passwordHash: "plain" }] }],
+    ["管理員的狀態不是 active／disabled", { version: 2, sessionSecret: baseSecret, admins: [{ ...validAdmin(), status: "banned" }] }],
+    ["管理員的 sessionVersion 不是正整數", { version: 2, sessionSecret: baseSecret, admins: [{ ...validAdmin(), sessionVersion: 0 }] }],
+    ["管理員的 sessionVersion 是小數", { version: 2, sessionSecret: baseSecret, admins: [{ ...validAdmin(), sessionVersion: 1.5 }] }],
+    ["管理員的 sessionVersion 是字串", { version: 2, sessionSecret: baseSecret, admins: [{ ...validAdmin(), sessionVersion: "1" }] }],
+    ["兩位管理員的 id 重複", { version: 2, sessionSecret: baseSecret, admins: [validAdmin(), { ...validAdmin(), email: "other@example.test" }] }],
+    ["兩位管理員的 Email 重複（不分大小寫）", { version: 2, sessionSecret: baseSecret, admins: [validAdmin(), { ...validAdmin(), id: "f".repeat(32), email: "ADMIN@Example.test" }] }],
   ])("結構性問題（%s）視為損毀", async (_name, content) => {
     const dir = await makeTempDir();
     await writeFile(join(dir, SETTINGS_FILE_NAME), JSON.stringify(content));
@@ -277,15 +308,23 @@ describe("SettingsStore.open：損毀的設定檔", () => {
 describe("parseSettingsText", () => {
   const secret = "b".repeat(64);
 
-  it("缺少的選填欄位補預設值", () => {
+  it("缺少的選填欄位補預設值（版本 1 沒有 admins：視為空陣列，版本維持 1）", () => {
     const parsed = parseSettingsText(JSON.stringify({ version: 1, sessionSecret: secret }));
     expect(parsed).toEqual({
       version: 1,
       admin: null,
+      admins: [],
       sessionSecret: secret,
       line: { enabled: true, channelAccessToken: "", channelSecret: "", groupId: "", groupName: "", updatedAt: "" },
       lineCaptured: [],
     });
+  });
+
+  it("版本 2 缺少 admins（忘記密碼時手動刪掉）或 admins 是空陣列：都視為沒有管理員，版本維持 2，其他欄位原樣", () => {
+    for (const admins of [undefined, []]) {
+      const parsed = parseSettingsText(JSON.stringify({ version: 2, sessionSecret: secret, ...(admins === undefined ? {} : { admins }), line: { enabled: false, groupId: "C1" } }));
+      expect(parsed).toMatchObject({ version: 2, admin: null, admins: [], sessionSecret: secret, line: { enabled: false, groupId: "C1" } });
+    }
   });
 
   it("lineCaptured：格式不對的項目略過、最多留 10 筆、缺的欄位補空字串", () => {
@@ -306,10 +345,167 @@ describe("parseSettingsText", () => {
     expect(parseSettingsText("not json")).toBeNull();
   });
 
-  it("多出來的未知欄位被忽略（不會帶進記憶體）", () => {
-    const parsed = parseSettingsText(JSON.stringify({ version: 1, sessionSecret: secret, extra: 1, line: { evil: "x" } }));
-    expect(parsed).not.toHaveProperty("extra");
-    expect(parsed?.line).not.toHaveProperty("evil");
+  it("版本 2：admins 載入時 Email 正規化（trim＋小寫）、lastLoginAt 缺少或不是字串就是 null、createdAt／updatedAt 缺少補空字串", () => {
+    const parsed = parseSettingsText(
+      JSON.stringify({
+        version: 2,
+        sessionSecret: secret,
+        admins: [{ ...validAdmin(), email: "  Admin@EXAMPLE.test ", lastLoginAt: 123, createdAt: undefined, updatedAt: undefined }, { ...validAdmin(), id: "b".repeat(32), email: "b@example.test", status: "disabled", sessionVersion: 7, lastLoginAt: "2026-10-04T00:00:00.000Z" }],
+      }),
+    );
+    expect(parsed?.version).toBe(2);
+    expect(parsed?.admin).toBeNull();
+    expect(parsed?.admins).toEqual([
+      { ...validAdmin(), email: "admin@example.test", lastLoginAt: null, createdAt: "", updatedAt: "" },
+      { ...validAdmin(), id: "b".repeat(32), email: "b@example.test", status: "disabled", sessionVersion: 7, lastLoginAt: "2026-10-04T00:00:00.000Z" },
+    ]);
+  });
+
+  it("版本 1 的舊檔：admin（舊的單一密碼）原樣讀進來、admins 是空陣列", () => {
+    const hash = "scrypt$16384$8$1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA";
+    const parsed = parseSettingsText(JSON.stringify({ version: 1, sessionSecret: secret, admin: { passwordHash: hash, updatedAt: "2026-10-01T00:00:00.000Z" } }));
+    expect(parsed).toMatchObject({ version: 1, admin: { passwordHash: hash, updatedAt: "2026-10-01T00:00:00.000Z" }, admins: [] });
+  });
+
+  describe("不認識的欄位原樣保留（載入、修改、寫回去都不會掉）", () => {
+    const rich = (): Record<string, unknown> => ({
+      version: 2,
+      sessionSecret: secret,
+      futureTopLevel: { nested: [1, 2, { deep: true }] },
+      admins: [{ ...validAdmin(), futureAdminField: "keep-me", avatar: { url: "x" } }],
+      line: { enabled: true, channelAccessToken: "t", futureLineField: 42 },
+      lineCaptured: [{ groupId: "C1", groupName: "甲", eventType: "join", lastSeenAt: "x", futureCapturedField: "keep" }],
+    });
+
+    it("parseSettingsText：頂層、各管理員帳號、line、lineCaptured 的每一筆都保留", () => {
+      const parsed = parseSettingsText(JSON.stringify(rich()))!;
+      expect((parsed as unknown as Record<string, unknown>).futureTopLevel).toEqual({ nested: [1, 2, { deep: true }] });
+      expect((parsed.admins[0] as unknown as Record<string, unknown>).futureAdminField).toBe("keep-me");
+      expect((parsed.admins[0] as unknown as Record<string, unknown>).avatar).toEqual({ url: "x" });
+      expect((parsed.line as unknown as Record<string, unknown>).futureLineField).toBe(42);
+      expect((parsed.lineCaptured[0] as unknown as Record<string, unknown>).futureCapturedField).toBe("keep");
+    });
+
+    it("舊的單一密碼（admin）裡不認識的欄位也保留（直到升級把它刪掉）", () => {
+      const parsed = parseSettingsText(JSON.stringify({ version: 1, sessionSecret: secret, admin: { passwordHash: "scrypt$x", updatedAt: "u", note: "legacy-extra" } }))!;
+      expect((parsed.admin as unknown as Record<string, unknown>).note).toBe("legacy-extra");
+    });
+
+    it("`__proto__` 之類危險的鍵不會被帶進去（也不會污染原型）", () => {
+      const parsed = parseSettingsText(`{"version":2,"sessionSecret":"${secret}","__proto__":{"polluted":true},"line":{"__proto__":{"polluted":true}}}`)!;
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+      expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+      expect((parsed as unknown as Record<string, unknown>).polluted).toBeUndefined();
+      expect((parsed.line as unknown as Record<string, unknown>).polluted).toBeUndefined();
+    });
+
+    it("真的檔案：open → update（改別的欄位）→ 檔案裡所有不認識的欄位都還在", async () => {
+      const dir = await makeTempDir();
+      await writeFile(join(dir, SETTINGS_FILE_NAME), `${JSON.stringify(rich(), null, 2)}\n`);
+      const store = await SettingsStore.open(dir, { log: createCapturingLogger() });
+      await store.update((draft) => {
+        draft.line.groupId = "C9";
+        draft.admins[0]!.lastLoginAt = "2026-10-05T00:00:00.000Z";
+      });
+      const saved = await readSettings(dir);
+      expect(saved.futureTopLevel).toEqual({ nested: [1, 2, { deep: true }] });
+      expect(saved.admins[0].futureAdminField).toBe("keep-me");
+      expect(saved.admins[0].avatar).toEqual({ url: "x" });
+      expect(saved.admins[0].lastLoginAt).toBe("2026-10-05T00:00:00.000Z");
+      expect(saved.line.futureLineField).toBe(42);
+      expect(saved.line.groupId).toBe("C9");
+      expect(saved.lineCaptured[0].futureCapturedField).toBe("keep");
+    });
+  });
+});
+
+describe("檔案格式版本：1（舊的單一密碼）→ 2（管理員帳號）", () => {
+  const LEGACY_HASH = "scrypt$16384$8$1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA";
+  const legacyFile = (extra: Record<string, unknown> = {}) => ({
+    version: 1,
+    admin: { passwordHash: LEGACY_HASH, updatedAt: "2026-10-01T00:00:00.000Z" },
+    sessionSecret: "c".repeat(64),
+    line: { enabled: true, channelAccessToken: "line-token-xyz", channelSecret: "line-secret-xyz", groupId: "C0123456789abcdef0123456789abcdef", groupName: "倉庫", updatedAt: "2026-10-02T00:00:00.000Z" },
+    lineCaptured: [{ groupId: "C0123456789abcdef0123456789abcdef", groupName: "倉庫", eventType: "join", lastSeenAt: "2026-10-03T00:00:00.000Z" }],
+    ...extra,
+  });
+
+  it("版本 1 的檔案開啟時完全不動（內容與修改時間都不變）", async () => {
+    const dir = await makeTempDir();
+    const file = join(dir, SETTINGS_FILE_NAME);
+    const text = `${JSON.stringify(legacyFile(), null, 2)}\n`;
+    await writeFile(file, text, { mode: 0o600 });
+    const before = (await stat(file)).mtimeMs;
+    const store = await SettingsStore.open(dir, { log: createCapturingLogger() });
+    expect(store.data.version).toBe(1);
+    expect(store.data.admin?.passwordHash).toBe(LEGACY_HASH);
+    expect(store.data.admins).toEqual([]);
+    expect(await readFile(file, "utf8")).toBe(text);
+    expect((await stat(file)).mtimeMs).toBe(before);
+  });
+
+  it("還沒有管理員帳號時，其他變更（LINE 設定、webhook 記錄群組）不會改版本：維持版本 1、保留舊的 admin（升級前回滾到舊版程式仍讀得懂）", async () => {
+    const dir = await makeTempDir();
+    await writeFile(join(dir, SETTINGS_FILE_NAME), JSON.stringify(legacyFile()));
+    const store = await SettingsStore.open(dir, { log: createCapturingLogger() });
+    await store.update((draft) => {
+      draft.lineCaptured.unshift({ groupId: "C2", groupName: "乙", eventType: "message", lastSeenAt: "2026-10-05T00:00:00.000Z" });
+    });
+    const saved = await readSettings(dir);
+    expect(saved.version).toBe(1);
+    expect(saved.admin).toEqual({ passwordHash: LEGACY_HASH, updatedAt: "2026-10-01T00:00:00.000Z" });
+    expect(saved.sessionSecret).toBe("c".repeat(64));
+    expect(saved.line.channelAccessToken).toBe("line-token-xyz");
+  });
+
+  it("加進第一位管理員的那一次寫入：版本變 2、舊的 admin 同時消失；line、lineCaptured、sessionSecret 與不認識的欄位原封不動", async () => {
+    const dir = await makeTempDir();
+    const original = legacyFile({ futureField: { keep: "me" } });
+    await writeFile(join(dir, SETTINGS_FILE_NAME), JSON.stringify(original));
+    const store = await SettingsStore.open(dir, { log: createCapturingLogger() });
+    await store.update((draft) => {
+      draft.admins.push({ ...(validAdmin() as unknown as AdminAccount), passwordHash: LEGACY_HASH });
+    });
+    const saved = await readSettings(dir);
+    expect(saved.version).toBe(2);
+    expect("admin" in saved).toBe(false); // 舊的單一密碼整個欄位都不寫了
+    expect(saved.admins).toHaveLength(1);
+    expect(saved.admins[0].passwordHash).toBe(LEGACY_HASH); // 沿用同一個雜湊
+    expect(saved.sessionSecret).toBe(original.sessionSecret);
+    expect(saved.line).toEqual(original.line);
+    expect(saved.lineCaptured).toEqual(original.lineCaptured);
+    expect(saved.futureField).toEqual({ keep: "me" });
+    expect(store.data.version).toBe(2);
+    expect(store.data.admin).toBeNull();
+  });
+
+  it("版本 2 的檔案裡殘留舊的 admin（手動編輯出來的怪狀態）：下一次寫入時丟掉它", async () => {
+    const dir = await makeTempDir();
+    await writeFile(join(dir, SETTINGS_FILE_NAME), JSON.stringify({ version: 2, sessionSecret: "d".repeat(64), admin: { passwordHash: LEGACY_HASH, updatedAt: "" }, admins: [validAdmin()] }));
+    const store = await SettingsStore.open(dir, { log: createCapturingLogger() });
+    await store.update((draft) => {
+      draft.line.groupId = "C1";
+    });
+    expect("admin" in (await readSettings(dir))).toBe(false);
+  });
+
+  it("全新安裝的檔案是版本 2、沒有 admin 欄位；之後新增管理員仍是版本 2", async () => {
+    const dir = await makeTempDir();
+    const store = await SettingsStore.open(dir, { log: createCapturingLogger() });
+    expect(store.data.version).toBe(2);
+    expect("admin" in (await readSettings(dir))).toBe(false);
+    await store.update((draft) => {
+      draft.admins.push(validAdmin() as unknown as AdminAccount);
+    });
+    expect((await readSettings(dir)).version).toBe(2);
+  });
+
+  it("serializeSettings：admin 是 null 就不寫出該欄位；有值就寫", () => {
+    const base = newSettingsData();
+    expect("admin" in JSON.parse(serializeSettings(base))).toBe(false);
+    const legacy = { ...base, version: 1 as const, admin: { passwordHash: LEGACY_HASH, updatedAt: "u" } };
+    expect(JSON.parse(serializeSettings(legacy)).admin).toEqual({ passwordHash: LEGACY_HASH, updatedAt: "u" });
+    expect(serializeSettings(base).endsWith("}\n")).toBe(true);
   });
 });
 

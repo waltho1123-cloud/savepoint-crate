@@ -36,6 +36,8 @@ describe("src/server.ts（實際啟動行程）", () => {
         requestIsHttps: false,
         dataDirWritable: true,
         adminConfigured: false,
+        adminCount: 0,
+        legacyAdminPending: false,
         lineConfigured: false,
         lineWebhookConfigured: false,
         lineSource: null,

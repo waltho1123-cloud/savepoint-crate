@@ -11,7 +11,7 @@ import {
 } from "../src/line-settings.js";
 import { newSettingsData, SettingsStore, type SettingsData } from "../src/settings-store.js";
 import { createCapturingLogger, createFetchMock, TEST_GROUP_ID, TEST_LINE_SECRET, TEST_LINE_TOKEN } from "./helpers.js";
-import { cleanupTempDirs, lineHandler, makeTempDir, NOW_MS } from "./settings-helpers.js";
+import { adminId, cleanupTempDirs, lineHandler, makeAccount, makeTempDir, NOW_MS } from "./settings-helpers.js";
 
 afterEach(cleanupTempDirs);
 
@@ -100,15 +100,39 @@ describe("maskCredential", () => {
 });
 
 describe("buildSettingsView", () => {
-  it("不可用的 store：dataDirWritable false、其他都是空的", () => {
-    const view = buildSettingsView(loadEnv({}), SettingsStore.unavailable());
+  const ME = { id: "0123456789abcdef0123456789abcdef", name: "測試管理員", email: "admin@example.test" };
+
+  it("不可用的 store：dataDirWritable false、沒有管理員、其他都是空的", () => {
+    const view = buildSettingsView(loadEnv({}), SettingsStore.unavailable(), ME);
     expect(view).toMatchObject({
       dataDirWritable: false,
       dataDirMounted: null,
       adminConfigured: false,
+      adminCount: 0,
+      legacyAdminPending: false,
       captured: [],
       effective: { source: null, lineConfigured: false, lineWebhookConfigured: false },
     });
+  });
+
+  it("me 只有 id、姓名、Email（不含密碼雜湊等其他欄位，即使傳進來的物件帶著它們）", () => {
+    const account = { ...ME, passwordHash: "scrypt$16384$8$1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA", sessionVersion: 9 };
+    const view = buildSettingsView(loadEnv({}), SettingsStore.unavailable(), account);
+    expect(view.me).toEqual(ME);
+    expect(JSON.stringify(view)).not.toContain("scrypt$");
+  });
+
+  it("管理員統計：啟用中的人數、總數、待升級的舊版密碼", async () => {
+    const store = await SettingsStore.open(await makeTempDir(), { log: createCapturingLogger() });
+    expect(buildSettingsView(loadEnv({}), store, ME)).toMatchObject({ adminConfigured: false, adminCount: 0, legacyAdminPending: false });
+    await store.update((draft) => {
+      draft.admin = { passwordHash: "scrypt$16384$8$1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA", updatedAt: "" };
+    });
+    expect(buildSettingsView(loadEnv({}), store, ME)).toMatchObject({ adminConfigured: true, adminCount: 0, legacyAdminPending: true });
+    await store.update((draft) => {
+      draft.admins.push(makeAccount(), makeAccount({ id: adminId(2), email: "b@example.test", status: "disabled" }));
+    });
+    expect(buildSettingsView(loadEnv({}), store, ME)).toMatchObject({ adminConfigured: true, adminCount: 2, legacyAdminPending: false });
   });
 
   it("captured 是複本：改它不會動到 store 裡凍結的資料", async () => {
@@ -116,7 +140,7 @@ describe("buildSettingsView", () => {
     await store.update((draft) => {
       draft.lineCaptured = [{ groupId: "C1", groupName: "甲", eventType: "join", lastSeenAt: "2026-10-05T00:00:00.000Z" }];
     });
-    const view = buildSettingsView(loadEnv({}), store);
+    const view = buildSettingsView(loadEnv({}), store, ME);
     view.captured[0]!.groupName = "被改了";
     view.captured.push({ groupId: "C2", groupName: "", eventType: "", lastSeenAt: "" });
     expect(store.data.lineCaptured).toHaveLength(1);
@@ -126,14 +150,24 @@ describe("buildSettingsView", () => {
   it("整份檢視序列化後不含 token／secret／環境變數的值／密碼雜湊／sessionSecret", async () => {
     const store = await SettingsStore.open(await makeTempDir(), { log: createCapturingLogger() });
     await store.update((draft) => {
-      draft.admin = { passwordHash: "scrypt$16384$8$1$c2FsdHNhbHQ$aGFzaGhhc2hoYXNoaGFzaA", updatedAt: "" };
+      draft.admins.push(makeAccount());
       draft.line.channelAccessToken = TEST_LINE_TOKEN;
       draft.line.channelSecret = TEST_LINE_SECRET;
     });
-    const text = JSON.stringify(buildSettingsView(loadEnv(ENV_ALL), store));
+    const text = JSON.stringify(buildSettingsView(loadEnv(ENV_ALL), store, store.data.admins[0]!));
     for (const secret of [TEST_LINE_TOKEN, TEST_LINE_SECRET, ...Object.values(ENV_ALL), "scrypt$", store.data.sessionSecret]) {
       expect(text).not.toContain(secret);
     }
+  });
+
+  it("captured 的每一筆只有四個欄位（即使檔案裡的那一筆帶著不認識的欄位也不會外洩到 API）", async () => {
+    const store = await SettingsStore.open(await makeTempDir(), { log: createCapturingLogger() });
+    await store.update((draft) => {
+      draft.lineCaptured = [{ groupId: "C1", groupName: "甲", eventType: "join", lastSeenAt: "t", secretNote: "do-not-leak" } as never];
+    });
+    const view = buildSettingsView(loadEnv({}), store, ME);
+    expect(Object.keys(view.captured[0]!).sort()).toEqual(["eventType", "groupId", "groupName", "lastSeenAt"]);
+    expect(JSON.stringify(view)).not.toContain("do-not-leak");
   });
 });
 
@@ -148,6 +182,28 @@ describe("captureLineGroup（邊界）", () => {
       captureLineGroup({ store, fetchImpl: mock, log, token, now: () => clock.now, lastHandled }, event);
     return { store, calls, clock, capture, log, lastHandled };
   }
+
+  it("同一個群組重新記錄時，這一筆原有的、不認識的欄位原樣保留；其他群組的紀錄（含不認識的欄位）不受影響", async () => {
+    const { store, clock, capture } = await setup();
+    const OTHER = "Cother00000000000000000000000000";
+    await store.update((draft) => {
+      draft.lineCaptured = [
+        { groupId: TEST_GROUP_ID, groupName: "舊名", eventType: "message", lastSeenAt: "2026-10-01T00:00:00.000Z", futureNote: { keep: true } } as never,
+        { groupId: OTHER, groupName: "別群", eventType: "message", lastSeenAt: "2026-10-01T00:00:00.000Z", extra: 1 } as never,
+      ];
+    });
+    clock.now = NOW_MS;
+    await capture({ groupId: TEST_GROUP_ID, eventType: "join" });
+    expect(store.data.lineCaptured).toHaveLength(2);
+    expect(store.data.lineCaptured[0]).toEqual({
+      groupId: TEST_GROUP_ID,
+      groupName: "出貨群", // join 事件重新查到的名稱
+      eventType: "join",
+      lastSeenAt: new Date(NOW_MS).toISOString(),
+      futureNote: { keep: true },
+    });
+    expect(store.data.lineCaptured[1]).toEqual({ groupId: OTHER, groupName: "別群", eventType: "message", lastSeenAt: "2026-10-01T00:00:00.000Z", extra: 1 });
+  });
 
   it("剛好差 10 分鐘就更新、差 10 分鐘少 1 毫秒就略過", async () => {
     const { store, clock, capture } = await setup();

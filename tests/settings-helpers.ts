@@ -6,16 +6,20 @@ import { vi } from "vitest";
 import { createApp } from "../src/app.js";
 import { createSessionToken, hashPassword, SESSION_COOKIE_NAME, SetupCodeGuard } from "../src/auth.js";
 import { loadEnv } from "../src/env.js";
-import { SettingsStore } from "../src/settings-store.js";
+import { SettingsStore, type AdminAccount } from "../src/settings-store.js";
 import { createCapturingLogger, createFetchMock, jsonResponse, makeCredentials, type MockHandler, type RecordedCall } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // 設定頁相關測試共用的東西：暫存資料目錄、注入假時鐘與假 fetch 的 app、登入用的 cookie。
 // ---------------------------------------------------------------------------
 
-/** 測試用管理密碼（假的）。雜湊每個測試檔只算一次（scrypt 約 50～100 ms）。 */
+/** 測試用管理員（假的）。雜湊每個測試檔只算一次（scrypt 約 50～100 ms），所有預先建立的測試帳號共用它（密碼都是 TEST_ADMIN_PASSWORD）。 */
 export const TEST_ADMIN_PASSWORD = "test-admin-password-123";
 export const TEST_ADMIN_HASH = await hashPassword(TEST_ADMIN_PASSWORD);
+export const TEST_ADMIN_NAME = "測試管理員";
+export const TEST_ADMIN_EMAIL = "admin@example.test";
+/** 第一位測試管理員的 id（32 位十六進位）。 */
+export const TEST_ADMIN_ID = "0123456789abcdef0123456789abcdef";
 /** 測試用的首次設定碼（假的）。 */
 export const TEST_SETUP_CODE = "ABCD-EFGH";
 /** 注入的「現在」：2026-10-05 15:20（台北）。 */
@@ -39,6 +43,27 @@ export async function cleanupTempDirs(): Promise<void> {
   }
 }
 
+/** 建立一個測試用的管理員帳號物件（預設：啟用、sessionVersion 1、密碼是 TEST_ADMIN_PASSWORD）。 */
+export function makeAccount(overrides: Partial<AdminAccount> = {}): AdminAccount {
+  return {
+    id: TEST_ADMIN_ID,
+    name: TEST_ADMIN_NAME,
+    email: TEST_ADMIN_EMAIL,
+    passwordHash: TEST_ADMIN_HASH,
+    status: "active",
+    sessionVersion: 1,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+    lastLoginAt: null,
+    ...overrides,
+  };
+}
+
+/** 依序產生的測試帳號 id（32 位十六進位）。 */
+export function adminId(n: number): string {
+  return String(n).padStart(32, "0");
+}
+
 /** 以 JSON＋XHR 標頭送請求（狀態變更端點要求的格式）。 */
 export const XHR_HEADERS = { "content-type": "application/json", "x-requested-with": "XMLHttpRequest" };
 
@@ -56,8 +81,12 @@ export interface SettingsAppOptions {
   env?: Record<string, string>;
   /** "unavailable"＝沒有資料目錄；不給就開一個新的暫存目錄。 */
   store?: SettingsStore | "unavailable";
-  /** 預設 true：先寫入管理密碼雜湊（密碼是 TEST_ADMIN_PASSWORD）。 */
+  /** 預設 true：先寫入第一位管理員（TEST_ADMIN_EMAIL，密碼是 TEST_ADMIN_PASSWORD）。false＝全新安裝（沒有任何管理員）。 */
   withAdmin?: boolean;
+  /** true＝改成「舊版單一管理密碼」的狀態（只有舊的 admin 欄位、沒有管理員帳號），用來測升級流程。優先於 withAdmin。 */
+  legacyAdmin?: boolean;
+  /** 另外預先建立的管理員（接在第一位後面）。 */
+  extraAdmins?: AdminAccount[];
   /** 打到 fetch（LINE）的請求怎麼回應；預設回 {}。 */
   handler?: MockHandler;
   startTime?: number;
@@ -73,10 +102,16 @@ export async function makeSettingsApp(options: SettingsAppOptions = {}) {
   const dir = await makeTempDir();
   const store =
     options.store === "unavailable" ? SettingsStore.unavailable() : (options.store ?? (await SettingsStore.open(dir, { log })));
-  if (options.withAdmin !== false && store.writable && store.data.admin === null) {
-    await store.update((draft) => {
-      draft.admin = { passwordHash: TEST_ADMIN_HASH, updatedAt: "2026-10-01T00:00:00.000Z" };
-    });
+  if (store.writable && store.data.admins.length === 0 && store.data.admin === null) {
+    if (options.legacyAdmin) {
+      await store.update((draft) => {
+        draft.admin = { passwordHash: TEST_ADMIN_HASH, updatedAt: "2026-10-01T00:00:00.000Z" };
+      });
+    } else if (options.withAdmin !== false) {
+      await store.update((draft) => {
+        draft.admins.push(makeAccount(), ...(options.extraAdmins ?? []));
+      });
+    }
   }
   const clock = { now: options.startTime ?? NOW_MS };
   const { mock, calls } = createFetchMock(options.handler ?? (() => jsonResponse({})));
@@ -92,20 +127,30 @@ export async function makeSettingsApp(options: SettingsAppOptions = {}) {
     settings: store,
     ...(options.defaultSetupCode ? {} : { setupCode }),
   });
-  /** 目前的 session cookie（`sp_session=…`），用現在的簽章金鑰與假時鐘產生。 */
-  const sessionCookie = (): string => `${SESSION_COOKIE_NAME}=${createSessionToken(store.data.sessionSecret, clock.now)}`;
+  /**
+   * 某個帳號（預設是第一位測試管理員）目前的 session cookie（`sp_session=…`）：用現在的簽章金鑰、假時鐘，
+   * 以及該帳號「現在」的 sessionVersion 產生（帳號不存在就用 1，方便測「帳號被刪除後 cookie 失效」）。
+   */
+  const sessionCookie = (accountId: string = TEST_ADMIN_ID): string => {
+    const account = store.data.admins.find((a) => a.id === accountId);
+    return `${SESSION_COOKIE_NAME}=${createSessionToken(store.data.sessionSecret, accountId, account?.sessionVersion ?? 1, clock.now)}`;
+  };
   return {
     app,
     store,
-    dir,
+    /** 設定檔所在的資料目錄（傳進來的 store 就是它自己的目錄）。 */
+    dir: store.writable ? store.dir : dir,
     log,
     calls,
     clock,
     setupCode,
     sessionCookie,
-    /** 帶著登入 cookie 的請求。 */
+    /** 帶著登入 cookie（第一位測試管理員）的請求。 */
     authed: (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) =>
       call(app, method, path, body, { cookie: sessionCookie(), ...headers }),
+    /** 帶著指定帳號的登入 cookie 的請求。 */
+    authedAs: (accountId: string, method: string, path: string, body?: unknown, headers: Record<string, string> = {}) =>
+      call(app, method, path, body, { cookie: sessionCookie(accountId), ...headers }),
   };
 }
 

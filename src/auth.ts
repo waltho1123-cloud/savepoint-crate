@@ -1,8 +1,8 @@
 import { createHmac, randomBytes, randomInt, scrypt, timingSafeEqual, type ScryptOptions } from "node:crypto";
 
 /**
- * 設定頁的驗證：管理密碼（scrypt 雜湊）、登入 session（HMAC 簽章的 cookie 值）、首次設定碼。
- * 全部只用 node:crypto，不加任何依賴。比對一律用 timingSafeEqual。
+ * 設定頁的驗證：管理員密碼（scrypt 雜湊）、登入 session（HMAC 簽章的 cookie 值，綁定帳號與帳號的 sessionVersion）、
+ * 首次設定碼。全部只用 node:crypto，不加任何依賴。比對一律用 timingSafeEqual。
  */
 
 // ===================================================================== 密碼雜湊（scrypt）
@@ -70,6 +70,14 @@ export async function verifyPassword(password: string, stored: string): Promise<
   }
 }
 
+/**
+ * 固定的假雜湊（參數與正式雜湊相同：scrypt N=16384、r=8、p=1）：登入時查無帳號、或帳號已停用，也用它跑一次 verifyPassword，
+ * 讓「帳號存在與否／有沒有被停用」不會從回應時間洩漏。對應的密碼是產生時隨機丟掉的 32 位元組，沒有任何人知道，
+ * 所以對它的驗證永遠是 false。這個值不是祕密（只是個形狀正確的雜湊），可以放在原始碼裡。
+ */
+export const DUMMY_PASSWORD_HASH =
+  "scrypt$16384$8$1$igxZU7LeML7BpuqmXa1ffQ$XDKBGZkx7N1yX3-7E36f4-yK4xaKXNCid0HVPepGeco";
+
 /** 新密碼的規則：10～200 字元。回傳錯誤訊息；合格回 null。 */
 export function validateNewPassword(password: string): string | null {
   if (password.length < PASSWORD_MIN_LENGTH) return `密碼至少要 ${PASSWORD_MIN_LENGTH} 個字元`;
@@ -87,27 +95,48 @@ function signSession(secretHex: string, payload: string): string {
   return createHmac("sha256", Buffer.from(secretHex, "hex")).update(payload).digest("base64url");
 }
 
+/** cookie 裡簽進去的內容：這個 session 屬於哪個帳號、當時帳號的 sessionVersion。 */
+export interface SessionClaims {
+  accountId: string;
+  sessionVersion: number;
+}
+
 /**
- * 產生 cookie 值 `<到期時間(ms)>.<亂數>.<HMAC>`。HMAC 以 sessionSecret 為金鑰、對前兩段簽章（SHA-256，base64url）。
- * 改密碼時會換掉 sessionSecret，所有已發出的 cookie 就一起失效。
+ * 產生 cookie 值 `<到期時間(ms)>.<帳號 id>.<sessionVersion>.<亂數>.<HMAC>`。HMAC 以 sessionSecret 為金鑰、對前四段簽章
+ * （SHA-256，base64url）。簽章只證明「這個 cookie 是我們發的、沒被改過、還沒到期」；帳號是否仍存在、是否啟用、
+ * sessionVersion 是否還是當時那個，要由呼叫端再對照目前的帳號資料（重設密碼、停用帳號都會把帳號的 sessionVersion 加一，
+ * 該帳號所有已發出的 cookie 就一起失效，不影響其他帳號）。
  */
-export function createSessionToken(secretHex: string, nowMs: number, ttlMs: number = SESSION_TTL_MS): string {
-  const payload = `${nowMs + ttlMs}.${randomBytes(12).toString("base64url")}`;
+export function createSessionToken(
+  secretHex: string,
+  accountId: string,
+  sessionVersion: number,
+  nowMs: number,
+  ttlMs: number = SESSION_TTL_MS,
+): string {
+  const payload = `${nowMs + ttlMs}.${accountId}.${sessionVersion}.${randomBytes(12).toString("base64url")}`;
   return `${payload}.${signSession(secretHex, payload)}`;
 }
 
-const SESSION_TOKEN_RE = /^(\d{1,16})\.([A-Za-z0-9_-]{8,64})\.([A-Za-z0-9_-]{43})$/;
+const SESSION_TOKEN_RE = /^(\d{1,16})\.([0-9a-f]{32})\.(\d{1,16})\.([A-Za-z0-9_-]{8,64})\.([A-Za-z0-9_-]{43})$/;
 
-/** 驗證 cookie 值：格式正確、簽章吻合（常數時間比對）、尚未到期。其餘一律 false。 */
-export function verifySessionToken(token: string | undefined, secretHex: string, nowMs: number): boolean {
-  if (!token) return false;
+/**
+ * 驗證 cookie 值：格式正確、簽章吻合（常數時間比對）、尚未到期，通過就回傳簽在裡面的帳號 id 與 sessionVersion；
+ * 其餘一律回 null。舊格式的 cookie（升級成管理員帳號之前的 `<到期>.<亂數>.<簽章>` 三段式）格式不符，一律視為未登入。
+ */
+export function verifySessionToken(token: string | undefined, secretHex: string, nowMs: number): SessionClaims | null {
+  if (!token) return null;
   const match = SESSION_TOKEN_RE.exec(token);
-  if (!match) return false;
-  const expiresAt = Number(match[1]);
-  const expected = Buffer.from(signSession(secretHex, `${match[1]}.${match[2]}`));
-  const actual = Buffer.from(match[3] ?? "");
-  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return false;
-  return Number.isSafeInteger(expiresAt) && expiresAt > nowMs;
+  if (!match) return null;
+  const [, expires = "", accountId = "", version = "", nonce = "", mac = ""] = match;
+  const expected = Buffer.from(signSession(secretHex, `${expires}.${accountId}.${version}.${nonce}`));
+  const actual = Buffer.from(mac);
+  if (expected.length !== actual.length || !timingSafeEqual(expected, actual)) return null;
+  const expiresAt = Number(expires);
+  const sessionVersion = Number(version);
+  if (!Number.isSafeInteger(expiresAt) || expiresAt <= nowMs) return null;
+  if (!Number.isSafeInteger(sessionVersion) || sessionVersion < 1) return null;
+  return { accountId, sessionVersion };
 }
 
 // ===================================================================== 首次設定碼

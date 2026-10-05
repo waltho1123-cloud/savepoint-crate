@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { AdminPublic } from "../src/admins.js";
 import type { SettingsView } from "../src/line-settings.js";
 import {
   escapeHtml,
@@ -8,6 +9,7 @@ import {
   renderSettingsPage,
   renderSetupPage,
   renderUnavailablePage,
+  renderUpgradePage,
   WEBHOOK_PATH,
 } from "../src/settings-page.js";
 
@@ -16,11 +18,26 @@ import {
 
 const SCRIPT_RE = /<script nonce="([^"]*)">([\s\S]*?)<\/script>/;
 
+const ME_ID = "0123456789abcdef0123456789abcdef";
+const OTHER_ID = "fedcba9876543210fedcba9876543210";
+
+function admin(overrides: Partial<AdminPublic> = {}): AdminPublic {
+  return { id: ME_ID, name: "測試管理員", email: "admin@example.test", status: "active", createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z", lastLoginAt: null, ...overrides };
+}
+
+/** 預設的管理員清單：自己（ME_ID）＋另一位。 */
+function admins(): AdminPublic[] {
+  return [admin(), admin({ id: OTHER_ID, name: "第二位", email: "second@example.test", lastLoginAt: "2026-10-05T07:20:00.000Z" })];
+}
+
 function view(overrides: Partial<SettingsView> = {}): SettingsView {
   return {
     dataDirWritable: true,
     dataDirMounted: true,
     adminConfigured: true,
+    adminCount: 2,
+    legacyAdminPending: false,
+    me: { id: ME_ID, name: "測試管理員", email: "admin@example.test" },
     line: {
       enabled: true,
       channelAccessToken: { configured: true, last4: "wxyz" },
@@ -72,14 +89,20 @@ describe("頁面內的 script 是固定字串：不含任何伺服器端插入�
       captured: [{ groupId: `${tag}-cid`, groupName: `${tag}-cname`, eventType: `${tag}-event`, lastSeenAt: tag }],
     });
 
+  const evilAdmins = (tag: string): AdminPublic[] => [
+    admin({ id: ME_ID, name: `${tag}-me-name`, email: `${tag}-me-email` }),
+    admin({ id: OTHER_ID, name: `${tag}-other-name`, email: `${tag}-other-email`, lastLoginAt: tag }),
+  ];
+
   const renders = (tag: string) => [
     renderUnavailablePage(ctxOf({ origin: tag, nonce: "n1" })),
     renderSetupPage(ctxOf({ origin: tag, nonce: "n1" })),
+    renderUpgradePage(ctxOf({ origin: tag, nonce: "n1" })),
     renderLoginPage(ctxOf({ origin: tag, nonce: "n1" })),
-    renderSettingsPage(ctxOf({ origin: tag, nonce: "n1" }), evilView(tag)),
+    renderSettingsPage(ctxOf({ origin: tag, nonce: "n1" }), { ...evilView(tag), me: { id: ME_ID, name: `${tag}-me-name`, email: `${tag}-me-email` } }, evilAdmins(tag)),
   ];
 
-  it("四種頁面：換掉所有動態值（網址、群組名稱、ID、尾碼…）之後，script 本文逐字相同，而且不含那些值", () => {
+  it("五種頁面：換掉所有動態值（網址、姓名、Email、群組名稱、ID、尾碼…）之後，script 本文逐字相同，而且不含那些值", () => {
     const a = renders(SENTINEL_A);
     const b = renders(SENTINEL_B);
     for (let i = 0; i < a.length; i++) {
@@ -107,6 +130,7 @@ describe("設定頁的動態值都有跳脫（刻意用不合法的資料直接�
       view({
         captured: [{ groupId: 'C"><img src=x onerror=alert(1)>', groupName: `<script>alert(2)</script>"'`, eventType: "<b>join</b>", lastSeenAt: "<i>now</i>" }],
       }),
+      admins(),
     );
     expect(html).not.toContain("<img src=x");
     expect(html).not.toContain("<script>alert");
@@ -121,6 +145,7 @@ describe("設定頁的動態值都有跳脫（刻意用不合法的資料直接�
     const html = renderSettingsPage(
       ctxOf(),
       view({ line: { ...view().line, channelAccessToken: { configured: true, last4: '"><x' }, channelSecret: { configured: true, last4: "&'<>" } } }),
+      admins(),
     );
     expect(html).toContain('placeholder="已設定（尾碼 …&quot;&gt;&lt;x）；留空表示不變"');
     expect(html).toContain('placeholder="已設定（尾碼 …&amp;&#39;&lt;&gt;）；留空表示不變"');
@@ -131,6 +156,7 @@ describe("設定頁的動態值都有跳脫（刻意用不合法的資料直接�
     const html = renderSettingsPage(
       ctxOf({ origin: 'https://evil"><svg onload=1>' }),
       view({ line: { ...view().line, groupId: 'C" autofocus onfocus="alert(1)', groupName: "<u>名稱</u>" } }),
+      admins(),
     );
     expect(html).toContain('value="C&quot; autofocus onfocus=&quot;alert(1)"');
     expect(html).toContain("&lt;u&gt;名稱&lt;/u&gt;");
@@ -140,27 +166,28 @@ describe("設定頁的動態值都有跳脫（刻意用不合法的資料直接�
   });
 
   it("沒有 token／secret 時 placeholder 是空的；有但沒有尾碼（太短）時只說「已設定」", () => {
-    const none = renderSettingsPage(ctxOf(), view({ line: { ...view().line, channelAccessToken: { configured: false, last4: null }, channelSecret: { configured: false, last4: null } } }));
+    const none = renderSettingsPage(ctxOf(), view({ line: { ...view().line, channelAccessToken: { configured: false, last4: null }, channelSecret: { configured: false, last4: null } } }), admins());
     expect(none).toContain('placeholder=""');
     expect(none).not.toContain('placeholder="已設定');
-    const short = renderSettingsPage(ctxOf(), view({ line: { ...view().line, channelAccessToken: { configured: true, last4: null } } }));
+    const short = renderSettingsPage(ctxOf(), view({ line: { ...view().line, channelAccessToken: { configured: true, last4: null } } }), admins());
     expect(short).toContain('placeholder="已設定；留空表示不變"');
   });
 
   it("頁面絕不含 token／secret 的完整內容這種東西（view 裡本來就沒有，這裡確認輸出的結構只有「已設定」文字）", () => {
-    const html = renderSettingsPage(ctxOf(), view());
+    const html = renderSettingsPage(ctxOf(), view(), admins());
     expect(html).toContain("已設定（尾碼 …wxyz）");
     expect(html).toContain("已設定（尾碼 …abcd）");
   });
 });
 
 describe("頁面共通", () => {
-  it("明文 http 的警告只在 insecure 為 true 時出現（四種頁面都是）", () => {
+  it("明文 http 的警告只在 insecure 為 true 時出現（五種頁面都是）", () => {
     for (const render of [
       (insecure: boolean) => renderUnavailablePage(ctxOf({ insecure })),
       (insecure: boolean) => renderSetupPage(ctxOf({ insecure })),
+      (insecure: boolean) => renderUpgradePage(ctxOf({ insecure })),
       (insecure: boolean) => renderLoginPage(ctxOf({ insecure })),
-      (insecure: boolean) => renderSettingsPage(ctxOf({ insecure }), view()),
+      (insecure: boolean) => renderSettingsPage(ctxOf({ insecure }), view(), admins()),
     ]) {
       expect(render(true)).toContain('id="insecure-notice"');
       expect(render(false)).not.toContain('id="insecure-notice"');
@@ -169,11 +196,11 @@ describe("頁面共通", () => {
   });
 
   it("資料目錄不是掛載的 Volume：狀態列顯示警告與說明；是或判斷不出來則沒有", () => {
-    const warn = renderSettingsPage(ctxOf(), view({ dataDirMounted: false }));
+    const warn = renderSettingsPage(ctxOf(), view({ dataDirMounted: false }), admins());
     expect(warn).toContain("資料目錄：不是掛載的 Volume");
     expect(warn).toContain("重新部署後設定會消失");
-    expect(renderSettingsPage(ctxOf(), view({ dataDirMounted: true }))).not.toContain("不是掛載的 Volume");
-    expect(renderSettingsPage(ctxOf(), view({ dataDirMounted: null }))).not.toContain("不是掛載的 Volume");
+    expect(renderSettingsPage(ctxOf(), view({ dataDirMounted: true }), admins())).not.toContain("不是掛載的 Volume");
+    expect(renderSettingsPage(ctxOf(), view({ dataDirMounted: null }), admins())).not.toContain("不是掛載的 Volume");
   });
 
   it("安全標頭：CSP 的 script-src 只有這次的 nonce，沒有 unsafe-inline／unsafe-eval，並禁止嵌入與表單送出", () => {
@@ -189,5 +216,118 @@ describe("頁面共通", () => {
     expect(headers["X-Content-Type-Options"]).toBe("nosniff");
     expect(headers["Referrer-Policy"]).toBe("no-referrer");
     expect(headers["X-Robots-Tag"]).toContain("noindex");
+  });
+});
+
+describe("各頁面的表單欄位", () => {
+  it("建立第一位管理員（全新安裝）：設定碼、姓名、Email、密碼、確認密碼", () => {
+    const html = renderSetupPage(ctxOf());
+    for (const id of ["setup-form", "setup-code", "setup-name", "setup-email", "setup-password", "setup-password2", "setup-msg"]) expect(html).toContain(`id="${id}"`);
+    expect(html).toContain('type="email" id="setup-email"');
+    expect(html).toContain("找「[settings] 尚未設定管理密碼」那一行"); // 和啟動 log 的那一行一致
+  });
+
+  it("升級舊版密碼：目前的密碼、姓名、Email，並說明密碼沿用、不需要重設", () => {
+    const html = renderUpgradePage(ctxOf());
+    for (const id of ["upgrade-form", "upgrade-password", "upgrade-name", "upgrade-email", "upgrade-msg"]) expect(html).toContain(`id="${id}"`);
+    expect(html).toContain('type="email" id="upgrade-email"');
+    expect(html).toContain("密碼沿用目前這個，不需要重設");
+    expect(html).not.toContain('id="login-form"');
+    expect(html).not.toContain('id="setup-form"');
+  });
+
+  it("登入頁：Email＋密碼（不再是只有密碼）", () => {
+    const html = renderLoginPage(ctxOf());
+    for (const id of ["login-form", "login-email", "login-password", "login-msg"]) expect(html).toContain(`id="${id}"`);
+    expect(html).toContain('type="email" id="login-email"');
+    expect(html).toContain('autocomplete="username"');
+    expect(html).toContain("README 的「忘記所有密碼時的復原方式」");
+  });
+});
+
+describe("設定頁的「管理員」與「我的帳號」區塊", () => {
+  const rowFor = (html: string, email: string) => {
+    const rows = html.split("<tr>").slice(1);
+    const row = rows.find((r) => r.includes(`data-email="${email}"`));
+    if (!row) throw new Error(`找不到 ${email} 那一列`);
+    return row.split("</tr>")[0]!; // 只留這一列（不要把後面的頁面內容算進來）
+  };
+
+  it("表格欄位：姓名、Email、狀態、最後登入、操作；有「新增管理員」按鈕與預設隱藏的編輯面板", () => {
+    const html = renderSettingsPage(ctxOf(), view(), admins());
+    expect(html).toContain("<th>姓名</th><th>Email</th><th>狀態</th><th>最後登入</th><th>操作</th>");
+    expect(html).toContain('id="admin-add"');
+    expect(html).toContain('id="admin-editor" hidden');
+    for (const id of ["ae-name", "ae-email", "ae-password", "ae-password2", "ae-submit", "ae-cancel", "admin-form"]) expect(html).toContain(`id="${id}"`);
+  });
+
+  it("每位管理員一列：姓名、Email、狀態（啟用／停用）、最後登入（台北時間，沒登入過是 —）", () => {
+    const html = renderSettingsPage(ctxOf(), view(), [admin(), admin({ id: OTHER_ID, name: "第二位", email: "second@example.test", status: "disabled", lastLoginAt: "2026-10-05T07:20:00.000Z" })]);
+    const me = rowFor(html, "admin@example.test");
+    expect(me).toContain("測試管理員");
+    expect(me).toContain('<span class="chip ok">啟用</span>');
+    expect(me).toContain("<td>—</td>");
+    const other = rowFor(html, "second@example.test");
+    expect(other).toContain("第二位");
+    expect(other).toContain('<span class="chip bad">停用</span>');
+    expect(other).toContain("2026-10-05 15:20");
+    expect(other).toContain('data-admin-action="toggle" data-status="disabled"');
+    expect(other).toContain(">啟用</button>"); // 停用中的帳號，按鈕是「啟用」
+  });
+
+  it("自己那一列標示「（你）」；重設密碼、停用、刪除三個按鈕是停用的（只能編輯）；別人的列四個按鈕都能按", () => {
+    const html = renderSettingsPage(ctxOf(), view(), admins());
+    const me = rowFor(html, "admin@example.test");
+    expect(me).toContain("（你）");
+    for (const action of ["reset", "toggle", "delete"]) expect(me).toMatch(new RegExp(`data-admin-action="${action}"[^>]*disabled`));
+    expect(me).not.toMatch(/data-admin-action="edit"[^>]*disabled/);
+    const other = rowFor(html, "second@example.test");
+    expect(other).not.toContain("（你）");
+    expect(other).not.toContain("disabled");
+    for (const action of ["edit", "reset", "toggle", "delete"]) expect(other).toContain(`data-admin-action="${action}"`);
+  });
+
+  it("按鈕帶的是帳號 id、姓名、Email 的 data 屬性（供 script 取用；伺服器端的規則才是真正的防線）", () => {
+    const html = renderSettingsPage(ctxOf(), view(), admins());
+    const other = rowFor(html, "second@example.test");
+    expect(other).toContain(`data-id="${OTHER_ID}"`);
+    expect(other).toContain('data-name="第二位"');
+  });
+
+  it("沒有任何地方輸出密碼雜湊（AdminPublic 本來就沒有，這裡確認頁面也沒有）", () => {
+    const html = renderSettingsPage(ctxOf(), view(), admins());
+    expect(html).not.toContain("scrypt$");
+    expect(html).not.toContain("passwordHash");
+    expect(html).not.toContain("sessionVersion");
+  });
+
+  it("姓名與 Email 都跳脫（惡意姓名不會變成標籤或截斷屬性）", () => {
+    const evil = admin({ id: OTHER_ID, name: '<img src=x onerror=alert(1)>"\'', email: 'a"><svg onload=1>@example.test' });
+    const html = renderSettingsPage(ctxOf(), view(), [admin(), evil]);
+    expect(html).not.toContain("<img src=x");
+    expect(html).not.toContain("<svg");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;&quot;&#39;");
+    expect(html).toContain('data-name="&lt;img src=x onerror=alert(1)&gt;&quot;&#39;"');
+    expect(html).toContain('data-email="a&quot;&gt;&lt;svg onload=1&gt;@example.test"');
+    expect((html.match(/<script/g) ?? []).length).toBe(1);
+  });
+
+  it("「我的帳號」：顯示登入者的姓名與 Email、變更密碼表單、登出", () => {
+    const html = renderSettingsPage(ctxOf(), view({ me: { id: ME_ID, name: "我自己<b>", email: "me@example.test" } }), admins());
+    expect(html).toContain('<strong id="me-name">我自己&lt;b&gt;</strong>');
+    expect(html).toContain('<strong id="me-email" class="mono">me@example.test</strong>');
+    for (const id of ["password-form", "current-password", "new-password", "new-password2", "logout"]) expect(html).toContain(`id="${id}"`);
+    expect(html).toContain("變更我的密碼");
+  });
+
+  it("狀態列顯示管理員數", () => {
+    expect(renderSettingsPage(ctxOf(), view({ adminCount: 3 }), admins())).toContain("管理員：3 位");
+  });
+
+  it("頁面的 script 有刪除與停用的二次確認（confirm），啟用不用確認", () => {
+    const script = SCRIPT_RE.exec(renderSettingsPage(ctxOf(), view(), admins()))![2]!;
+    expect(script).toContain("window.confirm('確定要停用 '");
+    expect(script).toContain("window.confirm('確定要刪除 '");
+    expect(script).toContain("next === 'disabled' &&"); // 只有停用才確認
   });
 });

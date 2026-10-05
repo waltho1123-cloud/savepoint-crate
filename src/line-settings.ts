@@ -1,7 +1,14 @@
+import { summarizeAdmins } from "./admins.js";
 import type { FetchLike, Logger } from "./common.js";
 import type { AppEnv } from "./env.js";
 import { fetchGroupName, type LineGroupEvent } from "./line.js";
-import { CAPTURED_GROUPS_MAX, type CapturedGroup, type ReadonlySettings, type SettingsStore } from "./settings-store.js";
+import {
+  CAPTURED_GROUPS_MAX,
+  type AdminAccount,
+  type CapturedGroup,
+  type ReadonlySettings,
+  type SettingsStore,
+} from "./settings-store.js";
 
 /**
  * 「實際生效的 LINE 設定」與設定頁用的檢視：設定頁存的設定檔優先，沒有的話退回環境變數。
@@ -71,7 +78,13 @@ export interface SettingsView {
   dataDirWritable: boolean;
   /** 資料目錄是否在獨立掛載的 Volume 上；null＝判斷不出來。 */
   dataDirMounted: boolean | null;
+  /** 有啟用中的管理員，或仍有待升級的舊版單一密碼（和 /healthz 同一個判斷）。 */
   adminConfigured: boolean;
+  /** 管理員帳號總數（含停用的）。 */
+  adminCount: number;
+  legacyAdminPending: boolean;
+  /** 目前登入的管理員。 */
+  me: { id: string; name: string; email: string };
   line: {
     enabled: boolean;
     channelAccessToken: MaskedCredential;
@@ -90,13 +103,14 @@ export interface SettingsView {
   captured: CapturedGroup[];
 }
 
-export function buildSettingsView(env: AppEnv, store: SettingsStore): SettingsView {
+export function buildSettingsView(env: AppEnv, store: SettingsStore, me: Pick<AdminAccount, "id" | "name" | "email">): SettingsView {
   const data = store.data;
   const effective = resolveLineConfig(env, data);
   return {
     dataDirWritable: store.writable,
     dataDirMounted: store.mounted,
-    adminConfigured: data.admin !== null,
+    ...summarizeAdmins(data),
+    me: { id: me.id, name: me.name, email: me.email },
     line: {
       enabled: data.line.enabled,
       channelAccessToken: maskCredential(data.line.channelAccessToken),
@@ -115,7 +129,12 @@ export function buildSettingsView(env: AppEnv, store: SettingsStore): SettingsVi
       groupIdConfigured: env.LINE_GROUP_ID !== "",
       secretConfigured: env.LINE_CHANNEL_SECRET !== "",
     },
-    captured: data.lineCaptured.map((group) => ({ ...group })),
+    captured: data.lineCaptured.map((group) => ({
+      groupId: group.groupId,
+      groupName: group.groupName,
+      eventType: group.eventType,
+      lastSeenAt: group.lastSeenAt,
+    })),
   };
 }
 
@@ -171,6 +190,7 @@ export async function captureLineGroup(ctx: CaptureContext, event: LineGroupEven
     if (fetched !== "") groupName = fetched;
   }
   const entry: CapturedGroup = {
+    ...existing, // 同一個群組重新記錄時，保留這一筆原有的（包含不認識的）欄位
     groupId: event.groupId,
     groupName,
     eventType: event.eventType,

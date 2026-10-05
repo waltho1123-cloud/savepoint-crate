@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 
+import { summarizeAdmins } from "./admins.js";
 import { SetupCodeGuard } from "./auth.js";
 import { consoleLogger, describeError, ServiceError, sleep, type FetchLike, type Logger } from "./common.js";
 import type { AppEnv } from "./env.js";
@@ -29,7 +30,7 @@ export const SAVE_RATE_LIMIT_MAX = 600;
 export const BOX_CLOSED_RATE_LIMIT_MAX = 60;
 /** POST /api/line/webhook（LINE 平台打來的 webhook）每個 IP 每分鐘的請求上限；有自己的額度。 */
 export const LINE_WEBHOOK_RATE_LIMIT_MAX = 120;
-/** /api/settings*（設定頁的 API）每個 IP 每分鐘的請求上限；有自己的額度。另有各自更嚴的限制，見 settings-routes.ts。 */
+/** /api/settings*、/api/admins*（設定頁與管理員帳號管理的 API）每個 IP 每分鐘的請求上限；有自己的額度。另有各自更嚴的限制，見 settings-routes.ts。 */
 export const SETTINGS_API_RATE_LIMIT_MAX = 60;
 
 export interface AppDeps {
@@ -61,7 +62,7 @@ export interface AppDeps {
  *   POST /api/save       → 取代 n8n webhook ipas-save-product
  *   POST /api/box-closed → 關箱後推播到 LINE 群組（LINE 沒設定時靜默略過）
  *   POST /api/line/webhook → LINE webhook：在群組裡回覆該群組的 ID、記錄最近收到的群組（需要 channel secret）
- *   GET  /settings、/api/settings*、POST /settings/*  → 設定頁與設定 API（見 settings-routes.ts，需要資料目錄／Volume）
+ *   GET  /settings、/api/settings*、/api/admins*、POST /settings/*  → 設定頁、設定 API 與管理員帳號管理（見 settings-routes.ts、admin-routes.ts，需要資料目錄／Volume）
  *
  * LINE 的 token、群組 ID、secret 先看設定頁存的設定檔（settings），沒有才退回環境變數（見 line-settings.ts）。
  */
@@ -78,7 +79,8 @@ export function createApp(deps: AppDeps): Hono {
   const announceSetupCode = (code: string): void =>
     log.info(`[settings] 尚未設定管理密碼：請開啟 /settings，用設定碼 ${code} 建立密碼`);
   const setupGuard = deps.setupCode ?? new SetupCodeGuard({ onRegenerate: announceSetupCode });
-  if (settings.writable && settings.data.admin === null && setupGuard.currentCode !== null) {
+  // 全新安裝（沒有管理員帳號，也沒有舊版的單一密碼等著升級）才需要設定碼
+  if (settings.writable && settings.data.admins.length === 0 && settings.data.admin === null && setupGuard.currentCode !== null) {
     announceSetupCode(setupGuard.currentCode);
   }
 
@@ -106,6 +108,7 @@ export function createApp(deps: AppDeps): Hono {
     if (path === "/api/box-closed") return boxClosedLimiter;
     if (path === "/api/line/webhook") return lineWebhookLimiter;
     if (path === "/api/settings" || path.startsWith("/api/settings/")) return settingsApiLimiter;
+    if (path === "/api/admins" || path.startsWith("/api/admins/")) return settingsApiLimiter;
     return ocrLimiter; // /api/ocr 與其他（含不存在的）路徑
   };
 
@@ -124,7 +127,9 @@ export function createApp(deps: AppDeps): Hono {
   // requestIsHttps：這個請求被判斷為 HTTPS（看 X-Forwarded-Proto；Zeabur 的反向代理要有送，登入 cookie 才會加 Secure），
   // 和 clientIp 一樣是部署後 curl 一次就能確認代理行為的診斷欄位。
   // dataDirWritable：資料目錄（Volume）可寫入，設定頁才能用；dataDirMounted：它是不是獨立掛載的磁碟（null＝判斷不出來；
-  // false＝只是容器內的暫存目錄，重新部署後設定會消失）；adminConfigured：已建立管理密碼。
+  // false＝只是容器內的暫存目錄，重新部署後設定會消失）。
+  // adminConfigured：有至少一位啟用中的管理員，或仍有待升級的舊版單一密碼；adminCount：管理員帳號總數（含停用的）；
+  // legacyAdminPending：還有舊版的單一管理密碼沒升級成管理員帳號。
   // lineConfigured：關箱通知會推播（生效的設定裡有 token、群組 ID，且開關開著）；lineWebhookConfigured：有 channel secret
   // （webhook 啟用）；lineSource：生效的 LINE 設定來自設定頁（settings）還是環境變數（env），都沒設定是 null。
   // 回應物件是逐欄位明確組出來的，不會帶出憑證的其他欄位（尤其是 private_key），也不含任何 LINE 設定的值。
@@ -140,7 +145,7 @@ export function createApp(deps: AppDeps): Hono {
       requestIsHttps: isHttpsRequest(c),
       dataDirWritable: settings.writable,
       dataDirMounted: settings.mounted,
-      adminConfigured: settings.data.admin !== null,
+      ...summarizeAdmins(settings.data),
       lineConfigured: line.notifyReady,
       lineWebhookConfigured: line.webhookReady,
       lineSource: line.source,

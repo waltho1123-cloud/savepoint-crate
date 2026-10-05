@@ -1,14 +1,17 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { OCR_RATE_LIMIT_MAX, SETTINGS_API_RATE_LIMIT_MAX } from "../src/app.js";
 import { TEST_PUSH_RATE_LIMIT_MAX } from "../src/settings-routes.js";
 import { SETTINGS_FILE_NAME } from "../src/settings-store.js";
 import { TEST_GROUP_ID, TEST_LINE_SECRET, TEST_LINE_TOKEN } from "./helpers.js";
-import { call, cleanupTempDirs, lineHandler, makeSettingsApp, NOW_MS, type SettingsApp } from "./settings-helpers.js";
+import { adminId, call, cleanupTempDirs, lineHandler, makeAccount, makeSettingsApp, NOW_MS, type SettingsApp } from "./settings-helpers.js";
 
-afterEach(cleanupTempDirs);
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await cleanupTempDirs();
+});
 
 const OTHER_GROUP_ID = "Cfedcba9876543210fedcba9876543210";
 const SUMMARY_URL = (id: string) => `https://api.line.me/v2/bot/group/${id}/summary`;
@@ -40,7 +43,7 @@ describe("GET /api/settings", () => {
     expect(ctx.calls).toHaveLength(0);
   });
 
-  it("全新狀態：資料目錄可寫、已設定管理密碼、LINE 全空、來源是 null", async () => {
+  it("全新狀態：資料目錄可寫、已有管理員、LINE 全空、來源是 null；多了 me（登入者）", async () => {
     const ctx = await makeSettingsApp();
     const res = await ctx.authed("GET", "/api/settings");
     expect(res.status).toBe(200);
@@ -49,6 +52,9 @@ describe("GET /api/settings", () => {
     expect(data).toMatchObject({
       dataDirWritable: true,
       adminConfigured: true,
+      adminCount: 1,
+      legacyAdminPending: false,
+      me: { id: "0123456789abcdef0123456789abcdef", name: "測試管理員", email: "admin@example.test" },
       line: {
         enabled: true,
         channelAccessToken: { configured: false, last4: null },
@@ -108,6 +114,23 @@ describe("GET /api/settings", () => {
 });
 
 describe("PUT /api/settings/line", () => {
+  it("處理期間操作者被停用 → 401，LINE 設定不變、沒有「更新了 LINE 設定」的 log（鎖內重新確認操作者）", async () => {
+    const SECOND = adminId(2);
+    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: SECOND, name: "第二位", email: "second@example.test" })] });
+    await seedLine(ctx);
+    const realUpdate = ctx.store.update.bind(ctx.store);
+    vi.spyOn(ctx.store, "update").mockImplementationOnce(async (mutator) => {
+      await realUpdate((draft) => {
+        draft.admins[1]!.status = "disabled"; // 操作者在讀完請求內容之後、寫檔之前被停用
+      });
+      return realUpdate(mutator);
+    });
+    const res = await ctx.authedAs(SECOND, "PUT", "/api/settings/line", { enabled: false, groupId: OTHER_GROUP_ID });
+    expect(res.status).toBe(401);
+    expect(ctx.store.data.line).toMatchObject({ enabled: true, groupId: TEST_GROUP_ID, channelAccessToken: TEST_LINE_TOKEN });
+    expect(ctx.log.lines.some((line) => line.includes("更新了 LINE 設定"))).toBe(false);
+  });
+
   it("沒登入 → 401，設定不變，不呼叫 LINE", async () => {
     const ctx = await makeSettingsApp({ handler: lineHandler() });
     const res = await call(ctx.app, "PUT", "/api/settings/line", { channelAccessToken: TEST_LINE_TOKEN, groupId: TEST_GROUP_ID });
@@ -157,7 +180,7 @@ describe("PUT /api/settings/line", () => {
     expect(ctx.log.lines.join("\n")).not.toContain(TEST_LINE_TOKEN);
     expect(ctx.log.lines.join("\n")).not.toContain(TEST_LINE_SECRET);
     // 開關原本就是開的（預設值），這次也送 true＝沒有變更，所以不列「開關」
-    expect(ctx.log.lines).toContain("[settings] LINE 設定已更新（token、secret、群組 ID）");
+    expect(ctx.log.lines).toContain("[settings] admin@example.test 更新了 LINE 設定（token、secret、群組 ID）");
   });
 
   it("沒有 token 時不查群組名稱（不呼叫 LINE），名稱留空", async () => {
@@ -208,7 +231,7 @@ describe("PUT /api/settings/line", () => {
     expect(ctx.store.data.line.groupId).toBe(TEST_GROUP_ID); // 群組 ID 沒動
     const { data } = (await res.json()) as { data: any };
     expect(data.effective.source).toBe("env");
-    expect(ctx.log.lines).toContain("[settings] LINE 設定已更新（token、secret）");
+    expect(ctx.log.lines).toContain("[settings] admin@example.test 更新了 LINE 設定（token、secret）");
   });
 
   it("同時填新值又要求清除 → 400，設定不變", async () => {
@@ -230,7 +253,7 @@ describe("PUT /api/settings/line", () => {
     expect(ctx.store.data.line).toMatchObject({ enabled: false, channelAccessToken: TEST_LINE_TOKEN });
     const { data } = (await res.json()) as { data: any };
     expect(data.effective).toMatchObject({ source: "settings", lineConfigured: false, lineWebhookConfigured: true });
-    expect(ctx.log.lines).toContain("[settings] LINE 設定已更新（開關）");
+    expect(ctx.log.lines).toContain("[settings] admin@example.test 更新了 LINE 設定（開關）");
   });
 
   it("群組 ID 留空字串＝清除（連群組名稱一起清掉）；換群組會重新查名稱", async () => {
@@ -423,23 +446,26 @@ describe("PUT /api/settings/line", () => {
       const ctx = await makeSettingsApp();
       const res = await ctx.authed("PUT", "/api/settings/line", {});
       expect(res.status).toBe(200);
-      expect(ctx.log.lines).toContain("[settings] LINE 設定已更新（沒有欄位變更）");
+      expect(ctx.log.lines).toContain("[settings] admin@example.test 更新了 LINE 設定（沒有欄位變更）");
     });
   });
 
-  it("未知的欄位被忽略（不能偷偷改 groupName、admin、sessionSecret）", async () => {
+  it("未知的欄位被忽略（不能偷偷改 groupName、管理員帳號、sessionSecret）", async () => {
     const ctx = await makeSettingsApp({ handler: lineHandler() });
     const secretBefore = ctx.store.data.sessionSecret;
+    const adminsBefore = JSON.stringify(ctx.store.data.admins);
     const res = await ctx.authed("PUT", "/api/settings/line", {
       groupName: "我自己亂填的名稱",
       admin: { passwordHash: "scrypt$x" },
+      admins: [{ id: "f".repeat(32), name: "偷塞的管理員", email: "evil@example.test", passwordHash: "scrypt$x", status: "active", sessionVersion: 1 }],
       sessionSecret: "f".repeat(64),
       lineCaptured: [{ groupId: "Cevil" }],
     });
     expect(res.status).toBe(200);
     expect(ctx.store.data.line.groupName).toBe("");
     expect(ctx.store.data.sessionSecret).toBe(secretBefore);
-    expect(ctx.store.data.admin?.passwordHash.startsWith("scrypt$16384")).toBe(true);
+    expect(JSON.stringify(ctx.store.data.admins)).toBe(adminsBefore);
+    expect(ctx.store.data.admin).toBeNull();
     expect(ctx.store.data.lineCaptured).toEqual([]);
   });
 });
@@ -577,14 +603,38 @@ describe("/api/settings* 的限流額度（有自己的桶，與 OCR 互不擠�
   });
 });
 
+describe("/api/admins* 的限流額度（和 /api/settings* 共用「設定 API」的桶，與 OCR 互不擠壓）", () => {
+  it(`每個 IP 每分鐘 ${SETTINGS_API_RATE_LIMIT_MAX} 次，超過 429；帶 id 的路徑與 /api/settings* 在同一個桶；OCR 的額度不受影響`, async () => {
+    const ctx = await makeSettingsApp();
+    const ip = { "x-forwarded-for": "203.0.113.62" };
+    for (let i = 0; i < SETTINGS_API_RATE_LIMIT_MAX; i++) expect((await ctx.authed("GET", "/api/admins", undefined, ip)).status).toBe(200);
+    expect((await ctx.authed("GET", "/api/admins", undefined, ip)).status).toBe(429);
+    expect((await ctx.authed("DELETE", `/api/admins/${adminId(99)}`, undefined, ip)).status).toBe(429); // 帶 id 的路徑也算同一個桶
+    expect((await ctx.authed("GET", "/api/settings", undefined, ip)).status).toBe(429); // /api/settings* 與 /api/admins* 共用
+    expect((await call(ctx.app, "POST", "/api/ocr", {}, ip)).status).toBe(400); // OCR 是另一個桶（缺 image 回 400，不是 429）
+    ctx.clock.now += 60_001;
+    expect((await ctx.authed("GET", "/api/admins", undefined, ip)).status).toBe(200); // 一分鐘後恢復
+  });
+
+  it("反過來：OCR 額度用完，/api/admins* 不受影響", async () => {
+    const ctx = await makeSettingsApp();
+    const ip = { "x-forwarded-for": "203.0.113.63" };
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) await call(ctx.app, "POST", "/api/ocr", {}, ip);
+    expect((await call(ctx.app, "POST", "/api/ocr", {}, ip)).status).toBe(429);
+    expect((await ctx.authed("GET", "/api/admins", undefined, ip)).status).toBe(200);
+  });
+});
+
 describe("/healthz 的設定相關欄位", () => {
   const health = async (ctx: SettingsApp) => (await (await ctx.app.request("/healthz")).json()) as Record<string, unknown>;
 
-  it("全新狀態：資料目錄可寫、已設定密碼（測試起點）、LINE 都沒設定", async () => {
+  it("全新狀態：資料目錄可寫、沒有管理員（測試起點）、LINE 都沒設定", async () => {
     const ctx = await makeSettingsApp({ withAdmin: false });
     expect(await health(ctx)).toMatchObject({
       dataDirWritable: true,
       adminConfigured: false,
+      adminCount: 0,
+      legacyAdminPending: false,
       lineConfigured: false,
       lineWebhookConfigured: false,
       lineSource: null,

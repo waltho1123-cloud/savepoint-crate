@@ -29,6 +29,12 @@ export async function readJsonObject(c: Context): Promise<Record<string, unknown
   return parsed as Record<string, unknown>;
 }
 
+/** 從請求內容物件取字串欄位；不是字串（含沒給）一律當空字串。 */
+export function readString(body: Record<string, unknown>, key: string): string {
+  const value = body[key];
+  return typeof value === "string" ? value : "";
+}
+
 /** 這個請求是不是走 HTTPS（Zeabur 的反向代理終止 TLS，靠 X-Forwarded-Proto 告知；沒有這個標頭就看連線本身）。 */
 export function isHttpsRequest(c: Context): boolean {
   const forwarded = c.req.header("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
