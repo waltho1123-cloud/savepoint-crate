@@ -1685,9 +1685,8 @@ function confirmClearAll() {
 // ========== Helpers ==========
 function escHtml(s) {
   if (!s) return '';
-  const d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
+  // 同時跳脫引號：這個函式也用在 value="…" 這類屬性值裡，品名或顏色含 " 或 ' 時才不會截斷欄位或注入屬性。
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // ========== Init ==========
