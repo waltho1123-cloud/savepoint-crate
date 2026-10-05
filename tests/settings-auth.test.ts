@@ -5,12 +5,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as auth from "../src/auth.js";
 import { DUMMY_PASSWORD_HASH, SESSION_COOKIE_NAME, SESSION_TTL_MS } from "../src/auth.js";
 import { ServiceError } from "../src/common.js";
-import { LOGIN_RATE_LIMIT_MAX, PASSWORD_GATE_MAX_ACTIVE, PASSWORD_GATE_MAX_QUEUE, SETUP_RATE_LIMIT_MAX } from "../src/settings-routes.js";
+import { LOGIN_RATE_LIMIT_MAX, PASSWORD_GATE_MAX_ACTIVE, PASSWORD_GATE_MAX_QUEUE } from "../src/auth-kit.js";
+import { SETUP_RATE_LIMIT_MAX } from "../src/settings-routes.js";
 import { SETTINGS_FILE_NAME } from "../src/settings-store.js";
 import {
-  adminId,
+  accountId,
   call,
   cleanupTempDirs,
+  cookieAttributes,
   cookiePair,
   lineHandler,
   makeAccount,
@@ -45,6 +47,12 @@ const setupBody = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 });
 const loginBody = (overrides: Record<string, unknown> = {}) => ({ email: TEST_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD, ...overrides });
+/** 沒登入（或登入無效）進需要登入的頁面：302 導向登入頁，登入後回到原本的頁面。 */
+function expectRedirectToLogin(res: Response, next: string) {
+  expect(res.status).toBe(302);
+  expect(res.headers.get("location")).toBe(`/login?next=${next}`);
+  expect(res.headers.get("cache-control")).toBe("no-store");
+}
 
 describe("啟動時的設定碼提示", () => {
   it("全新安裝（沒有任何管理員）：log 有一行含設定碼的提示（格式固定）", async () => {
@@ -72,9 +80,9 @@ describe("狀態變更端點的 CSRF 防護（Content-Type 與 X-Requested-With�
   const endpoints: Array<[string, string, unknown]> = [
     ["POST", "/settings/setup", setupBody()],
     ["POST", "/settings/upgrade", { currentPassword: TEST_ADMIN_PASSWORD, name: "甲", email: "a@example.test" }],
-    ["POST", "/settings/login", loginBody()],
-    ["POST", "/settings/logout", {}],
-    ["POST", "/settings/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD }],
+    ["POST", "/login", loginBody()],
+    ["POST", "/logout", {}],
+    ["POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD }],
     ["PUT", "/api/settings/line", { enabled: true }],
     ["POST", "/api/settings/line/test", {}],
   ];
@@ -113,7 +121,7 @@ describe("狀態變更端點的 CSRF 防護（Content-Type 與 X-Requested-With�
 
   it("Content-Type 帶 charset 參數、大小寫不同仍可（application/json; charset=utf-8）", async () => {
     const ctx = await makeSettingsApp();
-    const res = await ctx.app.request("/settings/login", {
+    const res = await ctx.app.request("/login", {
       method: "POST",
       headers: { "content-type": "Application/JSON; charset=UTF-8", "x-requested-with": "XMLHttpRequest" },
       body: JSON.stringify(loginBody()),
@@ -136,7 +144,7 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ success: false, error: "設定碼不正確" });
     expect(setCookieOf(res)).toBeUndefined();
-    expect(ctx.store.data.admins).toEqual([]);
+    expect(ctx.store.data.accounts).toEqual([]);
   });
 
   it("缺少設定碼、設定碼不是字串 → 403", async () => {
@@ -153,7 +161,7 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
       expect(res.status, JSON.stringify(name)).toBe(400);
       expect(await res.json()).toEqual({ success: false, error: "姓名需為 1～50 個字元（不可含換行、控制字元或零寬字元，且要有看得見的字）" });
     }
-    expect(ctx.store.data.admins).toEqual([]);
+    expect(ctx.store.data.accounts).toEqual([]);
     expect(ctx.setupCode.currentCode).toBe(TEST_SETUP_CODE);
     expect((await call(ctx.app, "POST", "/settings/setup", setupBody({ name: "x".repeat(50) }), freshIp())).status).toBe(200);
   });
@@ -165,7 +173,7 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
       expect(res.status, JSON.stringify(email)).toBe(400);
       expect((await res.json()) as { error: string }).toMatchObject({ error: expect.stringContaining("Email 格式不正確") });
     }
-    expect(ctx.store.data.admins).toEqual([]);
+    expect(ctx.store.data.accounts).toEqual([]);
   });
 
   it("設定碼對、但密碼太短（9 字元）／太長（201）／缺少／不是字串 → 400，設定碼仍然有效、可以重試", async () => {
@@ -176,7 +184,7 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
     for (const password of ["x".repeat(201), undefined, 123456789012, null]) {
       expect((await call(ctx.app, "POST", "/settings/setup", setupBody({ password }), freshIp())).status).toBe(400);
     }
-    expect(ctx.store.data.admins).toEqual([]);
+    expect(ctx.store.data.accounts).toEqual([]);
     expect(ctx.setupCode.currentCode).toBe(TEST_SETUP_CODE);
     expect((await call(ctx.app, "POST", "/settings/setup", setupBody(), freshIp())).status).toBe(200);
   });
@@ -187,11 +195,12 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true });
 
-    expect(ctx.store.data.admins).toHaveLength(1);
-    const admin = ctx.store.data.admins[0]!;
+    expect(ctx.store.data.accounts).toHaveLength(1);
+    const admin = ctx.store.data.accounts[0]!;
     expect(admin).toMatchObject({
       name: "王小明",
       email: "first@example.test",
+      role: "admin", // 第一位一定是管理員
       status: "active",
       sessionVersion: 1,
       createdAt: new Date(NOW_MS).toISOString(),
@@ -201,7 +210,7 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
     expect(admin.id).toMatch(/^[0-9a-f]{32}$/);
     expect(admin.passwordHash).toMatch(/^scrypt\$16384\$8\$1\$/);
     expect(ctx.store.data.admin).toBeNull();
-    expect(ctx.store.data.version).toBe(2);
+    expect(ctx.store.data.version).toBe(3);
 
     const file = await readFile(join(ctx.dir, SETTINGS_FILE_NAME), "utf8");
     expect(file).toContain("scrypt$16384$8$1$");
@@ -214,11 +223,20 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
     expect(claims[2]).toBe("1");
     const settings = await call(ctx.app, "GET", "/api/settings", undefined, { cookie: cookiePair(res) });
     expect(settings.status).toBe(200);
-    expect(((await settings.json()) as { data: { me: unknown } }).data.me).toEqual({ id: admin.id, name: "王小明", email: "first@example.test" });
+    expect(((await settings.json()) as { data: { me: unknown } }).data.me).toEqual({ id: admin.id, name: "王小明", email: "first@example.test", role: "admin" });
     expect(ctx.setupCode.currentCode).toBeNull();
     const health = (await (await ctx.app.request("/healthz")).json()) as Record<string, unknown>;
-    expect(health).toMatchObject({ adminConfigured: true, adminCount: 1, legacyAdminPending: false });
-    expect(ctx.log.lines).toContain("[admins] first@example.test 建立第一位管理員 first@example.test（來源 unknown）");
+    expect(health).toMatchObject({ adminConfigured: true, adminCount: 1, accountCount: 1, legacyAdminPending: false });
+    expect(ctx.log.lines).toContain("[accounts] first@example.test 建立第一位管理員 first@example.test（來源 unknown）");
+  });
+
+  it("請求裡的 role 一律忽略：第一位永遠是管理員（不論填 user、admin 或亂填，都不會因為 role 不合法而 400）", async () => {
+    for (const role of ["user", "admin", "root", null, 7]) {
+      const ctx = await makeSettingsApp({ withAdmin: false });
+      const res = await call(ctx.app, "POST", "/settings/setup", setupBody({ role }));
+      expect(res.status, JSON.stringify(role)).toBe(200);
+      expect(ctx.store.data.accounts[0]?.role).toBe("admin");
+    }
   });
 
   it("設定碼不分大小寫、橫線可省略", async () => {
@@ -228,11 +246,11 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
 
   it("已經有管理員：再來 setup 一律 409（即使設定碼正確），不會新增或覆蓋任何帳號", async () => {
     const ctx = await makeSettingsApp();
-    const before = JSON.stringify(ctx.store.data.admins);
+    const before = JSON.stringify(ctx.store.data.accounts);
     const res = await call(ctx.app, "POST", "/settings/setup", setupBody());
     expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ success: false, error: "已經建立過管理員帳號，請直接登入" });
-    expect(JSON.stringify(ctx.store.data.admins)).toBe(before);
+    expect(await res.json()).toEqual({ success: false, error: "已經建立過帳號，請直接登入" });
+    expect(JSON.stringify(ctx.store.data.accounts)).toBe(before);
   });
 
   it("還有舊版的單一密碼等著升級：setup 一律 409（不能用設定碼繞過目前的密碼），並指示改用升級", async () => {
@@ -240,7 +258,7 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
     const res = await call(ctx.app, "POST", "/settings/setup", setupBody());
     expect(res.status).toBe(409);
     expect(await res.json()).toEqual({ success: false, error: "這裡還是舊版的單一管理密碼：請改用目前的密碼升級成管理員帳號" });
-    expect(ctx.store.data.admins).toEqual([]);
+    expect(ctx.store.data.accounts).toEqual([]);
     expect(ctx.store.data.admin).not.toBeNull();
   });
 
@@ -260,11 +278,11 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
       call(ctx.app, "POST", "/settings/setup", setupBody({ email: "b@example.test", password: "second-password-5678" }), ip("203.0.113.2")),
     ]);
     expect([a.status, b.status].sort()).toEqual([200, 409]);
-    expect(ctx.store.data.admins).toHaveLength(1);
+    expect(ctx.store.data.accounts).toHaveLength(1);
     const winner = a.status === 200 ? { email: "a@example.test", password: "first-password-1234" } : { email: "b@example.test", password: "second-password-5678" };
     const loser = a.status === 200 ? { email: "b@example.test", password: "second-password-5678" } : { email: "a@example.test", password: "first-password-1234" };
-    expect((await call(ctx.app, "POST", "/settings/login", winner)).status).toBe(200);
-    expect((await call(ctx.app, "POST", "/settings/login", loser)).status).toBe(401);
+    expect((await call(ctx.app, "POST", "/login", winner)).status).toBe(200);
+    expect((await call(ctx.app, "POST", "/login", loser)).status).toBe(401);
   });
 
   it(`每個 IP 每分鐘 ${SETUP_RATE_LIMIT_MAX} 次（每次嘗試都算）：第 ${SETUP_RATE_LIMIT_MAX + 1} 次 429＋Retry-After，其他 IP 不受影響，一分鐘後恢復`, async () => {
@@ -276,7 +294,7 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
     expect(blocked.status).toBe(429);
     expect(blocked.headers.get("retry-after")).toBe("60");
     expect(await blocked.json()).toEqual({ success: false, error: "請求過於頻繁，請稍後再試" });
-    expect(ctx.store.data.admins).toEqual([]); // 被擋下的請求連設定碼都沒驗
+    expect(ctx.store.data.accounts).toEqual([]); // 被擋下的請求連設定碼都沒驗
 
     expect((await call(ctx.app, "POST", "/settings/setup", setupBody({ setupCode: "ZZZZ-ZZZZ" }), ip("203.0.113.11"))).status).toBe(403);
     ctx.clock.now += 60_001;
@@ -294,20 +312,21 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
   });
 });
 
-describe("POST /settings/login（Email＋密碼）", () => {
+describe("POST /login（Email＋密碼）", () => {
   it("成功：200 與 session cookie（HttpOnly、SameSite=Lax、Path=/、Max-Age=7 天；http 下沒有 Secure）；cookie 綁帳號 id 與 sessionVersion；更新 lastLoginAt", async () => {
     const ctx = await makeSettingsApp();
-    expect(ctx.store.data.admins[0]!.lastLoginAt).toBeNull();
-    const res = await call(ctx.app, "POST", "/settings/login", loginBody());
+    expect(ctx.store.data.accounts[0]!.lastLoginAt).toBeNull();
+    const res = await call(ctx.app, "POST", "/login", loginBody());
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ success: true });
+    expect(await res.json()).toEqual({ success: true, next: "/" }); // 沒指定回到哪裡就是 /
     const cookie = setCookieOf(res)!;
     expect(cookie.startsWith(`${SESSION_COOKIE_NAME}=`)).toBe(true);
-    expect(cookie).toContain("HttpOnly");
-    expect(cookie).toContain("SameSite=Lax");
-    expect(cookie).toContain("Path=/");
-    expect(cookie).toContain(`Max-Age=${SESSION_TTL_MS / 1000}`);
-    expect(cookie).not.toContain("Secure");
+    const attributes = cookieAttributes(cookie);
+    expect(attributes).toContain("HttpOnly");
+    expect(attributes).toContain("SameSite=Lax");
+    expect(attributes).toContain("Path=/"); // 整個屬性相等：Path=/x 不算
+    expect(attributes).toContain(`Max-Age=${SESSION_TTL_MS / 1000}`);
+    expect(attributes).not.toContain("Secure");
     // cookie 值：<到期>.<帳號 id>.<sessionVersion>.<亂數>.<簽章>
     const value = decodeURIComponent(cookie.split(";")[0]!.slice(SESSION_COOKIE_NAME.length + 1));
     const parts = value.split(".");
@@ -315,29 +334,29 @@ describe("POST /settings/login（Email＋密碼）", () => {
     expect(Number(parts[0])).toBe(NOW_MS + SESSION_TTL_MS);
     expect(parts[1]).toBe(TEST_ADMIN_ID);
     expect(parts[2]).toBe("1");
-    expect(ctx.store.data.admins[0]!.lastLoginAt).toBe(new Date(NOW_MS).toISOString());
-    expect(ctx.log.lines).toContain(`[admins] ${TEST_ADMIN_EMAIL} 登入成功（來源 unknown）`);
+    expect(ctx.store.data.accounts[0]!.lastLoginAt).toBe(new Date(NOW_MS).toISOString());
+    expect(ctx.log.lines).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 登入成功（來源 unknown）`);
   });
 
   it("Email 不分大小寫、前後空白不影響", async () => {
     const ctx = await makeSettingsApp();
     for (const email of ["ADMIN@EXAMPLE.TEST", "  Admin@Example.Test  "]) {
-      expect((await call(ctx.app, "POST", "/settings/login", loginBody({ email }), freshIp())).status).toBe(200);
+      expect((await call(ctx.app, "POST", "/login", loginBody({ email }), freshIp())).status).toBe(200);
     }
   });
 
   it("走 HTTPS（X-Forwarded-Proto: https，Zeabur 反向代理）：cookie 帶 Secure；直接 http 不帶", async () => {
     const ctx = await makeSettingsApp();
-    const https = await call(ctx.app, "POST", "/settings/login", loginBody(), { "x-forwarded-proto": "https" });
+    const https = await call(ctx.app, "POST", "/login", loginBody(), { "x-forwarded-proto": "https" });
     expect(setCookieOf(https)).toContain("Secure");
-    const chain = await call(ctx.app, "POST", "/settings/login", loginBody(), { "x-forwarded-proto": "https, http" });
+    const chain = await call(ctx.app, "POST", "/login", loginBody(), { "x-forwarded-proto": "https, http" });
     expect(setCookieOf(chain)).toContain("Secure");
-    const http = await call(ctx.app, "POST", "/settings/login", loginBody(), { "x-forwarded-proto": "http" });
+    const http = await call(ctx.app, "POST", "/login", loginBody(), { "x-forwarded-proto": "http" });
     expect(setCookieOf(http)).not.toContain("Secure");
   });
 
   it("密碼錯誤、查無這個帳號、帳號已停用、Email 格式不對、缺欄位：一律 401 與同一句固定訊息（不透露是哪一種），沒有 cookie，lastLoginAt 不變", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), email: "disabled@example.test", status: "disabled" })] });
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), email: "disabled@example.test", status: "disabled" })] });
     const attempts: Array<Record<string, unknown>> = [
       loginBody({ password: "wrong-password-123" }),
       loginBody({ password: "" }),
@@ -356,47 +375,47 @@ describe("POST /settings/login（Email＋密碼）", () => {
       loginBody({ password: "x".repeat(201) }),
     ];
     for (const body of attempts) {
-      const res = await call(ctx.app, "POST", "/settings/login", body, freshIp());
+      const res = await call(ctx.app, "POST", "/login", body, freshIp());
       expect(res.status, JSON.stringify(body)).toBe(401);
       expect(await res.json()).toEqual(LOGIN_FAILED);
       expect(setCookieOf(res)).toBeUndefined();
     }
-    expect(ctx.store.data.admins.every((a) => a.lastLoginAt === null)).toBe(true);
+    expect(ctx.store.data.accounts.every((a) => a.lastLoginAt === null)).toBe(true);
   });
 
   it("每一種失敗都真的跑了一次 scrypt：查無帳號、帳號停用、Email 格式不對都拿固定的假雜湊驗（回應時間不洩漏帳號存不存在）", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), email: "disabled@example.test", status: "disabled" })] });
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), email: "disabled@example.test", status: "disabled" })] });
     const spy = vi.spyOn(auth, "verifyPassword");
     for (const email of ["nobody@example.test", "disabled@example.test", "not-an-email"]) {
       spy.mockClear();
-      expect((await call(ctx.app, "POST", "/settings/login", { email, password: TEST_ADMIN_PASSWORD }, freshIp())).status).toBe(401);
+      expect((await call(ctx.app, "POST", "/login", { email, password: TEST_ADMIN_PASSWORD }, freshIp())).status).toBe(401);
       expect(spy).toHaveBeenCalledTimes(1);
       expect(spy.mock.calls[0]![1]).toBe(DUMMY_PASSWORD_HASH);
     }
     // 對照：存在且啟用的帳號、密碼錯：用的是它自己的雜湊
     spy.mockClear();
-    expect((await call(ctx.app, "POST", "/settings/login", loginBody({ password: "wrong-password-123" }))).status).toBe(401);
+    expect((await call(ctx.app, "POST", "/login", loginBody({ password: "wrong-password-123" }))).status).toBe(401);
     expect(spy).toHaveBeenCalledTimes(1);
-    expect(spy.mock.calls[0]![1]).toBe(ctx.store.data.admins[0]!.passwordHash);
+    expect(spy.mock.calls[0]![1]).toBe(ctx.store.data.accounts[0]!.passwordHash);
   });
 
   it("用假雜湊驗證時就算「密碼」剛好對得上也不會通過（帳號停用或不存在，永遠登不進去）", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), email: "disabled@example.test", status: "disabled" })] });
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), email: "disabled@example.test", status: "disabled" })] });
     // 即使 verifyPassword 被竄改成「恆為真」，查無帳號與停用的帳號仍然是 401（結果由 usable 把關，不是只看密碼）
     vi.spyOn(auth, "verifyPassword").mockResolvedValue(true);
     for (const email of ["nobody@example.test", "disabled@example.test"]) {
-      expect((await call(ctx.app, "POST", "/settings/login", { email, password: "anything-at-all-123" }, freshIp())).status).toBe(401);
+      expect((await call(ctx.app, "POST", "/login", { email, password: "anything-at-all-123" }, freshIp())).status).toBe(401);
     }
   });
 
   it("登入時寫 lastLoginAt 失敗（Volume 滿了或唯讀）：登入仍然成功（發 cookie），log 有一行警告，lastLoginAt 沒變，密碼不進 log", async () => {
     const ctx = await makeSettingsApp();
-    const before = ctx.store.data.admins[0]!.lastLoginAt;
+    const before = ctx.store.data.accounts[0]!.lastLoginAt;
     vi.spyOn(ctx.store, "update").mockRejectedValueOnce(new ServiceError(500, "寫入設定檔失敗，請確認 Volume 可寫入"));
-    const res = await call(ctx.app, "POST", "/settings/login", loginBody());
+    const res = await call(ctx.app, "POST", "/login", loginBody());
     expect(res.status).toBe(200);
     expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: cookiePair(res) })).status).toBe(200); // cookie 可用
-    expect(ctx.store.data.admins[0]!.lastLoginAt).toBe(before);
+    expect(ctx.store.data.accounts[0]!.lastLoginAt).toBe(before);
     const warning = ctx.log.lines.find((line) => line.includes("登入成功，但無法更新最後登入時間"));
     expect(warning).toContain(TEST_ADMIN_EMAIL);
     expect(ctx.log.lines.join("\n")).not.toContain(TEST_ADMIN_PASSWORD);
@@ -407,26 +426,26 @@ describe("POST /settings/login（Email＋密碼）", () => {
     const realUpdate = ctx.store.update.bind(ctx.store);
     vi.spyOn(ctx.store, "update").mockImplementationOnce(async () => {
       await realUpdate((draft) => {
-        draft.admins[0]!.sessionVersion = 5;
+        draft.accounts[0]!.sessionVersion = 5;
       });
       throw new ServiceError(500, "寫入設定檔失敗，請確認 Volume 可寫入");
     });
-    const res = await call(ctx.app, "POST", "/settings/login", loginBody());
+    const res = await call(ctx.app, "POST", "/login", loginBody());
     expect(res.status).toBe(200);
     expect(decodeURIComponent(cookiePair(res).split("=")[1]!).split(".")[2]).toBe("5");
     expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: cookiePair(res) })).status).toBe(200);
   });
 
   it("寫檔失敗、而且這個帳號在同一時間已被停用：仍然 401（不會因為寫檔失敗就放行），沒有 cookie", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), email: "second@example.test" })] });
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), email: "second@example.test" })] });
     const realUpdate = ctx.store.update.bind(ctx.store);
     vi.spyOn(ctx.store, "update").mockImplementationOnce(async () => {
       await realUpdate((draft) => {
-        draft.admins[0]!.status = "disabled";
+        draft.accounts[0]!.status = "disabled";
       });
       throw new ServiceError(500, "寫入設定檔失敗，請確認 Volume 可寫入");
     });
-    const res = await call(ctx.app, "POST", "/settings/login", loginBody());
+    const res = await call(ctx.app, "POST", "/login", loginBody());
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual(LOGIN_FAILED);
     expect(setCookieOf(res)).toBeUndefined();
@@ -435,16 +454,16 @@ describe("POST /settings/login（Email＋密碼）", () => {
   it("驗證密碼的期間帳號被停用（或刪除、重設密碼）：這次登入作廢，不會發 cookie", async () => {
     const real = auth.verifyPassword;
     for (const interfere of [
-      (draft: { admins: Array<{ status: string }> }) => void (draft.admins[0]!.status = "disabled"),
-      (draft: { admins: unknown[] }) => void draft.admins.splice(0, 1),
-      (draft: { admins: Array<{ passwordHash: string }> }) => void (draft.admins[0]!.passwordHash = DUMMY_PASSWORD_HASH),
+      (draft: { accounts: Array<{ status: string }> }) => void (draft.accounts[0]!.status = "disabled"),
+      (draft: { accounts: unknown[] }) => void draft.accounts.splice(0, 1),
+      (draft: { accounts: Array<{ passwordHash: string }> }) => void (draft.accounts[0]!.passwordHash = DUMMY_PASSWORD_HASH),
     ]) {
-      const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), email: "second@example.test" })] });
+      const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), email: "second@example.test" })] });
       vi.spyOn(auth, "verifyPassword").mockImplementationOnce(async (password, hash) => {
         await ctx.store.update((draft) => interfere(draft as never));
         return real(password, hash);
       });
-      const res = await call(ctx.app, "POST", "/settings/login", loginBody());
+      const res = await call(ctx.app, "POST", "/login", loginBody());
       expect(res.status).toBe(401);
       expect(await res.json()).toEqual(LOGIN_FAILED);
       expect(setCookieOf(res)).toBeUndefined();
@@ -457,53 +476,53 @@ describe("POST /settings/login（Email＋密碼）", () => {
     const real = auth.verifyPassword;
     vi.spyOn(auth, "verifyPassword").mockImplementationOnce(async (password, hash) => {
       await ctx.store.update((draft) => {
-        draft.admins[0]!.sessionVersion = 5;
+        draft.accounts[0]!.sessionVersion = 5;
       });
       return real(password, hash);
     });
-    const res = await call(ctx.app, "POST", "/settings/login", loginBody());
+    const res = await call(ctx.app, "POST", "/login", loginBody());
     expect(res.status).toBe(200);
     expect(decodeURIComponent(cookiePair(res).split("=")[1]!).split(".")[2]).toBe("5");
     expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: cookiePair(res) })).status).toBe(200);
   });
 
-  it("尚未建立任何管理員 → 400 並提示先用設定碼建立；還有舊版的單一密碼 → 409 並提示先升級", async () => {
+  it("尚未建立任何帳號 → 400 並提示請管理員先到設定頁；還有舊版的單一密碼 → 409 並提示先升級", async () => {
     const fresh = await makeSettingsApp({ withAdmin: false });
-    const res = await call(fresh.app, "POST", "/settings/login", loginBody());
+    const res = await call(fresh.app, "POST", "/login", loginBody());
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ success: false, error: "尚未建立管理員，請先用設定碼建立第一位管理員" });
+    expect(await res.json()).toEqual({ success: false, error: "尚未建立任何帳號：請管理員先到設定頁（/settings），用設定碼建立第一位管理員" });
     const legacy = await makeSettingsApp({ legacyAdmin: true });
-    const res2 = await call(legacy.app, "POST", "/settings/login", loginBody());
+    const res2 = await call(legacy.app, "POST", "/login", loginBody());
     expect(res2.status).toBe(409);
-    expect(await res2.json()).toEqual({ success: false, error: "系統已改為管理員帳號制：請先用目前的管理密碼升級成管理員帳號" });
+    expect(await res2.json()).toEqual({ success: false, error: "系統已改為帳號制：請管理員先到設定頁（/settings），用目前的管理密碼升級成管理員帳號" });
   });
 
   it("請求內容不是 JSON、不是物件 → 400", async () => {
     const ctx = await makeSettingsApp();
-    expect((await call(ctx.app, "POST", "/settings/login", "{not json")).status).toBe(400);
-    expect((await call(ctx.app, "POST", "/settings/login", "[1,2]")).status).toBe(400);
-    expect((await call(ctx.app, "POST", "/settings/login", "")).status).toBe(400);
+    expect((await call(ctx.app, "POST", "/login", "{not json")).status).toBe(400);
+    expect((await call(ctx.app, "POST", "/login", "[1,2]")).status).toBe(400);
+    expect((await call(ctx.app, "POST", "/login", "")).status).toBe(400);
   });
 
   it(`每個 IP 每分鐘 ${LOGIN_RATE_LIMIT_MAX} 次：第 ${LOGIN_RATE_LIMIT_MAX + 1} 次 429（連正確的密碼也一樣），一分鐘後恢復，其他 IP 不受影響`, async () => {
     const ctx = await makeSettingsApp();
     for (let i = 0; i < LOGIN_RATE_LIMIT_MAX; i++) {
-      expect((await call(ctx.app, "POST", "/settings/login", loginBody({ password: "wrong-password-123" }), ip("203.0.113.20"))).status).toBe(401);
+      expect((await call(ctx.app, "POST", "/login", loginBody({ password: "wrong-password-123" }), ip("203.0.113.20"))).status).toBe(401);
     }
-    const blocked = await call(ctx.app, "POST", "/settings/login", loginBody(), ip("203.0.113.20"));
+    const blocked = await call(ctx.app, "POST", "/login", loginBody(), ip("203.0.113.20"));
     expect(blocked.status).toBe(429);
     expect(blocked.headers.get("retry-after")).toBe("60");
-    expect((await call(ctx.app, "POST", "/settings/login", loginBody(), ip("203.0.113.21"))).status).toBe(200);
+    expect((await call(ctx.app, "POST", "/login", loginBody(), ip("203.0.113.21"))).status).toBe(200);
     ctx.clock.now += 60_001;
-    expect((await call(ctx.app, "POST", "/settings/login", loginBody(), ip("203.0.113.20"))).status).toBe(200);
+    expect((await call(ctx.app, "POST", "/login", loginBody(), ip("203.0.113.20"))).status).toBe(200);
   });
 
   it("換 Email 重試也沒用：額度是逐 IP 算的，不是逐帳號（攻擊者不能靠換帳號名稱繞過）", async () => {
     const ctx = await makeSettingsApp();
     for (let i = 0; i < LOGIN_RATE_LIMIT_MAX; i++) {
-      await call(ctx.app, "POST", "/settings/login", { email: `guess${i}@example.test`, password: "wrong-password-123" }, ip("203.0.113.22"));
+      await call(ctx.app, "POST", "/login", { email: `guess${i}@example.test`, password: "wrong-password-123" }, ip("203.0.113.22"));
     }
-    expect((await call(ctx.app, "POST", "/settings/login", loginBody(), ip("203.0.113.22"))).status).toBe(429);
+    expect((await call(ctx.app, "POST", "/login", loginBody(), ip("203.0.113.22"))).status).toBe(429);
   });
 
   it("登入、建立第一位管理員的限流額度互相獨立（setup 5／login 10）", async () => {
@@ -513,7 +532,7 @@ describe("POST /settings/login（Email＋密碼）", () => {
     }
     expect((await call(ctx.app, "POST", "/settings/setup", setupBody({ setupCode: "ZZZZ-ZZZZ" }), ip("203.0.113.30"))).status).toBe(429);
     // setup 被擋，login 還有額度（回 400「尚未建立」而不是 429）
-    expect((await call(ctx.app, "POST", "/settings/login", loginBody(), ip("203.0.113.30"))).status).toBe(400);
+    expect((await call(ctx.app, "POST", "/login", loginBody(), ip("203.0.113.30"))).status).toBe(400);
   });
 });
 
@@ -527,17 +546,17 @@ describe("session cookie 的驗證（綁帳號與 sessionVersion）", () => {
   });
 
   it("/api/settings 回應多了 me：目前登入的管理員的 id、姓名、Email（不含密碼雜湊）", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), name: "第二位", email: "second@example.test" })] });
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), name: "第二位", email: "second@example.test" })] });
     const first = await ctx.authed("GET", "/api/settings");
     const text = await first.text();
-    expect(JSON.parse(text).data.me).toEqual({ id: TEST_ADMIN_ID, name: TEST_ADMIN_NAME, email: TEST_ADMIN_EMAIL });
+    expect(JSON.parse(text).data.me).toEqual({ id: TEST_ADMIN_ID, name: TEST_ADMIN_NAME, email: TEST_ADMIN_EMAIL, role: "admin" });
     expect(text).not.toContain("scrypt$");
-    const second = await ctx.authedAs(adminId(2), "GET", "/api/settings");
-    expect(((await second.json()) as { data: { me: unknown } }).data.me).toEqual({ id: adminId(2), name: "第二位", email: "second@example.test" });
+    const second = await ctx.authedAs(accountId(2), "GET", "/api/settings");
+    expect(((await second.json()) as { data: { me: unknown } }).data.me).toEqual({ id: accountId(2), name: "第二位", email: "second@example.test", role: "admin" });
   });
 
   it("被竄改的 cookie → 401：改簽章、改到期時間、改亂數、改成別的帳號 id、改 sessionVersion", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), email: "second@example.test" })] });
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), email: "second@example.test" })] });
     const good = ctx.sessionCookie().slice(SESSION_COOKIE_NAME.length + 1);
     const [expires, id, version, nonce, mac] = good.split(".") as [string, string, string, string, string];
     const flippedMac = `${mac.startsWith("A") ? "B" : "A"}${mac.slice(1)}`;
@@ -545,7 +564,7 @@ describe("session cookie 的驗證（綁帳號與 sessionVersion）", () => {
       [expires, id, version, nonce, flippedMac],
       [String(Number(expires) + 86_400_000), id, version, nonce, mac],
       [expires, id, version, `${nonce.slice(0, -1)}${nonce.endsWith("A") ? "B" : "A"}`, mac],
-      [expires, adminId(2), version, nonce, mac], // 想冒充另一位（存在的）管理員
+      [expires, accountId(2), version, nonce, mac], // 想冒充另一位（存在的）管理員
       [expires, id, "2", nonce, mac], // 想把 sessionVersion 改成別的
     ].map((parts) => parts.join("."));
     for (const value of [...tampered, "garbage", "", `${expires}.${id}.${version}.${nonce}`]) {
@@ -563,20 +582,20 @@ describe("session cookie 的驗證（綁帳號與 sessionVersion）", () => {
     const res = await call(ctx.app, "GET", "/api/settings", undefined, { cookie: `${SESSION_COOKIE_NAME}=${expires}.${nonce}.${mac}` });
     expect(res.status).toBe(401);
     const page = await ctx.app.request("/settings", { headers: { cookie: `${SESSION_COOKIE_NAME}=${expires}.${nonce}.${mac}` } });
-    expect(await page.text()).toContain('id="login-form"');
+    expectRedirectToLogin(page, "/settings");
   });
 
   it("帳號被刪除、被停用後，那個帳號的 cookie 立刻失效（API 與頁面都是）；其他帳號不受影響", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), email: "second@example.test" }), makeAccount({ id: adminId(3), email: "third@example.test" })] });
-    const cookies = [ctx.sessionCookie(adminId(2)), ctx.sessionCookie(adminId(3))];
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), email: "second@example.test" }), makeAccount({ id: accountId(3), email: "third@example.test" })] });
+    const cookies = [ctx.sessionCookie(accountId(2)), ctx.sessionCookie(accountId(3))];
     expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: cookies[0]! })).status).toBe(200);
     await ctx.store.update((draft) => {
-      draft.admins.find((a) => a.id === adminId(2))!.status = "disabled";
-      draft.admins.splice(draft.admins.findIndex((a) => a.id === adminId(3)), 1);
+      draft.accounts.find((a) => a.id === accountId(2))!.status = "disabled";
+      draft.accounts.splice(draft.accounts.findIndex((a) => a.id === accountId(3)), 1);
     });
     for (const cookie of cookies) {
       expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie })).status).toBe(401);
-      expect(await (await ctx.app.request("/settings", { headers: { cookie } })).text()).toContain('id="login-form"');
+      expectRedirectToLogin(await ctx.app.request("/settings", { headers: { cookie } }), "/settings");
     }
     expect((await ctx.authed("GET", "/api/settings")).status).toBe(200); // 第一位不受影響
   });
@@ -585,7 +604,7 @@ describe("session cookie 的驗證（綁帳號與 sessionVersion）", () => {
     const ctx = await makeSettingsApp();
     const oldCookie = ctx.sessionCookie();
     await ctx.store.update((draft) => {
-      draft.admins[0]!.sessionVersion = 2;
+      draft.accounts[0]!.sessionVersion = 2;
     });
     expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: oldCookie })).status).toBe(401);
     expect((await ctx.authed("GET", "/api/settings")).status).toBe(200); // sessionCookie() 現在用的是 2
@@ -598,8 +617,7 @@ describe("session cookie 的驗證（綁帳號與 sessionVersion）", () => {
     expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie })).status).toBe(200);
     ctx.clock.now += 1;
     expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie })).status).toBe(401);
-    const page = await ctx.app.request("/settings", { headers: { cookie } });
-    expect(await page.text()).toContain('id="login-form"');
+    expectRedirectToLogin(await ctx.app.request("/settings", { headers: { cookie } }), "/settings");
   });
 
   it("同名但無關的其他 cookie 不會被當成登入；cookie 夾在其他 cookie 之間也能讀到", async () => {
@@ -616,42 +634,42 @@ describe("session cookie 的驗證（綁帳號與 sessionVersion）", () => {
   });
 });
 
-describe("POST /settings/logout", () => {
+describe("POST /logout", () => {
   it("回 200 並清掉 cookie（Max-Age=0、Path=/）；不需要已登入", async () => {
     const ctx = await makeSettingsApp();
-    const res = await call(ctx.app, "POST", "/settings/logout", {}, { cookie: ctx.sessionCookie() });
+    const res = await call(ctx.app, "POST", "/logout", {}, { cookie: ctx.sessionCookie() });
     expect(res.status).toBe(200);
     const cookie = setCookieOf(res)!;
     expect(cookie.startsWith(`${SESSION_COOKIE_NAME}=;`)).toBe(true);
-    expect(cookie).toContain("Max-Age=0");
-    expect(cookie).toContain("Path=/");
-    expect((await call(ctx.app, "POST", "/settings/logout", {})).status).toBe(200);
+    expect(cookieAttributes(cookie)).toContain("Max-Age=0");
+    expect(cookieAttributes(cookie)).toContain("Path=/"); // 要和發出去的 cookie 同一個 Path 才清得掉
+    expect((await call(ctx.app, "POST", "/logout", {})).status).toBe(200);
   });
 
   it("走 HTTPS 時清除的 cookie 也帶 Secure（才蓋得過 Secure 的 cookie）", async () => {
     const ctx = await makeSettingsApp();
-    const res = await call(ctx.app, "POST", "/settings/logout", {}, { "x-forwarded-proto": "https" });
+    const res = await call(ctx.app, "POST", "/logout", {}, { "x-forwarded-proto": "https" });
     expect(setCookieOf(res)).toContain("Secure");
   });
 });
 
-describe("POST /settings/password（更改「自己」的密碼）", () => {
-  const second = () => makeAccount({ id: adminId(2), name: "第二位", email: "second@example.test" });
+describe("POST /account/password（更改「自己」的密碼）", () => {
+  const second = () => makeAccount({ id: accountId(2), name: "第二位", email: "second@example.test" });
 
   it("沒登入 → 401；密碼不會被改", async () => {
     const ctx = await makeSettingsApp();
-    const hash = ctx.store.data.admins[0]!.passwordHash;
-    const res = await call(ctx.app, "POST", "/settings/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD });
+    const hash = ctx.store.data.accounts[0]!.passwordHash;
+    const res = await call(ctx.app, "POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD });
     expect(res.status).toBe(401);
-    expect(ctx.store.data.admins[0]!.passwordHash).toBe(hash);
+    expect(ctx.store.data.accounts[0]!.passwordHash).toBe(hash);
   });
 
   it("目前的密碼錯誤 → 403（不是 401，免得頁面當成登入過期），有 log 但沒有密碼", async () => {
     const ctx = await makeSettingsApp();
-    const res = await ctx.authed("POST", "/settings/password", { currentPassword: "not-my-password", newPassword: GOOD_PASSWORD }, ip("203.0.113.81"));
+    const res = await ctx.authed("POST", "/account/password", { currentPassword: "not-my-password", newPassword: GOOD_PASSWORD }, ip("203.0.113.81"));
     expect(res.status).toBe(403);
     expect(await res.json()).toEqual({ success: false, error: "目前的密碼不正確" });
-    expect(ctx.log.lines).toContain(`[admins] ${TEST_ADMIN_EMAIL} 變更自己的密碼失敗：目前的密碼不正確 ${TEST_ADMIN_EMAIL}（來源 203.0.113.81）`);
+    expect(ctx.log.lines).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 變更自己的密碼失敗：目前的密碼不正確 ${TEST_ADMIN_EMAIL}（來源 203.0.113.81）`);
     const logged = ctx.log.lines.join("\n");
     expect(logged).not.toContain("not-my-password");
     expect(logged).not.toContain(GOOD_PASSWORD);
@@ -659,29 +677,29 @@ describe("POST /settings/password（更改「自己」的密碼）", () => {
 
   it("新密碼太短／太長 → 400；和目前的相同 → 400；缺欄位 → 錯誤；都不會改動", async () => {
     const ctx = await makeSettingsApp();
-    const hash = ctx.store.data.admins[0]!.passwordHash;
-    const short = await ctx.authed("POST", "/settings/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: "short" });
+    const hash = ctx.store.data.accounts[0]!.passwordHash;
+    const short = await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: "short" });
     expect(short.status).toBe(400);
     expect(await short.json()).toEqual({ success: false, error: "密碼至少要 10 個字元" });
-    expect((await ctx.authed("POST", "/settings/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: "x".repeat(201) })).status).toBe(400);
-    const same = await ctx.authed("POST", "/settings/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: TEST_ADMIN_PASSWORD });
+    expect((await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: "x".repeat(201) })).status).toBe(400);
+    const same = await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: TEST_ADMIN_PASSWORD });
     expect(same.status).toBe(400);
     expect(await same.json()).toEqual({ success: false, error: "新密碼不能和目前的密碼相同" });
-    expect((await ctx.authed("POST", "/settings/password", { newPassword: GOOD_PASSWORD })).status).toBe(403);
-    expect((await ctx.authed("POST", "/settings/password", { currentPassword: TEST_ADMIN_PASSWORD })).status).toBe(400);
-    expect(ctx.store.data.admins[0]!.passwordHash).toBe(hash);
-    expect(ctx.store.data.admins[0]!.sessionVersion).toBe(1);
+    expect((await ctx.authed("POST", "/account/password", { newPassword: GOOD_PASSWORD })).status).toBe(403);
+    expect((await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD })).status).toBe(400);
+    expect(ctx.store.data.accounts[0]!.passwordHash).toBe(hash);
+    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(1);
   });
 
   it("成功：新密碼可登入、舊密碼不行；自己的 sessionVersion 加一（舊 cookie 失效），目前這個瀏覽器拿到新 cookie；sessionSecret 不動", async () => {
     const ctx = await makeSettingsApp();
     const oldCookie = ctx.sessionCookie();
     const secretBefore = ctx.store.data.sessionSecret;
-    const res = await call(ctx.app, "POST", "/settings/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD }, { cookie: oldCookie });
+    const res = await call(ctx.app, "POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD }, { cookie: oldCookie });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true });
 
-    const me = ctx.store.data.admins[0]!;
+    const me = ctx.store.data.accounts[0]!;
     expect(me.sessionVersion).toBe(2);
     expect(me.updatedAt).toBe(new Date(NOW_MS).toISOString());
     expect(ctx.store.data.sessionSecret).toBe(secretBefore); // 不再換全域的簽章金鑰：其他管理員不受影響
@@ -693,30 +711,30 @@ describe("POST /settings/password（更改「自己」的密碼）", () => {
     const fresh = cookiePair(res);
     expect(decodeURIComponent(fresh.split("=")[1]!).split(".")[2]).toBe("2"); // 新 cookie 帶新的 sessionVersion
     expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: fresh })).status).toBe(200);
-    expect((await call(ctx.app, "POST", "/settings/login", loginBody())).status).toBe(401); // 舊密碼
-    expect((await call(ctx.app, "POST", "/settings/login", loginBody({ password: GOOD_PASSWORD }))).status).toBe(200);
-    expect(ctx.log.lines).toContain(`[admins] ${TEST_ADMIN_EMAIL} 變更自己的密碼 ${TEST_ADMIN_EMAIL}（來源 unknown）`);
+    expect((await call(ctx.app, "POST", "/login", loginBody())).status).toBe(401); // 舊密碼
+    expect((await call(ctx.app, "POST", "/login", loginBody({ password: GOOD_PASSWORD }))).status).toBe(200);
+    expect(ctx.log.lines).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 變更自己的密碼 ${TEST_ADMIN_EMAIL}（來源 unknown）`);
   });
 
   it("只影響自己：其他管理員的登入（cookie）與密碼都不變", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [second()] });
-    const otherCookie = ctx.sessionCookie(adminId(2));
-    const otherHash = ctx.store.data.admins[1]!.passwordHash;
-    const res = await ctx.authed("POST", "/settings/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD });
+    const ctx = await makeSettingsApp({ extraAccounts: [second()] });
+    const otherCookie = ctx.sessionCookie(accountId(2));
+    const otherHash = ctx.store.data.accounts[1]!.passwordHash;
+    const res = await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD });
     expect(res.status).toBe(200);
     expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: otherCookie })).status).toBe(200);
-    expect(ctx.store.data.admins[1]!.passwordHash).toBe(otherHash);
-    expect(ctx.store.data.admins[1]!.sessionVersion).toBe(1);
+    expect(ctx.store.data.accounts[1]!.passwordHash).toBe(otherHash);
+    expect(ctx.store.data.accounts[1]!.sessionVersion).toBe(1);
   });
 
   it("改的是登入者自己的密碼，不是第一位的：第二位登入後改密碼，驗證的是第二位目前的密碼", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [{ ...second(), passwordHash: await auth.hashPassword("second-admin-password-1") }] });
-    const wrong = await ctx.authedAs(adminId(2), "POST", "/settings/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD });
+    const ctx = await makeSettingsApp({ extraAccounts: [{ ...second(), passwordHash: await auth.hashPassword("second-admin-password-1") }] });
+    const wrong = await ctx.authedAs(accountId(2), "POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD });
     expect(wrong.status).toBe(403); // 第一位的密碼不能拿來當第二位的「目前的密碼」
-    const ok = await ctx.authedAs(adminId(2), "POST", "/settings/password", { currentPassword: "second-admin-password-1", newPassword: GOOD_PASSWORD });
+    const ok = await ctx.authedAs(accountId(2), "POST", "/account/password", { currentPassword: "second-admin-password-1", newPassword: GOOD_PASSWORD });
     expect(ok.status).toBe(200);
-    expect(ctx.store.data.admins[0]!.sessionVersion).toBe(1); // 第一位沒被動到
-    expect(ctx.store.data.admins[1]!.sessionVersion).toBe(2);
+    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(1); // 第一位沒被動到
+    expect(ctx.store.data.accounts[1]!.sessionVersion).toBe(2);
   });
 
   it("兩個分頁同時改密碼：後到的因為 sessionVersion 已變而被擋（401），不會把先改的蓋掉", async () => {
@@ -724,22 +742,22 @@ describe("POST /settings/password（更改「自己」的密碼）", () => {
     const cookie = ctx.sessionCookie();
     const body = (n: string) => ({ currentPassword: TEST_ADMIN_PASSWORD, newPassword: `${GOOD_PASSWORD}-${n}` });
     const [a, b] = await Promise.all([
-      call(ctx.app, "POST", "/settings/password", body("a"), { cookie, ...ip("203.0.113.50") }),
-      call(ctx.app, "POST", "/settings/password", body("b"), { cookie, ...ip("203.0.113.51") }),
+      call(ctx.app, "POST", "/account/password", body("a"), { cookie, ...ip("203.0.113.50") }),
+      call(ctx.app, "POST", "/account/password", body("b"), { cookie, ...ip("203.0.113.51") }),
     ]);
     expect([a.status, b.status].sort()).toEqual([200, 401]);
-    expect(ctx.store.data.admins[0]!.sessionVersion).toBe(2);
+    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(2);
   });
 
   it(`和登入共用額度（每 IP 每分鐘 ${LOGIN_RATE_LIMIT_MAX} 次）：用偷來的 cookie 也不能猜目前的密碼猜很多次`, async () => {
     const ctx = await makeSettingsApp();
     for (let i = 0; i < LOGIN_RATE_LIMIT_MAX; i++) {
-      const res = await ctx.authed("POST", "/settings/password", { currentPassword: `wrong-guess-${i}`, newPassword: GOOD_PASSWORD }, ip("203.0.113.40"));
+      const res = await ctx.authed("POST", "/account/password", { currentPassword: `wrong-guess-${i}`, newPassword: GOOD_PASSWORD }, ip("203.0.113.40"));
       expect(res.status).toBe(403);
     }
-    const blocked = await ctx.authed("POST", "/settings/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD }, ip("203.0.113.40"));
+    const blocked = await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD }, ip("203.0.113.40"));
     expect(blocked.status).toBe(429);
-    expect(ctx.store.data.admins[0]!.sessionVersion).toBe(1);
+    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(1);
   });
 });
 
@@ -757,37 +775,60 @@ describe("GET /settings（頁面的狀態）", () => {
     expect(html).not.toContain(TEST_SETUP_CODE);
   });
 
-  it("有管理員、沒登入：登入表單（Email＋密碼），沒有其他表單", async () => {
+  it("有帳號、沒登入：302 導向 /login?next=/settings（不顯示任何設定內容）", async () => {
     const ctx = await makeSettingsApp();
-    const html = await (await ctx.app.request("/settings")).text();
-    expect(html).toContain('id="login-form"');
-    expect(html).toContain('id="login-email"');
-    expect(html).not.toContain('id="line-form"');
-    expect(html).not.toContain('id="setup-form"');
-    expect(html).not.toContain('id="upgrade-form"');
+    for (const path of ["/settings", "/settings/"]) {
+      const res = await ctx.app.request(path);
+      expectRedirectToLogin(res, "/settings");
+      expect(await res.text()).toBe("");
+    }
   });
 
-  it("已登入：設定表單、管理員表格、我的帳號（登入者的姓名與 Email）", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), name: "第二位", email: "second@example.test" })] });
-    const res = await ctx.app.request("/settings", { headers: { cookie: ctx.sessionCookie() } });
+  it("有帳號、登入的是一般使用者：403 的「需要管理員權限」頁（沒有設定內容、沒有帳號清單），帶頂端導覽（回裝箱程式、我的帳號、登出，沒有「設定」連結）", async () => {
+    const USER = accountId(40);
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: USER, name: "一般同事", email: "user@example.test", role: "user" })] });
+    const res = await ctx.app.request("/settings", { headers: { cookie: ctx.sessionCookie(USER) } });
+    expect(res.status).toBe(403);
     const html = await res.text();
-    for (const id of ["line-form", "line-enabled", "line-token", "line-secret", "line-group-id", "line-group-name", "line-test", "webhook-url", "copy-webhook", "admin-table", "admin-add", "admin-editor", "password-form", "logout", "me-name", "me-email"]) {
+    expect(html).toContain("需要管理員權限");
+    expect(html).toContain("一般同事");
+    expect(html).toContain('<span class="who">👤 一般同事（一般使用者）</span>');
+    expect(html).toContain('href="/"');
+    expect(html).toContain('href="/account"');
+    expect(html).toContain('id="logout"');
+    expect(html).not.toContain('href="/settings"');
+    for (const id of ["line-form", "admin-table", "setup-form", "upgrade-form", "login-form"]) expect(html).not.toContain(`id="${id}"`);
+    expect(html).not.toContain(TEST_ADMIN_EMAIL); // 不洩漏其他帳號
+  });
+
+  it("已登入的管理員：設定表單、帳號管理表格；頂端顯示登入者的姓名與角色與導覽（沒有變更密碼表單——那在 /account）", async () => {
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), name: "第二位", email: "second@example.test" })] });
+    const res = await ctx.app.request("/settings", { headers: { cookie: ctx.sessionCookie() } });
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    for (const id of ["line-form", "line-enabled", "line-token", "line-secret", "line-group-id", "line-group-name", "line-test", "webhook-url", "copy-webhook", "admin-table", "admin-add", "admin-editor", "ae-role", "logout"]) {
       expect(html).toContain(`id="${id}"`);
     }
+    expect(html).toContain(`<span class="who">👤 ${TEST_ADMIN_NAME}（管理員）</span>`);
+    expect(html).toContain('href="/account"');
+    expect(html).toContain('href="/"');
     expect(html).toContain(TEST_ADMIN_EMAIL);
     expect(html).toContain("second@example.test");
-    expect(html).not.toContain('id="login-form"');
+    for (const id of ["login-form", "password-form"]) expect(html).not.toContain(`id="${id}"`);
   });
 
   it("所有狀態的 HTML 都帶安全標頭：CSP（script 只允許帶 nonce 的那段）、no-store、nosniff、不可被嵌入、noindex", async () => {
     const fresh = await makeSettingsApp({ withAdmin: false });
     const legacy = await makeSettingsApp({ legacyAdmin: true });
-    const ctx = await makeSettingsApp();
+    const USER = accountId(40);
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: USER, name: "一般同事", email: "user@example.test", role: "user" })] });
     const responses = [
       await fresh.app.request("/settings"),
       await legacy.app.request("/settings"),
-      await ctx.app.request("/settings"),
+      await ctx.app.request("/login"),
       await ctx.app.request("/settings", { headers: { cookie: ctx.sessionCookie() } }),
+      await ctx.app.request("/settings", { headers: { cookie: ctx.sessionCookie(USER) } }), // 403 頁
+      await ctx.app.request("/account", { headers: { cookie: ctx.sessionCookie(USER) } }),
     ];
     for (const res of responses) {
       const csp = res.headers.get("content-security-policy")!;
@@ -814,7 +855,7 @@ describe("GET /settings（頁面的狀態）", () => {
     const ctx = await makeSettingsApp();
     const nonces = new Set<string>();
     for (let i = 0; i < 5; i++) {
-      const csp = (await ctx.app.request("/settings")).headers.get("content-security-policy")!;
+      const csp = (await ctx.app.request("/login")).headers.get("content-security-policy")!;
       nonces.add(/nonce-([^']+)'/.exec(csp)![1]!);
     }
     expect(nonces.size).toBe(5);
@@ -822,7 +863,7 @@ describe("GET /settings（頁面的狀態）", () => {
 
   it("/settings/ 與 /settings 一樣；其他方法回 405 並註明 Allow", async () => {
     const ctx = await makeSettingsApp();
-    expect((await ctx.app.request("/settings/")).status).toBe(200);
+    expect((await ctx.app.request("/settings/", { headers: { cookie: ctx.sessionCookie() } })).status).toBe(200);
     const post = await ctx.app.request("/settings", { method: "POST" });
     expect(post.status).toBe(405);
     expect(post.headers.get("allow")).toBe("GET");
@@ -869,18 +910,18 @@ describe("資料目錄不可用", () => {
   it.each([
     ["POST", "/settings/setup", setupBody()],
     ["POST", "/settings/upgrade", { currentPassword: TEST_ADMIN_PASSWORD, name: "甲", email: "a@example.test" }],
-    ["POST", "/settings/login", loginBody()],
-    ["POST", "/settings/logout", {}],
-    ["POST", "/settings/password", { currentPassword: "x", newPassword: GOOD_PASSWORD }],
+    ["POST", "/login", loginBody()],
+    ["POST", "/logout", {}],
+    ["POST", "/account/password", { currentPassword: "x", newPassword: GOOD_PASSWORD }],
     ["GET", "/api/settings", undefined],
     ["PUT", "/api/settings/line", { enabled: false }],
     ["POST", "/api/settings/line/test", {}],
-    ["GET", "/api/admins", undefined],
-    ["POST", "/api/admins", { name: "甲", email: "a@example.test", password: GOOD_PASSWORD }],
-    ["PATCH", `/api/admins/${TEST_ADMIN_ID}`, { name: "乙" }],
-    ["POST", `/api/admins/${TEST_ADMIN_ID}/password`, { newPassword: GOOD_PASSWORD }],
-    ["POST", `/api/admins/${TEST_ADMIN_ID}/status`, { status: "disabled" }],
-    ["DELETE", `/api/admins/${TEST_ADMIN_ID}`, undefined],
+    ["GET", "/api/accounts", undefined],
+    ["POST", "/api/accounts", { name: "甲", email: "a@example.test", password: GOOD_PASSWORD }],
+    ["PATCH", `/api/accounts/${TEST_ADMIN_ID}`, { name: "乙" }],
+    ["POST", `/api/accounts/${TEST_ADMIN_ID}/password`, { newPassword: GOOD_PASSWORD }],
+    ["POST", `/api/accounts/${TEST_ADMIN_ID}/status`, { status: "disabled" }],
+    ["DELETE", `/api/accounts/${TEST_ADMIN_ID}`, undefined],
   ] as Array<[string, string, unknown]>)("%s %s → 503「請在 Zeabur 掛載 Volume 到 /app/data」", async (method, path, body) => {
     const ctx = await makeSettingsApp({ store: "unavailable" });
     const res = await call(ctx.app, method, path, body);
@@ -889,59 +930,74 @@ describe("資料目錄不可用", () => {
     expect(ctx.calls).toHaveLength(0);
   });
 
-  it("/healthz 回報 dataDirWritable:false；OCR 與環境變數版的 LINE 通知不受影響", async () => {
+  it("/healthz 仍然公開、回報 dataDirWritable:false；整個網站（主頁、登入頁、OCR、存檔、關箱通知）都因為沒有地方存帳號而用不了：主頁導向登入頁、登入頁與 API 回 503（環境變數版的 LINE 通知也一併停擺）", async () => {
     const ctx = await makeSettingsApp({
       store: "unavailable",
       env: { LINE_CHANNEL_ACCESS_TOKEN: "test-line-access-token-123", LINE_GROUP_ID: "C0123456789abcdef0123456789abcdef" },
     });
     const health = (await (await ctx.app.request("/healthz")).json()) as Record<string, unknown>;
-    expect(health).toMatchObject({ dataDirWritable: false, adminConfigured: false, adminCount: 0, legacyAdminPending: false, lineConfigured: true, lineSource: "env" });
-    const notify = await call(ctx.app, "POST", "/api/box-closed", { boxId: "B1", items: [], total: 0, successCount: 0, failedCount: 0 });
-    expect(await notify.json()).toEqual({ success: true, notified: true });
-    expect(ctx.calls.map((c) => c.url)).toEqual(["https://api.line.me/v2/bot/message/push"]);
+    expect(health).toMatchObject({ dataDirWritable: false, adminConfigured: false, adminCount: 0, accountCount: 0, legacyAdminPending: false, lineConfigured: true, lineSource: "env" });
+    expectRedirectToLogin(await ctx.app.request("/"), "/");
+    const login = await ctx.app.request("/login");
+    expect(login.status).toBe(503);
+    expect(await login.text()).toContain("請在 Zeabur 掛載 Volume 到 /app/data");
+    for (const path of ["/api/ocr", "/api/save", "/api/box-closed"]) {
+      const res = await call(ctx.app, "POST", path, { boxId: "B1", items: [], total: 0, successCount: 0, failedCount: 0 });
+      expect(res.status, path).toBe(503);
+      expect(await res.json()).toEqual({ success: false, error: "請在 Zeabur 掛載 Volume 到 /app/data" });
+    }
+    expect(ctx.calls).toHaveLength(0);
   });
 });
 
 describe("請求內容上限與不允許的方法", () => {
-  it("/settings/*、/api/settings/*、/api/admins* 的內容超過 16 KB → 413", async () => {
+  it("/settings/*、/api/settings/*、/api/accounts* 的內容超過 16 KB → 413", async () => {
     const ctx = await makeSettingsApp();
     const big = JSON.stringify({ password: "x".repeat(20 * 1024) });
-    const login = await call(ctx.app, "POST", "/settings/login", big);
+    const login = await call(ctx.app, "POST", "/login", big);
     expect(login.status).toBe(413);
     expect(await login.json()).toEqual({ success: false, error: "請求內容過大" });
     const put = await ctx.authed("PUT", "/api/settings/line", JSON.stringify({ groupId: "C".repeat(20 * 1024) }));
     expect(put.status).toBe(413);
     expect(ctx.store.data.line.groupId).toBe("");
-    const create = await ctx.authed("POST", "/api/admins", JSON.stringify({ name: "甲", email: "a@example.test", password: "x".repeat(20 * 1024) }));
+    const create = await ctx.authed("POST", "/api/accounts", JSON.stringify({ name: "甲", email: "a@example.test", password: "x".repeat(20 * 1024) }));
     expect(create.status).toBe(413);
-    const patch = await ctx.authed("PATCH", `/api/admins/${TEST_ADMIN_ID}`, JSON.stringify({ name: "x".repeat(20 * 1024) }));
+    const patch = await ctx.authed("PATCH", `/api/accounts/${TEST_ADMIN_ID}`, JSON.stringify({ name: "x".repeat(20 * 1024) }));
     expect(patch.status).toBe(413);
-    expect(ctx.store.data.admins).toHaveLength(1);
+    const password = await ctx.authed("POST", "/account/password", JSON.stringify({ currentPassword: "x".repeat(20 * 1024), newPassword: "y" }));
+    expect(password.status).toBe(413);
+    expect((await call(ctx.app, "POST", "/logout", JSON.stringify({ junk: "x".repeat(20 * 1024) }))).status).toBe(413);
+    expect(ctx.store.data.accounts).toHaveLength(1);
   });
 
   it("其他方法一律 405 並註明 Allow", async () => {
     const ctx = await makeSettingsApp();
     const id = TEST_ADMIN_ID;
     const cases: Array<[string, string, string]> = [
-      ["GET", "/settings/login", "POST"],
+      ["PUT", "/login", "GET, POST"],
+      ["DELETE", "/login", "GET, POST"],
+      ["GET", "/logout", "POST"],
+      ["POST", "/api/me", "GET"],
+      ["PUT", "/account", "GET"],
+      ["POST", "/account", "GET"],
       ["GET", "/settings/setup", "POST"],
       ["GET", "/settings/upgrade", "POST"],
-      ["PUT", "/settings/logout", "POST"],
-      ["GET", "/settings/password", "POST"],
+      ["PUT", "/logout", "POST"],
+      ["GET", "/account/password", "POST"],
       ["POST", "/api/settings", "GET"],
       ["DELETE", "/api/settings", "GET"],
       ["GET", "/api/settings/line", "PUT"],
       ["POST", "/api/settings/line", "PUT"],
       ["GET", "/api/settings/line/test", "POST"],
-      ["PUT", "/api/admins", "GET, POST"],
-      ["DELETE", "/api/admins", "GET, POST"],
-      ["GET", `/api/admins/${id}`, "PATCH, DELETE"],
-      ["PUT", `/api/admins/${id}`, "PATCH, DELETE"],
-      ["POST", `/api/admins/${id}`, "PATCH, DELETE"],
-      ["GET", `/api/admins/${id}/password`, "POST"],
-      ["PUT", `/api/admins/${id}/password`, "POST"],
-      ["GET", `/api/admins/${id}/status`, "POST"],
-      ["DELETE", `/api/admins/${id}/status`, "POST"],
+      ["PUT", "/api/accounts", "GET, POST"],
+      ["DELETE", "/api/accounts", "GET, POST"],
+      ["GET", `/api/accounts/${id}`, "PATCH, DELETE"],
+      ["PUT", `/api/accounts/${id}`, "PATCH, DELETE"],
+      ["POST", `/api/accounts/${id}`, "PATCH, DELETE"],
+      ["GET", `/api/accounts/${id}/password`, "POST"],
+      ["PUT", `/api/accounts/${id}/password`, "POST"],
+      ["GET", `/api/accounts/${id}/status`, "POST"],
+      ["DELETE", `/api/accounts/${id}/status`, "POST"],
     ];
     for (const [method, path, allow] of cases) {
       const res = await ctx.app.request(path, { method, headers: { cookie: ctx.sessionCookie() } });
@@ -955,21 +1011,22 @@ describe("狀態變更端點都有統一的 CSRF 檢查（走訪 app.routes，�
   const MUTATING = [
     "POST /settings/setup",
     "POST /settings/upgrade",
-    "POST /settings/login",
-    "POST /settings/logout",
-    "POST /settings/password",
+    "POST /login",
+    "POST /logout",
+    "POST /account/password",
     "PUT /api/settings/line",
     "POST /api/settings/line/test",
-    "POST /api/admins",
-    "PATCH /api/admins/:id",
-    "POST /api/admins/:id/password",
-    "POST /api/admins/:id/status",
-    "DELETE /api/admins/:id",
+    "POST /api/accounts",
+    "PATCH /api/accounts/:id",
+    "POST /api/accounts/:id/password",
+    "POST /api/accounts/:id/status",
+    "DELETE /api/accounts/:id",
   ];
   const isSettingsPath = (path: string) =>
-    path === "/settings" || path.startsWith("/settings/") || path === "/api/settings" || path.startsWith("/api/settings/") || path === "/api/admins" || path.startsWith("/api/admins/");
+    path === "/settings" || path.startsWith("/settings/") || path === "/api/settings" || path.startsWith("/api/settings/") || path === "/api/accounts" || path.startsWith("/api/accounts/") ||
+    path === "/login" || path === "/logout" || path === "/account" || path.startsWith("/account/");
 
-  it("設定相關的非 GET 路由就是這 12 條——新增端點時請用 mutate() 註冊並更新這張清單", async () => {
+  it("設定、登入與帳號相關的非 GET 路由就是這 12 條——新增端點時請用 mutate() 註冊並更新這張清單", async () => {
     const ctx = await makeSettingsApp();
     // app.post(path, guard, handler) 會在 routes 裡留下兩筆（中介層與處理器），所以先去重
     const found = [...new Set(ctx.app.routes.filter((r) => isSettingsPath(r.path) && !["GET", "ALL"].includes(r.method)).map((r) => `${r.method} ${r.path}`))].sort();
@@ -978,8 +1035,8 @@ describe("狀態變更端點都有統一的 CSRF 檢查（走訪 app.routes，�
 
   it.each(MUTATING)("%s：沒帶 Content-Type／X-Requested-With 的請求一律被擋（415），而且什麼都沒發生", async (route) => {
     const [method, pattern] = route.split(" ") as [string, string];
-    const path = pattern.replace(":id", adminId(2));
-    const ctx = await makeSettingsApp({ handler: lineHandler(), extraAdmins: [makeAccount({ id: adminId(2), email: "second@example.test" })] });
+    const path = pattern.replace(":id", accountId(2));
+    const ctx = await makeSettingsApp({ handler: lineHandler(), extraAccounts: [makeAccount({ id: accountId(2), email: "second@example.test" })] });
     const before = await readFile(join(ctx.dir, SETTINGS_FILE_NAME), "utf8");
     const res = await ctx.app.request(path, {
       method,
@@ -994,13 +1051,13 @@ describe("狀態變更端點都有統一的 CSRF 檢查（走訪 app.routes，�
 
   it("這些端點的回應都帶 nosniff 與 no-store（含錯誤回應）", async () => {
     const ctx = await makeSettingsApp();
-    const ok = await call(ctx.app, "POST", "/settings/login", loginBody());
-    const bad = await call(ctx.app, "POST", "/settings/login", loginBody({ password: "wrong-password-123" }));
+    const ok = await call(ctx.app, "POST", "/login", loginBody());
+    const bad = await call(ctx.app, "POST", "/login", loginBody({ password: "wrong-password-123" }));
     for (const res of [ok, bad]) {
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");
       expect(res.headers.get("cache-control")).toBe("no-store");
     }
-    for (const path of ["/api/settings", "/api/admins"]) {
+    for (const path of ["/api/settings", "/api/accounts"]) {
       const get = await ctx.authed("GET", path);
       expect(get.headers.get("x-content-type-options")).toBe("nosniff");
       expect(get.headers.get("cache-control")).toBe("no-store");
@@ -1011,25 +1068,37 @@ describe("狀態變更端點都有統一的 CSRF 檢查（走訪 app.routes，�
 describe("安全相關事件的 log（留下暴力破解的足跡，但絕不帶密碼或設定碼）", () => {
   it("登入失敗與成功都有一行 log，帶 Email 與來源 IP", async () => {
     const ctx = await makeSettingsApp();
-    await call(ctx.app, "POST", "/settings/login", loginBody({ password: "my-wrong-guess-123" }), ip("203.0.113.77"));
-    await call(ctx.app, "POST", "/settings/login", loginBody(), ip("203.0.113.78"));
-    expect(ctx.log.lines).toContain(`[admins] ${TEST_ADMIN_EMAIL} 登入失敗（來源 203.0.113.77）`);
-    expect(ctx.log.lines).toContain(`[admins] ${TEST_ADMIN_EMAIL} 登入成功（來源 203.0.113.78）`);
+    await call(ctx.app, "POST", "/login", loginBody({ password: "my-wrong-guess-123" }), ip("203.0.113.77"));
+    await call(ctx.app, "POST", "/login", loginBody(), ip("203.0.113.78"));
+    expect(ctx.log.lines).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 登入失敗（來源 203.0.113.77）`);
+    expect(ctx.log.lines).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 登入成功（來源 203.0.113.78）`);
     const logged = ctx.log.lines.join("\n");
     expect(logged).not.toContain("my-wrong-guess-123");
     expect(logged).not.toContain(TEST_ADMIN_PASSWORD);
   });
 
+  it("失敗的安全事件用 warn 等級、成功的用 info（登入、設定碼）", async () => {
+    const ctx = await makeSettingsApp();
+    await call(ctx.app, "POST", "/login", loginBody({ password: "my-wrong-guess-123" }), ip("203.0.113.77"));
+    await call(ctx.app, "POST", "/login", loginBody(), ip("203.0.113.78"));
+    expect(ctx.log.warns).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 登入失敗（來源 203.0.113.77）`);
+    expect(ctx.log.warns).not.toContain(`[accounts] ${TEST_ADMIN_EMAIL} 登入成功（來源 203.0.113.78）`);
+    expect(ctx.log.lines).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 登入成功（來源 203.0.113.78）`);
+    const fresh = await makeSettingsApp({ withAdmin: false });
+    await call(fresh.app, "POST", "/settings/setup", setupBody({ setupCode: "WRONG-CODE-GUESS" }), ip("203.0.113.80"));
+    expect(fresh.log.warns).toContain("[accounts] （尚未有帳號） 建立第一位管理員失敗：設定碼不正確（來源 203.0.113.80）");
+  });
+
   it("查無帳號、停用帳號的失敗也記（記的是填的 Email，格式不對的一律記固定佔位字串，不會把任意字串寫進 log）", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), email: "disabled@example.test", status: "disabled" })] });
-    await call(ctx.app, "POST", "/settings/login", { email: "  Nobody@Example.TEST ", password: "guess-password-1" }, ip("203.0.113.70"));
-    await call(ctx.app, "POST", "/settings/login", { email: "disabled@example.test", password: TEST_ADMIN_PASSWORD }, ip("203.0.113.71"));
-    await call(ctx.app, "POST", "/settings/login", { email: "evil\nINJECTED log line", password: "guess-password-2" }, ip("203.0.113.72"));
-    await call(ctx.app, "POST", "/settings/login", { email: { a: 1 }, password: "guess-password-3" }, ip("203.0.113.73"));
-    expect(ctx.log.lines).toContain("[admins] nobody@example.test 登入失敗（來源 203.0.113.70）");
-    expect(ctx.log.lines).toContain("[admins] disabled@example.test 登入失敗（來源 203.0.113.71）");
-    expect(ctx.log.lines).toContain("[admins] （格式不正確的 Email） 登入失敗（來源 203.0.113.72）");
-    expect(ctx.log.lines).toContain("[admins] （格式不正確的 Email） 登入失敗（來源 203.0.113.73）");
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), email: "disabled@example.test", status: "disabled" })] });
+    await call(ctx.app, "POST", "/login", { email: "  Nobody@Example.TEST ", password: "guess-password-1" }, ip("203.0.113.70"));
+    await call(ctx.app, "POST", "/login", { email: "disabled@example.test", password: TEST_ADMIN_PASSWORD }, ip("203.0.113.71"));
+    await call(ctx.app, "POST", "/login", { email: "evil\nINJECTED log line", password: "guess-password-2" }, ip("203.0.113.72"));
+    await call(ctx.app, "POST", "/login", { email: { a: 1 }, password: "guess-password-3" }, ip("203.0.113.73"));
+    expect(ctx.log.lines).toContain("[accounts] nobody@example.test 登入失敗（來源 203.0.113.70）");
+    expect(ctx.log.lines).toContain("[accounts] disabled@example.test 登入失敗（來源 203.0.113.71）");
+    expect(ctx.log.lines).toContain("[accounts] （格式不正確的 Email） 登入失敗（來源 203.0.113.72）");
+    expect(ctx.log.lines).toContain("[accounts] （格式不正確的 Email） 登入失敗（來源 203.0.113.73）");
     const logged = ctx.log.lines.join("\n");
     expect(logged).not.toContain("INJECTED");
     for (const secret of ["guess-password-1", "guess-password-2", "guess-password-3", TEST_ADMIN_PASSWORD]) expect(logged).not.toContain(secret);
@@ -1039,7 +1108,7 @@ describe("安全相關事件的 log（留下暴力破解的足跡，但絕不帶
   it("設定碼錯誤也有 log（沒有設定碼、沒有密碼）", async () => {
     const ctx = await makeSettingsApp({ withAdmin: false });
     await call(ctx.app, "POST", "/settings/setup", setupBody({ setupCode: "WRONG-CODE-GUESS" }), ip("203.0.113.80"));
-    expect(ctx.log.lines).toContain("[admins] （尚未有帳號） 建立第一位管理員失敗：設定碼不正確（來源 203.0.113.80）");
+    expect(ctx.log.lines).toContain("[accounts] （尚未有帳號） 建立第一位管理員失敗：設定碼不正確（來源 203.0.113.80）");
     const logged = ctx.log.lines.join("\n");
     expect(logged).not.toContain("WRONG-CODE-GUESS");
     expect(logged).not.toContain(GOOD_PASSWORD);
@@ -1047,9 +1116,9 @@ describe("安全相關事件的 log（留下暴力破解的足跡，但絕不帶
 
   it("被限流擋下的請求不再寫 log（洪水不會灌爆 log）", async () => {
     const ctx = await makeSettingsApp();
-    for (let i = 0; i < LOGIN_RATE_LIMIT_MAX; i++) await call(ctx.app, "POST", "/settings/login", loginBody({ password: "wrong-password-123" }), ip("203.0.113.90"));
+    for (let i = 0; i < LOGIN_RATE_LIMIT_MAX; i++) await call(ctx.app, "POST", "/login", loginBody({ password: "wrong-password-123" }), ip("203.0.113.90"));
     const linesBefore = ctx.log.lines.length;
-    for (let i = 0; i < 20; i++) expect((await call(ctx.app, "POST", "/settings/login", loginBody({ password: "wrong-password-123" }), ip("203.0.113.90"))).status).toBe(429);
+    for (let i = 0; i < 20; i++) expect((await call(ctx.app, "POST", "/login", loginBody({ password: "wrong-password-123" }), ip("203.0.113.90"))).status).toBe(429);
     expect(ctx.log.lines.length).toBe(linesBefore);
   });
 });
@@ -1059,7 +1128,7 @@ describe("scrypt 的並行上限（PasswordGate）：公開端點被灌請求也
     expect([PASSWORD_GATE_MAX_ACTIVE, PASSWORD_GATE_MAX_QUEUE]).toEqual([2, 16]);
     const ctx = await makeSettingsApp();
     const responses = await Promise.all(
-      Array.from({ length: 60 }, (_, i) => call(ctx.app, "POST", "/settings/login", loginBody({ password: `wrong-password-${i}` }), ip(`198.51.100.${i + 1}`))),
+      Array.from({ length: 60 }, (_, i) => call(ctx.app, "POST", "/login", loginBody({ password: `wrong-password-${i}` }), ip(`198.51.100.${i + 1}`))),
     );
     const statuses = responses.map((r) => r.status);
     expect(statuses.every((st) => st === 401 || st === 429)).toBe(true);
@@ -1068,15 +1137,17 @@ describe("scrypt 的並行上限（PasswordGate）：公開端點被灌請求也
     expect(statuses.filter((st) => st === 429).length).toBeGreaterThanOrEqual(60 - PASSWORD_GATE_MAX_ACTIVE - PASSWORD_GATE_MAX_QUEUE);
     const rejected = responses.find((r) => r.status === 429)!;
     expect(await rejected.json()).toEqual({ success: false, error: "目前驗證請求過多，請稍後再試" });
+    expect(rejected.headers.get("retry-after")).toBe("1"); // 和逐 IP 限流的 429 一樣，告訴呼叫端過幾秒再試
     // 洪水過後恢復正常：名額都有歸還
-    expect((await call(ctx.app, "POST", "/settings/login", loginBody(), ip("198.51.100.200"))).status).toBe(200);
+    expect((await call(ctx.app, "POST", "/login", loginBody(), ip("198.51.100.200"))).status).toBe(200);
   });
 });
 
 describe("不是 HTTPS 時的警告與 /healthz 的 requestIsHttps", () => {
   const BANNER = 'id="insecure-notice"';
+  /** 登入頁（沒帶 authed 時是 /login，因為有帳號又沒登入的 /settings 會被導向）或設定頁。 */
   const page = async (ctx: Awaited<ReturnType<typeof makeSettingsApp>>, headers: Record<string, string>, authed = false) =>
-    (await ctx.app.request("/settings", { headers: { ...(authed ? { cookie: ctx.sessionCookie() } : {}), ...headers } })).text();
+    (await ctx.app.request(authed ? "/settings" : ctx.store.data.accounts.length > 0 ? "/login" : "/settings", { headers: { ...(authed ? { cookie: ctx.sessionCookie() } : {}), ...headers } })).text();
 
   it("公開網域上的明文 http：登入頁、建立管理員頁、升級頁、設定頁都在頂端顯示警告", async () => {
     const ctx = await makeSettingsApp();
@@ -1122,14 +1193,14 @@ describe("/healthz 的管理員欄位", () => {
   });
 
   it("有管理員：adminConfigured（至少一位啟用中）、adminCount（含停用的）、legacyAdminPending false", async () => {
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: adminId(2), email: "b@example.test", status: "disabled" })] });
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), email: "b@example.test", status: "disabled" })] });
     expect(await health(ctx)).toMatchObject({ adminConfigured: true, adminCount: 2, legacyAdminPending: false });
   });
 
   it("全部管理員都停用（只可能是手動編輯檔案）：adminConfigured false、adminCount 仍計入", async () => {
     const ctx = await makeSettingsApp();
     await ctx.store.update((draft) => {
-      draft.admins[0]!.status = "disabled";
+      draft.accounts[0]!.status = "disabled";
     });
     expect(await health(ctx)).toMatchObject({ adminConfigured: false, adminCount: 1, legacyAdminPending: false });
   });

@@ -30,15 +30,18 @@ export type ServiceErrorStatus = 400 | 401 | 403 | 404 | 409 | 413 | 415 | 429 |
  *
  * - status：HTTP 狀態碼（4xx＝呼叫端的問題，5xx＝伺服器或上游的問題）。
  * - message：給使用者看的繁中訊息。**絕對不可**放金鑰、憑證、上游原始回應內文——
- *   除了 /settings 與 /api/settings* 之外，這個服務沒有登入機制，任何人都看得到這些訊息。
+ *   登入之後每一位使用者（含一般使用者）都看得到這些訊息，登入頁、/healthz 與 LINE webhook 的訊息更是任何人都看得到。
  */
 export class ServiceError extends Error {
   readonly status: ServiceErrorStatus;
+  /** 有值就會在回應帶 `Retry-After`（秒）：叫呼叫端過幾秒再試（429 用）。 */
+  readonly retryAfterSeconds: number | undefined;
 
-  constructor(status: ServiceErrorStatus, message: string) {
+  constructor(status: ServiceErrorStatus, message: string, options: { retryAfterSeconds?: number } = {}) {
     super(message);
     this.name = "ServiceError";
     this.status = status;
+    this.retryAfterSeconds = options.retryAfterSeconds;
   }
 }
 

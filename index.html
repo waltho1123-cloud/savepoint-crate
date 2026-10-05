@@ -68,6 +68,34 @@ body {
 }
 .header-actions { display: flex; gap: 8px; }
 
+/* ===== 使用者列：登入者、我的帳號、設定（管理員）、登出 ===== */
+.userbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px 14px;
+  padding: 6px 16px;
+  font-size: .82rem;
+  color: var(--text-muted);
+  background: rgba(255,255,255,.6);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.userbar[hidden], .userbar a[hidden] { display: none; }
+.userbar #userbar-user { font-weight: 600; color: var(--text); }
+.userbar a { color: var(--primary-dark); font-weight: 600; text-decoration: none; }
+.userbar a:hover { text-decoration: underline; }
+.userbar button {
+  border: 1px solid var(--border-subtle);
+  background: var(--card-solid);
+  color: var(--text);
+  border-radius: var(--radius-sm);
+  padding: 3px 12px;
+  font-size: .8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
 /* ===== Buttons — Soft UI ===== */
 .btn {
   display: inline-flex;
@@ -568,6 +596,13 @@ body {
 </head>
 <body>
 
+<div class="userbar no-print" id="userbar" hidden>
+  <span id="userbar-user"></span>
+  <a href="/account">我的帳號</a>
+  <a href="/settings" id="userbar-settings" hidden>設定</a>
+  <button type="button" id="userbar-logout">登出</button>
+</div>
+
 <header class="header">
   <h1>IPAS 庫存盤點裝箱系統</h1>
   <div class="header-actions">
@@ -864,6 +899,35 @@ const CameraEngine = {
   }
 };
 
+// ========== ApiClient (所有 /api 請求共用：帶 CSRF 標頭 X-Requested-With；回 401＝登入過期，導回登入頁) ==========
+const ApiClient = {
+  expired: false,
+
+  // 沒登入或登入過期：導到登入頁，登入後回到目前這一頁。箱子的資料都在 localStorage，不受影響。
+  toLogin() {
+    this.expired = true;
+    location.href = '/login?next=' + encodeURIComponent(location.pathname);
+  },
+
+  async request(url, init) {
+    const resp = await fetch(url, init);
+    if (resp.status === 401) this.toLogin();
+    return resp;
+  },
+
+  post(url, payload) {
+    return this.request(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+      body: JSON.stringify(payload)
+    });
+  },
+
+  get(url) {
+    return this.request(url, { headers: { 'X-Requested-With': 'XMLHttpRequest' } });
+  }
+};
+
 // ========== OCREngine (後端 /api/ocr → OpenAI Vision) ==========
 const OCREngine = {
   WEBHOOK_URL: '/api/ocr',
@@ -871,11 +935,7 @@ const OCREngine = {
   async recognize(imageDataUrl, boxId) {
     if (!imageDataUrl) return null;
     try {
-      const resp = await fetch(this.WEBHOOK_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ barcode: '', boxId: boxId || '', image: imageDataUrl })
-      });
+      const resp = await ApiClient.post(this.WEBHOOK_URL, { barcode: '', boxId: boxId || '', image: imageDataUrl });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const result = await resp.json();
       if (result.success && result.data) return result.data;
@@ -916,17 +976,14 @@ const SaveEngine = {
           quantity: item.qty || 1,
           time: timeStr
         };
-        const resp = await fetch(this.SAVE_URL, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
+        const resp = await ApiClient.post(this.SAVE_URL, payload);
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         const result = await resp.json();
         results.push({ barcode: item.barcode, success: result.success });
       } catch (e) {
         console.error('Save error for', item.barcode, e);
         results.push({ barcode: item.barcode, success: false, error: e.message });
+        if (ApiClient.expired) break; // 登入過期：頁面正在導向登入頁，別再對後面每一筆重複送
       }
     }
 
@@ -964,11 +1021,7 @@ const NotifyEngine = {
       const total = saveResult && typeof saveResult.total === 'number' ? saveResult.total : items.length;
       const successCount = saveResult && typeof saveResult.successCount === 'number' ? saveResult.successCount : 0;
       const failedCount = saveResult && typeof saveResult.failCount === 'number' ? saveResult.failCount : total - successCount;
-      const resp = await fetch(this.NOTIFY_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ boxId: box.id, closedAt: new Date().toISOString(), items, total, successCount, failedCount })
-      });
+      const resp = await ApiClient.post(this.NOTIFY_URL, { boxId: box.id, closedAt: new Date().toISOString(), items, total, successCount, failedCount });
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
       const result = await resp.json();
       if (result.notified === false && result.reason === 'push_failed') {
@@ -977,6 +1030,49 @@ const NotifyEngine = {
     } catch (e) {
       console.error('LINE notify error:', e);
     }
+  }
+};
+
+// ========== CloseFlow (關箱的同步流程：先確認登入還有效，再同步到商品主檔；登入過期時整個中止，箱子保持開啟) ==========
+const CloseFlow = {
+  // 送出任何一筆之前先問伺服器「我還登入著嗎」：過期（401）時 ApiClient 已經在導向登入頁，這裡回 false。
+  // 網路斷線或伺服器錯誤不算過期（回 true）：照原本的流程走，同步失敗會顯示在提示裡，箱子仍然完成。
+  async sessionAlive() {
+    try {
+      await ApiClient.get('/api/me');
+    } catch (e) {
+      console.error('Session check failed:', e);
+    }
+    return !ApiClient.expired;
+  },
+
+  // 回傳 { proceed, saveResult }：
+  //   proceed=false：登入過期（頁面正在導向登入頁），箱子保持開啟、沒有任何「已完成」的提示；登入後再按一次「完成此箱」。
+  //   proceed=true：其他任何結果（全部成功、部分失敗、全部失敗、同步丟例外）都照原本的行為完成這個箱子。
+  //   saveResult：SaveEngine.saveBoxItems 的回傳；它丟例外時是 null（關箱通知用）。
+  async sync(box) {
+    if (!(await this.sessionAlive())) return { proceed: false, saveResult: null };
+    showToast('正在同步到商品主檔…', '');
+    let saveResult = null;
+    let saveError = null;
+    try {
+      saveResult = await SaveEngine.saveBoxItems(box);
+    } catch (e) {
+      saveError = e;
+    }
+    // 同步途中登入過期：不要把箱子鎖起來卻沒同步完（頁面正在導向登入頁，提示也來不及看）。
+    if (ApiClient.expired) return { proceed: false, saveResult };
+    if (saveError) {
+      console.error('Save failed:', saveError);
+      showToast('同步發生錯誤：' + saveError.message, 'error');
+    } else if (saveResult.success) {
+      showToast(`已同步 ${saveResult.successCount} 筆到商品主檔 ✓`, 'success');
+    } else if (saveResult.successCount > 0) {
+      showToast(`部分同步：${saveResult.successCount}/${saveResult.total} 筆成功`, 'error');
+    } else {
+      showToast('同步失敗，但箱號仍會完成', 'error');
+    }
+    return { proceed: true, saveResult };
   }
 };
 
@@ -1094,26 +1190,12 @@ document.getElementById('btn-close-box').addEventListener('click', () => {
   showDialog('完成裝箱確認', `確定要完成箱號 ${box.id} 嗎？（共 ${box.items.length} 種商品，${totalQty} 件）\n完成後將同步到 Google Sheets 並鎖定此箱。`, async () => {
     CameraEngine.stop(document.getElementById('camera-video'));
 
-    // Save to Google Sheets via n8n
-    showToast('正在同步到商品主檔…', '');
-    let notifySaveResult = null; // 關箱通知用；saveBoxItems 丟例外時維持 null
-    try {
-      const saveResult = await SaveEngine.saveBoxItems(box);
-      notifySaveResult = saveResult;
-      if (saveResult.success) {
-        showToast(`已同步 ${saveResult.successCount} 筆到商品主檔 ✓`, 'success');
-      } else if (saveResult.successCount > 0) {
-        showToast(`部分同步：${saveResult.successCount}/${saveResult.total} 筆成功`, 'error');
-      } else {
-        showToast('同步失敗，但箱號仍會完成', 'error');
-      }
-    } catch (e) {
-      console.error('Save failed:', e);
-      showToast('同步發生錯誤：' + e.message, 'error');
-    }
+    // 同步到商品主檔（Google Sheets）。登入已過期時什麼都不做、箱子保持開啟（頁面正在導向登入頁，登入後再按一次「完成此箱」）。
+    const outcome = await CloseFlow.sync(box);
+    if (!outcome.proceed) return;
 
     // 關箱通知（LINE 群組）：不等回應、失敗不影響關箱
-    NotifyEngine.boxClosed(box, notifySaveResult);
+    NotifyEngine.boxClosed(box, outcome.saveResult);
 
     BoxManager.closeBox(box.id);
     showToast('箱號 ' + box.id + ' 已完成', 'success');
@@ -1688,6 +1770,33 @@ function escHtml(s) {
   // 同時跳脫引號：這個函式也用在 value="…" 這類屬性值裡，品名或顏色含 " 或 ' 時才不會截斷欄位或注入屬性。
   return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
+
+// ========== UserBar (頂端使用者列：GET /api/me → 「👤 姓名（角色）」、我的帳號、設定（管理員）、登出) ==========
+const UserBar = {
+  ROLE_LABELS: { admin: '管理員', user: '一般使用者' },
+
+  async init() {
+    try {
+      const resp = await ApiClient.get('/api/me');
+      if (!resp.ok) return; // 401 已由 ApiClient 導向登入頁
+      const result = await resp.json();
+      const me = result && result.data;
+      if (!me || typeof me.name !== 'string') return;
+      document.getElementById('userbar-user').textContent = '👤 ' + me.name + '（' + (this.ROLE_LABELS[me.role] || me.role) + '）';
+      document.getElementById('userbar-settings').hidden = me.role !== 'admin';
+      document.getElementById('userbar').hidden = false;
+    } catch (e) {
+      console.error('讀取登入者資訊失敗:', e);
+    }
+  },
+
+  async logout() {
+    try { await ApiClient.post('/logout', {}); } catch (e) { console.error('登出失敗:', e); }
+    location.href = '/login';
+  }
+};
+document.getElementById('userbar-logout').addEventListener('click', () => UserBar.logout());
+UserBar.init();
 
 // ========== Init ==========
 renderAll();

@@ -98,7 +98,7 @@ describe("scripts/docker-entrypoint.sh（以假的 id／find／chown／su-exec �
     expect(calls.some((l) => l.startsWith("su-exec"))).toBe(true);
   });
 
-  it("root 啟動、建不了資料目錄（上層是一般檔案）：只印警告，不退出——照樣降權並執行原本的指令（OCR、存檔不能被設定頁的 Volume 問題拖垮）", async () => {
+  it("root 啟動、建不了資料目錄（上層是一般檔案）：只印警告，不退出——照樣降權並執行原本的指令（容器要起得來，/healthz 才看得到原因；網站本身會因為沒地方存帳號而回 503）", async () => {
     const fakes = await makeFakes();
     const root = await makeTempDir();
     const blocker = join(root, "file");
@@ -107,6 +107,8 @@ describe("scripts/docker-entrypoint.sh（以假的 id／find／chown／su-exec �
     expect(result.status).toBe(0);
     expect(result.stderr).toContain("警告");
     expect(result.stderr).toContain("無法建立 DATA_DIR");
+    expect(result.stderr).toContain("整個網站（登入、裝箱程式、設定頁）會回 503"); // 全站登入之後，沒有資料目錄＝沒有地方存帳號，不是只有設定頁受影響
+    expect(result.stderr).toContain("/healthz 與 LINE webhook 不受影響");
     expect(result.stdout).toContain("final uid=10001");
     const calls = (await readFile(fakes.log, "utf8")).trim().split("\n");
     expect(calls.some((l) => l.startsWith("chown"))).toBe(false); // 目錄都沒有，不用 chown
@@ -120,6 +122,7 @@ describe("scripts/docker-entrypoint.sh（以假的 id／find／chown／su-exec �
     expect(result.status).toBe(0);
     expect(result.stderr).toContain("警告");
     expect(result.stderr).toContain("無法修正 DATA_DIR");
+    expect(result.stderr).toContain("整個網站（登入、裝箱程式、設定頁）回 503");
     expect(result.stdout).toContain("final uid=10001");
   });
 
@@ -150,10 +153,11 @@ describe("scripts/docker-entrypoint.sh（以假的 id／find／chown／su-exec �
     expect(result.status).toBe(0);
     expect(result.stderr).toContain("警告");
     expect(result.stderr).toContain("不可寫");
+    expect(result.stderr).toContain("整個網站（登入、裝箱程式、設定頁）會回 503");
     expect(result.stdout).toContain("final uid=10001");
   });
 
-  it.skipIf(isRoot)("非 root 啟動、資料目錄唯讀：印警告但不退出（node 端會自己停用設定頁）", async () => {
+  it.skipIf(isRoot)("非 root 啟動、資料目錄唯讀：印警告但不退出（node 端會自己讓整個網站回 503）", async () => {
     const fakes = await makeFakes();
     const dataDir = await makeTempDir();
     await chmod(dataDir, 0o500);

@@ -6,7 +6,7 @@ import { OCR_RATE_LIMIT_MAX, SETTINGS_API_RATE_LIMIT_MAX } from "../src/app.js";
 import { TEST_PUSH_RATE_LIMIT_MAX } from "../src/settings-routes.js";
 import { SETTINGS_FILE_NAME } from "../src/settings-store.js";
 import { TEST_GROUP_ID, TEST_LINE_SECRET, TEST_LINE_TOKEN } from "./helpers.js";
-import { adminId, call, cleanupTempDirs, lineHandler, makeAccount, makeSettingsApp, NOW_MS, type SettingsApp } from "./settings-helpers.js";
+import { accountId, call, cleanupTempDirs, lineHandler, makeAccount, makeSettingsApp, NOW_MS, type SettingsApp } from "./settings-helpers.js";
 
 afterEach(async () => {
   vi.restoreAllMocks();
@@ -115,13 +115,13 @@ describe("GET /api/settings", () => {
 
 describe("PUT /api/settings/line", () => {
   it("處理期間操作者被停用 → 401，LINE 設定不變、沒有「更新了 LINE 設定」的 log（鎖內重新確認操作者）", async () => {
-    const SECOND = adminId(2);
-    const ctx = await makeSettingsApp({ extraAdmins: [makeAccount({ id: SECOND, name: "第二位", email: "second@example.test" })] });
+    const SECOND = accountId(2);
+    const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: SECOND, name: "第二位", email: "second@example.test" })] });
     await seedLine(ctx);
     const realUpdate = ctx.store.update.bind(ctx.store);
     vi.spyOn(ctx.store, "update").mockImplementationOnce(async (mutator) => {
       await realUpdate((draft) => {
-        draft.admins[1]!.status = "disabled"; // 操作者在讀完請求內容之後、寫檔之前被停用
+        draft.accounts[1]!.status = "disabled"; // 操作者在讀完請求內容之後、寫檔之前被停用
       });
       return realUpdate(mutator);
     });
@@ -453,18 +453,18 @@ describe("PUT /api/settings/line", () => {
   it("未知的欄位被忽略（不能偷偷改 groupName、管理員帳號、sessionSecret）", async () => {
     const ctx = await makeSettingsApp({ handler: lineHandler() });
     const secretBefore = ctx.store.data.sessionSecret;
-    const adminsBefore = JSON.stringify(ctx.store.data.admins);
+    const adminsBefore = JSON.stringify(ctx.store.data.accounts);
     const res = await ctx.authed("PUT", "/api/settings/line", {
       groupName: "我自己亂填的名稱",
       admin: { passwordHash: "scrypt$x" },
-      admins: [{ id: "f".repeat(32), name: "偷塞的管理員", email: "evil@example.test", passwordHash: "scrypt$x", status: "active", sessionVersion: 1 }],
+      accounts: [{ id: "f".repeat(32), name: "偷塞的管理員", email: "evil@example.test", passwordHash: "scrypt$x", status: "active", sessionVersion: 1 }],
       sessionSecret: "f".repeat(64),
       lineCaptured: [{ groupId: "Cevil" }],
     });
     expect(res.status).toBe(200);
     expect(ctx.store.data.line.groupName).toBe("");
     expect(ctx.store.data.sessionSecret).toBe(secretBefore);
-    expect(JSON.stringify(ctx.store.data.admins)).toBe(adminsBefore);
+    expect(JSON.stringify(ctx.store.data.accounts)).toBe(adminsBefore);
     expect(ctx.store.data.admin).toBeNull();
     expect(ctx.store.data.lineCaptured).toEqual([]);
   });
@@ -590,38 +590,38 @@ describe("/api/settings* 的限流額度（有自己的桶，與 OCR 互不擠�
     for (let i = 0; i < SETTINGS_API_RATE_LIMIT_MAX; i++) expect((await ctx.authed("GET", "/api/settings", undefined, ip)).status).toBe(200);
     expect((await ctx.authed("GET", "/api/settings", undefined, ip)).status).toBe(429);
     // OCR 額度是另一個桶：還沒被用過（缺 image 回 400，不是 429）
-    const ocr = await call(ctx.app, "POST", "/api/ocr", {}, ip);
+    const ocr = await ctx.authed("POST", "/api/ocr", {}, ip);
     expect(ocr.status).toBe(400);
   });
 
   it("反過來：OCR 額度用完，設定 API 不受影響", async () => {
     const ctx = await makeSettingsApp();
     const ip = { "x-forwarded-for": "203.0.113.61" };
-    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) await call(ctx.app, "POST", "/api/ocr", {}, ip);
-    expect((await call(ctx.app, "POST", "/api/ocr", {}, ip)).status).toBe(429);
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) await ctx.authed("POST", "/api/ocr", {}, ip);
+    expect((await ctx.authed("POST", "/api/ocr", {}, ip)).status).toBe(429);
     expect((await ctx.authed("GET", "/api/settings", undefined, ip)).status).toBe(200);
   });
 });
 
-describe("/api/admins* 的限流額度（和 /api/settings* 共用「設定 API」的桶，與 OCR 互不擠壓）", () => {
+describe("/api/accounts* 的限流額度（和 /api/settings* 共用「設定 API」的桶，與 OCR 互不擠壓）", () => {
   it(`每個 IP 每分鐘 ${SETTINGS_API_RATE_LIMIT_MAX} 次，超過 429；帶 id 的路徑與 /api/settings* 在同一個桶；OCR 的額度不受影響`, async () => {
     const ctx = await makeSettingsApp();
     const ip = { "x-forwarded-for": "203.0.113.62" };
-    for (let i = 0; i < SETTINGS_API_RATE_LIMIT_MAX; i++) expect((await ctx.authed("GET", "/api/admins", undefined, ip)).status).toBe(200);
-    expect((await ctx.authed("GET", "/api/admins", undefined, ip)).status).toBe(429);
-    expect((await ctx.authed("DELETE", `/api/admins/${adminId(99)}`, undefined, ip)).status).toBe(429); // 帶 id 的路徑也算同一個桶
-    expect((await ctx.authed("GET", "/api/settings", undefined, ip)).status).toBe(429); // /api/settings* 與 /api/admins* 共用
-    expect((await call(ctx.app, "POST", "/api/ocr", {}, ip)).status).toBe(400); // OCR 是另一個桶（缺 image 回 400，不是 429）
+    for (let i = 0; i < SETTINGS_API_RATE_LIMIT_MAX; i++) expect((await ctx.authed("GET", "/api/accounts", undefined, ip)).status).toBe(200);
+    expect((await ctx.authed("GET", "/api/accounts", undefined, ip)).status).toBe(429);
+    expect((await ctx.authed("DELETE", `/api/accounts/${accountId(99)}`, undefined, ip)).status).toBe(429); // 帶 id 的路徑也算同一個桶
+    expect((await ctx.authed("GET", "/api/settings", undefined, ip)).status).toBe(429); // /api/settings* 與 /api/accounts* 共用
+    expect((await ctx.authed("POST", "/api/ocr", {}, ip)).status).toBe(400); // OCR 是另一個桶（缺 image 回 400，不是 429）
     ctx.clock.now += 60_001;
-    expect((await ctx.authed("GET", "/api/admins", undefined, ip)).status).toBe(200); // 一分鐘後恢復
+    expect((await ctx.authed("GET", "/api/accounts", undefined, ip)).status).toBe(200); // 一分鐘後恢復
   });
 
-  it("反過來：OCR 額度用完，/api/admins* 不受影響", async () => {
+  it("反過來：OCR 額度用完，/api/accounts* 不受影響", async () => {
     const ctx = await makeSettingsApp();
     const ip = { "x-forwarded-for": "203.0.113.63" };
-    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) await call(ctx.app, "POST", "/api/ocr", {}, ip);
-    expect((await call(ctx.app, "POST", "/api/ocr", {}, ip)).status).toBe(429);
-    expect((await ctx.authed("GET", "/api/admins", undefined, ip)).status).toBe(200);
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) await ctx.authed("POST", "/api/ocr", {}, ip);
+    expect((await ctx.authed("POST", "/api/ocr", {}, ip)).status).toBe(429);
+    expect((await ctx.authed("GET", "/api/accounts", undefined, ip)).status).toBe(200);
   });
 });
 
@@ -685,7 +685,7 @@ describe("POST /api/box-closed：設定檔優先、環境變數備援", () => {
       env: { LINE_CHANNEL_ACCESS_TOKEN: "env-token-zzzzzzzzzzzz", LINE_GROUP_ID: OTHER_GROUP_ID },
     });
     await seedLine(ctx);
-    const res = await call(ctx.app, "POST", "/api/box-closed", body);
+    const res = await ctx.authed("POST", "/api/box-closed", body);
     expect(await res.json()).toEqual({ success: true, notified: true });
     expect(ctx.calls).toHaveLength(1);
     expect(ctx.calls[0]!.headers.authorization).toBe(`Bearer ${TEST_LINE_TOKEN}`);
@@ -697,7 +697,7 @@ describe("POST /api/box-closed：設定檔優先、環境變數備援", () => {
       handler: lineHandler(),
       env: { LINE_CHANNEL_ACCESS_TOKEN: "env-token-zzzzzzzzzzzz", LINE_GROUP_ID: OTHER_GROUP_ID },
     });
-    const res = await call(ctx.app, "POST", "/api/box-closed", body);
+    const res = await ctx.authed("POST", "/api/box-closed", body);
     expect(await res.json()).toEqual({ success: true, notified: true });
     expect(ctx.calls[0]!.headers.authorization).toBe("Bearer env-token-zzzzzzzzzzzz");
     expect(JSON.parse(ctx.calls[0]!.body!).to).toBe(OTHER_GROUP_ID);
@@ -709,7 +709,7 @@ describe("POST /api/box-closed：設定檔優先、環境變數備援", () => {
       env: { LINE_CHANNEL_ACCESS_TOKEN: "env-token-zzzzzzzzzzzz", LINE_GROUP_ID: OTHER_GROUP_ID },
     });
     await seedLine(ctx, { enabled: false });
-    const res = await call(ctx.app, "POST", "/api/box-closed", body);
+    const res = await ctx.authed("POST", "/api/box-closed", body);
     expect(await res.json()).toEqual({ success: true, notified: false, reason: "not_configured" });
     expect(ctx.calls).toHaveLength(0);
   });
@@ -720,36 +720,36 @@ describe("POST /api/box-closed：設定檔優先、環境變數備援", () => {
       env: { LINE_CHANNEL_ACCESS_TOKEN: "env-token-zzzzzzzzzzzz", LINE_GROUP_ID: OTHER_GROUP_ID },
     });
     await seedLine(ctx, { groupId: "" });
-    const res = await call(ctx.app, "POST", "/api/box-closed", body);
+    const res = await ctx.authed("POST", "/api/box-closed", body);
     expect(await res.json()).toEqual({ success: true, notified: false, reason: "not_configured" });
     expect(ctx.calls).toHaveLength(0);
   });
 
   it("兩邊都沒設定：靜默略過", async () => {
     const ctx = await makeSettingsApp({ handler: lineHandler() });
-    const res = await call(ctx.app, "POST", "/api/box-closed", body);
+    const res = await ctx.authed("POST", "/api/box-closed", body);
     expect(await res.json()).toEqual({ success: true, notified: false, reason: "not_configured" });
     expect(ctx.calls).toHaveLength(0);
   });
 
   it("在設定頁存檔後立刻生效（不必重啟）：存檔前 not_configured，存檔後推播到新的群組", async () => {
     const ctx = await makeSettingsApp({ handler: lineHandler() });
-    expect(await (await call(ctx.app, "POST", "/api/box-closed", body)).json()).toEqual({ success: true, notified: false, reason: "not_configured" });
+    expect(await (await ctx.authed("POST", "/api/box-closed", body)).json()).toEqual({ success: true, notified: false, reason: "not_configured" });
     await ctx.authed("PUT", "/api/settings/line", { channelAccessToken: TEST_LINE_TOKEN, groupId: OTHER_GROUP_ID });
     ctx.calls.length = 0;
-    expect(await (await call(ctx.app, "POST", "/api/box-closed", body)).json()).toEqual({ success: true, notified: true });
+    expect(await (await ctx.authed("POST", "/api/box-closed", body)).json()).toEqual({ success: true, notified: true });
     expect(JSON.parse(ctx.calls[0]!.body!).to).toBe(OTHER_GROUP_ID);
     // 再改群組：下一次就推到新的
     await ctx.authed("PUT", "/api/settings/line", { groupId: TEST_GROUP_ID });
     ctx.calls.length = 0;
-    await call(ctx.app, "POST", "/api/box-closed", body);
+    await ctx.authed("POST", "/api/box-closed", body);
     expect(JSON.parse(ctx.calls[0]!.body!).to).toBe(TEST_GROUP_ID);
   });
 
   it("推播失敗仍回 200 與固定短句，log 不含設定檔裡的 token", async () => {
     const ctx = await makeSettingsApp({ handler: lineHandler({ pushStatus: 401 }) });
     await seedLine(ctx);
-    const res = await call(ctx.app, "POST", "/api/box-closed", body);
+    const res = await ctx.authed("POST", "/api/box-closed", body);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true, notified: false, reason: "push_failed", error: "LINE channel access token 無效或已過期" });
     expect(ctx.log.lines.join("\n")).not.toContain(TEST_LINE_TOKEN);

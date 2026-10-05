@@ -13,7 +13,8 @@ import { buildMergedName } from "./sheets.js";
  * token／secret／群組 ID 由呼叫端（app.ts）依「設定頁的設定檔優先、環境變數備援」解析後傳進來
  * （見 line-settings.ts），這個模組本身不讀環境變數、不碰檔案；fetch 由呼叫端注入（測試時 mock）。
  *
- * ⚠️ 安全：這個服務沒有登入機制，/api/box-closed 與其他端點一樣誰都能呼叫（只有限流與欄位長度上限）。
+ * ⚠️ 安全：/api/box-closed 要登入（任一角色，沒登入回 401），但登入的人可以自由呼叫（只有限流與欄位長度上限）；
+ * 訊息裡的「操作：<姓名>」由伺服器從登入資訊帶入，不接受請求內容裡的 operator。
  * token、secret 絕不寫進 log 與回應；回給前端的失敗原因一律是這裡寫死的短句，不轉發 LINE 的原始回應。
  */
 
@@ -59,6 +60,11 @@ export interface BoxClosedInput {
   total: number;
   successCount: number;
   failedCount: number;
+  /**
+   * 操作者姓名（由後端依登入的 session 填入，**不接受前端送來的值**）：有的話訊息在「共 N 種商品、M 件」下一行加「操作：<姓名>」。
+   * parseBoxClosedInput 不會產生這個欄位。
+   */
+  operator?: string;
 }
 
 function readText(record: Record<string, unknown>, key: string, where: string): string {
@@ -174,6 +180,7 @@ function detailLine(item: BoxClosedItem): string {
  *
  *   📦 箱號 BOX-001 已完成
  *   共 12 種商品、35 件
+ *   操作：王小明                           （有登入的操作者才有這一行）
  *   已同步 12/12 筆到商品主檔 ✓            （部分失敗：⚠️ 同步 10/12 筆，2 筆失敗，請查核商品主檔）
  *   明細：
  *   1801080204 第五代溫灸刷毛圓領發熱衣(女-經典黑L) ×3
@@ -191,6 +198,7 @@ export function buildBoxClosedMessage(input: BoxClosedInput, fallbackTime: Date)
   const head = [
     `📦 箱號 ${oneLine(input.boxId)} 已完成`,
     `共 ${items.length} 種商品、${totalQty} 件`,
+    ...(input.operator !== undefined && oneLine(input.operator) !== "" ? [`操作：${oneLine(input.operator)}`] : []),
     allSynced
       ? `已同步 ${input.successCount}/${input.total} 筆到商品主檔 ✓`
       : `⚠️ 同步 ${input.successCount}/${input.total} 筆，${input.failedCount} 筆失敗，請查核商品主檔`,

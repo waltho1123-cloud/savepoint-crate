@@ -11,7 +11,7 @@ import {
 } from "../src/line-settings.js";
 import { newSettingsData, SettingsStore, type SettingsData } from "../src/settings-store.js";
 import { createCapturingLogger, createFetchMock, TEST_GROUP_ID, TEST_LINE_SECRET, TEST_LINE_TOKEN } from "./helpers.js";
-import { adminId, cleanupTempDirs, lineHandler, makeAccount, makeTempDir, NOW_MS } from "./settings-helpers.js";
+import { accountId, cleanupTempDirs, lineHandler, makeAccount, makeTempDir, NOW_MS } from "./settings-helpers.js";
 
 afterEach(cleanupTempDirs);
 
@@ -100,7 +100,7 @@ describe("maskCredential", () => {
 });
 
 describe("buildSettingsView", () => {
-  const ME = { id: "0123456789abcdef0123456789abcdef", name: "測試管理員", email: "admin@example.test" };
+  const ME = { id: "0123456789abcdef0123456789abcdef", name: "測試管理員", email: "admin@example.test", role: "admin" as const };
 
   it("不可用的 store：dataDirWritable false、沒有管理員、其他都是空的", () => {
     const view = buildSettingsView(loadEnv({}), SettingsStore.unavailable(), ME);
@@ -130,7 +130,7 @@ describe("buildSettingsView", () => {
     });
     expect(buildSettingsView(loadEnv({}), store, ME)).toMatchObject({ adminConfigured: true, adminCount: 0, legacyAdminPending: true });
     await store.update((draft) => {
-      draft.admins.push(makeAccount(), makeAccount({ id: adminId(2), email: "b@example.test", status: "disabled" }));
+      draft.accounts.push(makeAccount(), makeAccount({ id: accountId(2), email: "b@example.test", status: "disabled" }));
     });
     expect(buildSettingsView(loadEnv({}), store, ME)).toMatchObject({ adminConfigured: true, adminCount: 2, legacyAdminPending: false });
   });
@@ -150,11 +150,11 @@ describe("buildSettingsView", () => {
   it("整份檢視序列化後不含 token／secret／環境變數的值／密碼雜湊／sessionSecret", async () => {
     const store = await SettingsStore.open(await makeTempDir(), { log: createCapturingLogger() });
     await store.update((draft) => {
-      draft.admins.push(makeAccount());
+      draft.accounts.push(makeAccount());
       draft.line.channelAccessToken = TEST_LINE_TOKEN;
       draft.line.channelSecret = TEST_LINE_SECRET;
     });
-    const text = JSON.stringify(buildSettingsView(loadEnv(ENV_ALL), store, store.data.admins[0]!));
+    const text = JSON.stringify(buildSettingsView(loadEnv(ENV_ALL), store, store.data.accounts[0]!));
     for (const secret of [TEST_LINE_TOKEN, TEST_LINE_SECRET, ...Object.values(ENV_ALL), "scrypt$", store.data.sessionSecret]) {
       expect(text).not.toContain(secret);
     }

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { BOX_CLOSED_RATE_LIMIT_MAX, createApp, LINE_WEBHOOK_RATE_LIMIT_MAX, OCR_RATE_LIMIT_MAX, SAVE_RATE_LIMIT_MAX } from "../src/app.js";
 import { loadEnv } from "../src/env.js";
@@ -13,6 +13,7 @@ import {
   TEST_LINE_TOKEN,
   type MockHandler,
 } from "./helpers.js";
+import { cleanupTempDirs, createAuthFixture, type AuthFixture } from "./settings-helpers.js";
 
 const creds = makeCredentials();
 const LINE_ENV = {
@@ -25,7 +26,15 @@ const REPLY_URL = "https://api.line.me/v2/bot/message/reply";
 /** 注入的「現在」：2026-10-05 15:20（台北）。 */
 const NOW_MS = Date.parse("2026-10-05T07:20:00.000Z");
 
-function makeApp(overrides: { env?: Record<string, string>; now?: () => number } = {}) {
+// 全站登入之後，OCR／存檔／關箱通知都要登入（任一角色）：整個測試檔共用一個有一般使用者帳號的設定檔 store 與登入標頭。
+// LINE webhook 仍然是公開的（靠簽章驗證），所以 post() 對它不帶登入資訊。
+let auth: AuthFixture;
+beforeAll(async () => {
+  auth = await createAuthFixture({ name: "王小明" });
+});
+afterAll(cleanupTempDirs);
+
+function makeApp(overrides: { env?: Record<string, string>; now?: () => number; noStore?: boolean } = {}) {
   const log = createCapturingLogger();
   const app = createApp({
     env: loadEnv({
@@ -37,6 +46,7 @@ function makeApp(overrides: { env?: Record<string, string>; now?: () => number }
     log,
     sleep: vi.fn(async () => undefined),
     now: overrides.now ?? (() => NOW_MS),
+    ...(overrides.noStore ? {} : { settings: auth.store }),
   });
   return { app, log };
 }
@@ -46,7 +56,7 @@ type TestApp = ReturnType<typeof createApp>;
 async function post(app: TestApp, path: string, body: unknown, headers: Record<string, string> = {}) {
   return app.request(path, {
     method: "POST",
-    headers: { "content-type": "application/json", ...headers },
+    headers: { "content-type": "application/json", ...(path === "/api/line/webhook" ? {} : auth.headers), ...headers },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 }
@@ -130,6 +140,7 @@ describe("POST /api/box-closed", () => {
           text: [
             "📦 箱號 BOX-001 已完成",
             "共 2 種商品、5 件",
+            "操作：王小明", // 登入者的姓名（不是前端送的）
             "已同步 2/2 筆到商品主檔 ✓",
             "明細：",
             "1801080204 第五代溫灸刷毛圓領發熱衣(女-經典黑L) ×3",
@@ -147,7 +158,31 @@ describe("POST /api/box-closed", () => {
     const { app } = makeApp({ env: LINE_ENV });
     await post(app, "/api/box-closed", boxBody({ total: 12, successCount: 10, failedCount: 2 }));
     const lines = pushed(calls).messages[0]!.text.split("\n");
-    expect(lines[2]).toBe("⚠️ 同步 10/12 筆，2 筆失敗，請查核商品主檔");
+    expect(lines[2]).toBe("操作：王小明");
+    expect(lines[3]).toBe("⚠️ 同步 10/12 筆，2 筆失敗，請查核商品主檔");
+  });
+
+  it("操作者來自登入的 session：前端送來的 operator／操作者欄位一律忽略；換一位登入者，訊息就換成那位的姓名；姓名裡的換行與控制字元會被壓成一行", async () => {
+    const calls = stubFetch(() => jsonResponse({}));
+    const { app } = makeApp({ env: LINE_ENV });
+    await post(app, "/api/box-closed", boxBody({ operator: "假冒的人", 操作者: "另一個假冒" }));
+    expect(pushed(calls).messages[0]!.text.split("\n")[2]).toBe("操作：王小明");
+    expect(JSON.stringify(pushed(calls))).not.toContain("假冒");
+
+    const other = await createAuthFixture({ name: "李\n四", email: "lee@example.test" });
+    const calls2 = stubFetch(() => jsonResponse({}));
+    const app2 = createApp({
+      env: loadEnv({ OPENAI_API_KEY: "x", GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: creds.base64, ...LINE_ENV }),
+      indexHtml: "x",
+      log: createCapturingLogger(),
+      sleep: vi.fn(async () => undefined),
+      now: () => NOW_MS,
+      settings: other.store,
+    });
+    await post(app2, "/api/box-closed", boxBody(), other.headers);
+    const lines = pushed(calls2).messages[0]!.text.split("\n");
+    expect(lines[2]).toBe("操作：李 四");
+    expect(lines).toHaveLength(pushed(calls).messages[0]!.text.split("\n").length); // 沒有多出一行
   });
 
   it("沒有 closedAt：時間用伺服器現在的台北時間（注入的 now）", async () => {
@@ -315,7 +350,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
 
   it("沒有設定 LINE_CHANNEL_SECRET：回 503，不處理任何事件", async () => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app } = makeApp({ env: { LINE_CHANNEL_ACCESS_TOKEN: TEST_LINE_TOKEN, LINE_GROUP_ID: TEST_GROUP_ID } });
+    const { app } = makeApp({ noStore: true, env: { LINE_CHANNEL_ACCESS_TOKEN: TEST_LINE_TOKEN, LINE_GROUP_ID: TEST_GROUP_ID } });
     const body = events({ type: "join", replyToken: "r", source: groupSource });
     const headerVariants: Array<Record<string, string>> = [{}, { "x-line-signature": signLineBody(body) }];
     for (const headers of headerVariants) {
@@ -328,7 +363,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
 
   it("沒有簽章標頭：401", async () => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app } = makeApp({ env: LINE_ENV });
+    const { app } = makeApp({ noStore: true, env: LINE_ENV });
     const res = await app.request("/api/line/webhook", { method: "POST", headers: { "content-type": "application/json" }, body: events({ type: "join", replyToken: "r", source: groupSource }) });
     expect(res.status).toBe(401);
     expect(await res.json()).toMatchObject({ success: false });
@@ -342,7 +377,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
     ["簽章是空字串", () => ""],
   ])("簽章錯誤回 401 且不處理事件：%s", async (_name, sign) => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app } = makeApp({ env: LINE_ENV });
+    const { app } = makeApp({ noStore: true, env: LINE_ENV });
     const body = events({ type: "join", replyToken: "r", source: groupSource });
     const res = await post(app, "/api/line/webhook", body, { "x-line-signature": sign(body) });
     expect(res.status).toBe(401);
@@ -351,7 +386,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
 
   it("簽章對、內容被改過：401", async () => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app } = makeApp({ env: LINE_ENV });
+    const { app } = makeApp({ noStore: true, env: LINE_ENV });
     const body = events({ type: "join", replyToken: "r", source: groupSource });
     const res = await post(app, "/api/line/webhook", body + " ", { "x-line-signature": signLineBody(body) });
     expect(res.status).toBe(401);
@@ -360,7 +395,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
 
   it("正確簽章的 join 事件：回 200，並用 reply API 回覆「已加入」與正確的群組 ID（帶 token 與 replyToken），log 有一行事件記錄", async () => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app, log } = makeApp({ env: LINE_ENV });
+    const { app, log } = makeApp({ noStore: true, env: LINE_ENV });
     const res = await send(app, events({ type: "join", replyToken: "reply-token-join", source: groupSource }));
 
     expect(res.status).toBe(200);
@@ -377,7 +412,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
 
   it.each(["群組ID", "群組 ID", "  群組ID  "])("正確簽章、群組裡有人輸入「%s」：回覆「此群組 ID：C…」", async (text) => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app, log } = makeApp({ env: LINE_ENV });
+    const { app, log } = makeApp({ noStore: true, env: LINE_ENV });
     const res = await send(app, events({ type: "message", replyToken: "reply-token-msg", source: groupSource, message: { type: "text", id: "1", text } }));
     expect(res.status).toBe(200);
     expect(replyCall(calls)).toEqual({ replyToken: "reply-token-msg", messages: [{ type: "text", text: `此群組 ID：${TEST_GROUP_ID}` }] });
@@ -392,7 +427,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
     ["個人對話說「群組ID」", { type: "message", replyToken: "r", source: { type: "user", userId: "Uabc" }, message: { type: "text", text: "群組ID" } }],
   ])("其他事件：回 200、不呼叫 LINE、不寫 log（%s）", async (_name, event) => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app, log } = makeApp({ env: LINE_ENV });
+    const { app, log } = makeApp({ noStore: true, env: LINE_ENV });
     const res = await send(app, events(event));
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true });
@@ -402,14 +437,14 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
 
   it("LINE 設定頁的 Verify（空的 events）：200", async () => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app } = makeApp({ env: LINE_ENV });
+    const { app } = makeApp({ noStore: true, env: LINE_ENV });
     expect((await send(app, JSON.stringify({ destination: "Uxxx", events: [] }))).status).toBe(200);
     expect(calls).toHaveLength(0);
   });
 
   it("簽章通過但內容不是 JSON：仍回 200（驗證通過一律回 200），不呼叫 LINE", async () => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app, log } = makeApp({ env: LINE_ENV });
+    const { app, log } = makeApp({ noStore: true, env: LINE_ENV });
     const res = await send(app, "這不是 JSON");
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(0);
@@ -418,7 +453,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
 
   it("簽章是對「原始位元組」算的：JSON 的空白與鍵順序不同、或含無效 UTF-8 位元組，只要簽章對就通過（不能先解析再重新序列化）", async () => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app } = makeApp({ env: LINE_ENV });
+    const { app } = makeApp({ noStore: true, env: LINE_ENV });
     // 多餘的空白與換行：重新序列化後位元組就不同了
     const spaced = `{ "events" : [ { "source" : { "groupId" : "${TEST_GROUP_ID}", "type" : "group" },\n  "type":"join", "replyToken":"rt" } ] ,\n "destination":"U" }`;
     expect((await send(app, spaced)).status).toBe(200);
@@ -431,7 +466,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
 
   it("沒有設定 token（只有 secret）：回 200，不呼叫 LINE，但 log 有群組 ID 可以取用", async () => {
     const calls = stubFetch(() => jsonResponse({}));
-    const { app, log } = makeApp({ env: { LINE_CHANNEL_SECRET: TEST_LINE_SECRET } });
+    const { app, log } = makeApp({ noStore: true, env: { LINE_CHANNEL_SECRET: TEST_LINE_SECRET } });
     const res = await send(app, events({ type: "join", replyToken: "r", source: groupSource }));
     expect(res.status).toBe(200);
     expect(calls).toHaveLength(0);
@@ -441,7 +476,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
 
   it("回覆失敗（LINE 回 400 或連線錯誤）：仍回 200，log 不含 token", async () => {
     stubFetch(() => jsonResponse({ message: `Invalid reply token ${TEST_LINE_TOKEN}` }, 400));
-    const bad = makeApp({ env: LINE_ENV });
+    const bad = makeApp({ noStore: true, env: LINE_ENV });
     const res = await send(bad.app, events({ type: "join", replyToken: "expired", source: groupSource }));
     expect(res.status).toBe(200);
     expect(bad.log.lines.join("\n")).toContain("回覆失敗：HTTP 400");
@@ -450,12 +485,12 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
     stubFetch(() => {
       throw new TypeError("fetch failed");
     });
-    const down = makeApp({ env: LINE_ENV });
+    const down = makeApp({ noStore: true, env: LINE_ENV });
     expect((await send(down.app, events({ type: "join", replyToken: "r", source: groupSource }))).status).toBe(200);
   });
 
   it("GET /api/line/webhook → 405", async () => {
-    const { app } = makeApp({ env: LINE_ENV });
+    const { app } = makeApp({ noStore: true, env: LINE_ENV });
     expect((await app.request("/api/line/webhook")).status).toBe(405);
   });
 
@@ -479,7 +514,7 @@ describe("POST /api/line/webhook（取得群組 ID 用）", () => {
 
 describe("GET /healthz 的 LINE 欄位", () => {
   const health = async (env: Record<string, string>) => {
-    const { app } = makeApp({ env });
+    const { app } = makeApp({ noStore: true, env });
     const res = await app.request("/healthz");
     return { text: await res.text() };
   };

@@ -143,12 +143,14 @@ export function createGoogleMock(options: GoogleMockOptions = {}) {
 // 可記錄訊息的 logger（用來驗證 log 不含金鑰）。
 // ---------------------------------------------------------------------------
 
-export function createCapturingLogger(): Logger & { lines: string[] } {
+export function createCapturingLogger(): Logger & { lines: string[]; warns: string[] } {
   const lines: string[] = [];
+  const warns: string[] = [];
   return {
-    lines,
+    lines, // 所有等級的訊息（依序）
+    warns, // 其中 warn 等級的（失敗的安全事件用 warn，監控好撈）
     info: (message) => void lines.push(message),
-    warn: (message) => void lines.push(message),
+    warn: (message) => void (lines.push(message), warns.push(message)),
     error: (message) => void lines.push(message),
   };
 }

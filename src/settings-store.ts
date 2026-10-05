@@ -6,28 +6,32 @@ import { join, resolve } from "node:path";
 import { describeError, ServiceError, type Logger } from "./common.js";
 
 /**
- * 設定檔儲存（放在 Volume 上的 DATA_DIR/settings.json）：管理員帳號（姓名、Email、密碼雜湊…）、登入 session 金鑰、
+ * 設定檔儲存（放在 Volume 上的 DATA_DIR/settings.json）：登入帳號（姓名、Email、角色、密碼雜湊…）、登入 session 金鑰、
  * LINE 設定、webhook 最近收到的群組。整份載入記憶體，變更時「先寫檔、成功才更新記憶體」；
  * 寫檔用暫存檔＋rename（原子替換），權限 0600。
  *
- * 資料目錄不存在或不可寫時，store 進入「不可用」狀態（writable=false）：服務照常啟動（OCR、存檔、環境變數版的
- * LINE 通知都不受影響），只有設定頁與設定 API 回 503。
+ * 資料目錄不存在或不可寫時，store 進入「不可用」狀態（writable=false）：沒有地方存帳號，所以沒有人登得進去——
+ * 整個網站（含裝箱主頁與 OCR、存檔、關箱通知）都回 503「請在 Zeabur 掛載 Volume 到 /app/data」。
  *
  * 檔案格式版本：
- *   - version 1：舊版，只有一個管理密碼（`admin: { passwordHash, updatedAt }`），沒有 admins。
- *   - version 2：管理員帳號（`admins: [...]`）。舊的 `admin` 只保留到升級完成為止（升級＝建立第一位管理員時一併刪除）。
- * 載入時兩種都收；**所有欄位（含不認識的）原樣保留、寫回去**——版本 1 的檔案在升級成管理員帳號之前一直維持版本 1
- * （沒有管理員帳號就不改版本），所以升級前回滾到舊版程式仍然讀得懂；有了管理員帳號才會變成版本 2。
+ *   - version 1：最舊的版本，只有一個管理密碼（`admin: { passwordHash, updatedAt }`），沒有帳號。
+ *   - version 2：管理員帳號（`admins: [...]`，沒有角色欄位）。舊的 `admin` 只保留到升級完成為止。
+ *   - version 3：帳號（`accounts: [...]`，每筆多一個 `role: "admin" | "user"`）。
+ * 載入時三種都收；版本 1／2 只在記憶體轉換（版本 2 的 admins 全部視為角色 admin），**所有欄位（含不認識的）原樣保留、寫回去**。
+ * 沒有帳號時檔案維持載入時的版本（版本 1 的檔案在升級成帳號之前一直維持版本 1），所以升級前回滾到舊版程式仍然讀得懂；
+ * 有了帳號的那一次寫入才會變成版本 3（之後舊版程式不認得版本 3，會把檔案當成損毀）。
  */
 
 /** 資料目錄不可用時，設定相關端點回的訊息（Zeabur 上要掛 Volume 的位置固定是 /app/data）。 */
 export const DATA_DIR_UNAVAILABLE_MESSAGE = "請在 Zeabur 掛載 Volume 到 /app/data";
 
 export const SETTINGS_FILE_NAME = "settings.json";
-/** 目前的檔案格式版本（管理員帳號）。 */
-export const SETTINGS_VERSION = 2;
-/** 舊版（單一管理密碼）的格式版本；載入時仍然接受。 */
+/** 目前的檔案格式版本（帳號含角色）。 */
+export const SETTINGS_VERSION = 3;
+/** 舊版格式：版本 1＝單一管理密碼、版本 2＝管理員帳號（沒有角色）；載入時仍然接受。 */
 export const LEGACY_SETTINGS_VERSION = 1;
+export const ADMINS_SETTINGS_VERSION = 2;
+export type SettingsVersion = typeof LEGACY_SETTINGS_VERSION | typeof ADMINS_SETTINGS_VERSION | typeof SETTINGS_VERSION;
 /** webhook 最近收到的群組最多留幾筆（最新的在前）。 */
 export const CAPTURED_GROUPS_MAX = 10;
 /** 資料目錄裡殘留的暫存檔（被強制結束的寫入、寫入探測）超過這個時間才會被清掉，免得誤刪另一個行程剛建的。 */
@@ -40,18 +44,21 @@ export interface AdminSettings {
   updatedAt: string;
 }
 
-export type AdminStatus = "active" | "disabled";
+export type AccountStatus = "active" | "disabled";
+/** 角色：admin＝可以進設定頁與管理帳號；user＝只能使用裝箱程式與管理自己的密碼。 */
+export type AccountRole = "admin" | "user";
 
-/** 管理員帳號。 */
-export interface AdminAccount {
+/** 登入帳號。 */
+export interface Account {
   /** 隨機 16 位元組的十六進位（32 字元）；登入 cookie 綁的是它，不是 Email（Email 可以改）。 */
   id: string;
   name: string;
   /** 已 trim、轉小寫；唯一。 */
   email: string;
+  role: AccountRole;
   /** `scrypt$N$r$p$salt$hash`（見 auth.ts）。 */
   passwordHash: string;
-  status: AdminStatus;
+  status: AccountStatus;
   /** 從 1 起算；重設密碼、改密碼、停用／啟用都會加一，該帳號所有已發出的登入 cookie 就一起失效。 */
   sessionVersion: number;
   createdAt: string;
@@ -79,10 +86,11 @@ export interface CapturedGroup {
 }
 
 export interface SettingsData {
-  version: typeof SETTINGS_VERSION | typeof LEGACY_SETTINGS_VERSION;
+  /** 這份資料目前對應的檔案格式版本（載入時的版本；有了帳號、寫檔時一律是 3）。 */
+  version: SettingsVersion;
   /** 舊版的單一管理密碼；沒有（或已升級）就是 null。寫檔時 null 不會寫出 `admin` 欄位。 */
   admin: AdminSettings | null;
-  admins: AdminAccount[];
+  accounts: Account[];
   /**
    * 簽 session cookie 用的金鑰（32 位元組的十六進位）。登入 cookie 的失效靠各帳號自己的 sessionVersion，
    * 這把金鑰平常不會換（升級成管理員帳號時也不會動）。
@@ -94,9 +102,9 @@ export interface SettingsData {
 
 /** 對外唯讀的檢視（凍結的物件）：要改一律走 SettingsStore.update。 */
 export type ReadonlySettings = Readonly<{
-  version: typeof SETTINGS_VERSION | typeof LEGACY_SETTINGS_VERSION;
+  version: SettingsVersion;
   admin: Readonly<AdminSettings> | null;
-  admins: ReadonlyArray<Readonly<AdminAccount>>;
+  accounts: ReadonlyArray<Readonly<Account>>;
   sessionSecret: string;
   line: Readonly<LineSettings>;
   lineCaptured: ReadonlyArray<Readonly<CapturedGroup>>;
@@ -110,7 +118,7 @@ export function newSettingsData(): SettingsData {
   return {
     version: SETTINGS_VERSION,
     admin: null,
-    admins: [],
+    accounts: [],
     sessionSecret: randomBytes(32).toString("hex"),
     line: emptyLineSettings(),
     lineCaptured: [],
@@ -118,20 +126,35 @@ export function newSettingsData(): SettingsData {
 }
 
 /**
- * 變更後的整理：有了管理員帳號就一定是新格式（版本 2），並且丟掉舊的單一密碼——
- * 升級（建立第一位管理員）的那一次寫入因此「舊 admin 消失」與「admins 出現」同時發生，不會有只做一半的檔案。
+ * 變更後的整理：有了帳號就一定是新格式（版本 3），並且丟掉舊的單一密碼——
+ * 升級（建立第一位管理員）的那一次寫入因此「舊 admin 消失」與「accounts 出現」同時發生，不會有只做一半的檔案；
+ * 版本 2（admins，沒有角色）的檔案在第一次寫入時也在這裡升成版本 3。沒有帳號時版本不動（見檔頭說明）。
  */
 function normalizeAfterMutation(draft: SettingsData): void {
-  if (draft.admins.length > 0) {
+  if (draft.accounts.length > 0) {
     draft.version = SETTINGS_VERSION;
     draft.admin = null;
   }
 }
 
-/** 轉成要寫進檔案的 JSON 文字：`admin` 是 null 就不寫出該欄位；其餘（含不認識的欄位）原樣。 */
+/**
+ * 轉成要寫進檔案的 JSON 文字：`admin` 是 null 就不寫出該欄位；其餘（含不認識的欄位）原樣。
+ * 有帳號、或本來就是版本 3：寫成版本 3（`accounts`）；沒有帳號的版本 1／2 檔案維持舊格式（空的 `admins`），
+ * 升級前回滾到舊版程式才讀得懂。
+ */
 export function serializeSettings(data: ReadonlySettings): string {
-  const out: Record<string, unknown> = { ...data };
-  if (out.admin === null || out.admin === undefined) delete out.admin;
+  const { version, admin, accounts, sessionSecret, line, lineCaptured, ...unknown } = data as ReadonlySettings & Record<string, unknown>;
+  const fileVersion: SettingsVersion = accounts.length > 0 ? SETTINGS_VERSION : version;
+  const out: Record<string, unknown> = { version: fileVersion };
+  if (admin !== null && admin !== undefined) out.admin = admin;
+  if (fileVersion === SETTINGS_VERSION) out.accounts = accounts;
+  else out.admins = [];
+  out.sessionSecret = sessionSecret;
+  out.line = line;
+  out.lineCaptured = lineCaptured;
+  for (const [key, value] of Object.entries(unknown)) {
+    if (!Object.hasOwn(out, key)) out[key] = value; // 用 hasOwn：`in` 會把 constructor、toString 這類原型上的名字也當成「已經有了」而丟掉
+  }
   return `${JSON.stringify(out, null, 2)}\n`;
 }
 
@@ -151,17 +174,18 @@ function unknownFields(raw: Record<string, unknown>, known: readonly string[]): 
   return out;
 }
 
-const KNOWN_TOP_KEYS = ["version", "admin", "admins", "sessionSecret", "line", "lineCaptured"] as const;
+const KNOWN_TOP_KEYS = ["version", "admin", "admins", "accounts", "sessionSecret", "line", "lineCaptured"] as const;
 const KNOWN_LEGACY_ADMIN_KEYS = ["passwordHash", "updatedAt"] as const;
-const KNOWN_ADMIN_KEYS = ["id", "name", "email", "passwordHash", "status", "sessionVersion", "createdAt", "updatedAt", "lastLoginAt"] as const;
+const KNOWN_ACCOUNT_KEYS = ["id", "name", "email", "role", "passwordHash", "status", "sessionVersion", "createdAt", "updatedAt", "lastLoginAt"] as const;
 const KNOWN_LINE_KEYS = ["enabled", "channelAccessToken", "channelSecret", "groupId", "groupName", "updatedAt"] as const;
 const KNOWN_CAPTURED_KEYS = ["groupId", "groupName", "eventType", "lastSeenAt"] as const;
 
 /**
- * 解析設定檔內容（版本 1 與 2 都收）。結構性的問題（不是 JSON、不是物件、版本不認得、型別錯誤、sessionSecret 格式不對、
- * 管理員帳號資料不合法或 id／Email 重複）一律回 null，由呼叫端當作「檔案損毀」處理；缺少的選填欄位補預設值
- * （版本 1 沒有 admins，視為空陣列）；lineCaptured 裡格式不對的項目直接略過。**不認識的欄位原樣保留**（頂層、admin、
- * 各管理員帳號、line、lineCaptured 每一筆都是）。
+ * 解析設定檔內容（版本 1、2、3 都收）。結構性的問題（不是 JSON、不是物件、版本不認得、型別錯誤、sessionSecret 格式不對、
+ * 帳號資料不合法或 id／Email 重複、版本 3 的角色不是 admin／user）一律回 null，由呼叫端當作「檔案損毀」處理；
+ * 缺少的選填欄位補預設值（版本 1 沒有帳號、缺少 admins／accounts 都視為空陣列）；lineCaptured 裡格式不對的項目直接略過。
+ * 版本 1／2 只在記憶體轉換：帳號從 `admins` 讀進來、角色一律是 admin；版本 3 從 `accounts` 讀。
+ * **不認識的欄位原樣保留**（頂層、admin、各帳號、line、lineCaptured 每一筆都是）。
  */
 export function parseSettingsText(text: string): SettingsData | null {
   let raw: unknown;
@@ -170,7 +194,9 @@ export function parseSettingsText(text: string): SettingsData | null {
   } catch {
     return null;
   }
-  if (!isRecord(raw) || (raw.version !== SETTINGS_VERSION && raw.version !== LEGACY_SETTINGS_VERSION)) return null;
+  if (!isRecord(raw)) return null;
+  const version = raw.version;
+  if (version !== LEGACY_SETTINGS_VERSION && version !== ADMINS_SETTINGS_VERSION && version !== SETTINGS_VERSION) return null;
 
   let admin: AdminSettings | null = null;
   if (raw.admin !== undefined && raw.admin !== null) {
@@ -179,12 +205,13 @@ export function parseSettingsText(text: string): SettingsData | null {
     admin = { ...unknownFields(a, KNOWN_LEGACY_ADMIN_KEYS), passwordHash: a.passwordHash, updatedAt: typeof a.updatedAt === "string" ? a.updatedAt : "" };
   }
 
-  const rawAdmins = raw.admins === undefined ? [] : raw.admins;
-  if (!Array.isArray(rawAdmins)) return null;
-  const admins: AdminAccount[] = [];
+  const rawAccounts = version === SETTINGS_VERSION ? raw.accounts : raw.admins; // 版本 2 以前叫 admins
+  const rawList = rawAccounts === undefined ? [] : rawAccounts;
+  if (!Array.isArray(rawList)) return null;
+  const accounts: Account[] = [];
   const seenIds = new Set<string>();
   const seenEmails = new Set<string>();
-  for (const item of rawAdmins) {
+  for (const item of rawList) {
     if (!isRecord(item)) return null;
     if (typeof item.id !== "string" || !/^[0-9a-f]{32}$/.test(item.id)) return null;
     if (typeof item.name !== "string" || typeof item.email !== "string") return null;
@@ -192,15 +219,17 @@ export function parseSettingsText(text: string): SettingsData | null {
     if (email === "") return null;
     if (typeof item.passwordHash !== "string" || !item.passwordHash.startsWith("scrypt$")) return null;
     if (item.status !== "active" && item.status !== "disabled") return null;
+    if (version === SETTINGS_VERSION && item.role !== "admin" && item.role !== "user") return null;
     if (typeof item.sessionVersion !== "number" || !Number.isSafeInteger(item.sessionVersion) || item.sessionVersion < 1) return null;
     if (seenIds.has(item.id) || seenEmails.has(email)) return null;
     seenIds.add(item.id);
     seenEmails.add(email);
-    admins.push({
-      ...unknownFields(item, KNOWN_ADMIN_KEYS),
+    accounts.push({
+      ...unknownFields(item, KNOWN_ACCOUNT_KEYS),
       id: item.id,
       name: item.name,
       email,
+      role: version === SETTINGS_VERSION ? (item.role as AccountRole) : "admin", // 版本 2 以前的管理員帳號一律是 admin
       passwordHash: item.passwordHash,
       status: item.status,
       sessionVersion: item.sessionVersion,
@@ -242,9 +271,9 @@ export function parseSettingsText(text: string): SettingsData | null {
   }
 
   return {
-    version: raw.version,
+    version,
     admin,
-    admins,
+    accounts,
     sessionSecret: raw.sessionSecret,
     line,
     lineCaptured,
@@ -333,7 +362,7 @@ export class SettingsStore {
     const now = options.now ?? (() => Date.now());
     const dir = resolve(dirInput);
     const unavailable = (reason: string): SettingsStore => {
-      log.error(`[settings] 資料目錄 ${dir} 不可用：${reason}。設定頁停用（/settings 與 /api/settings* 回 503）。${DATA_DIR_UNAVAILABLE_MESSAGE}`);
+      log.error(`[settings] 資料目錄 ${dir} 不可用：${reason}。整個網站停用（沒有地方存帳號：登入頁、裝箱主頁、OCR、存檔、關箱通知、設定頁都回 503；/healthz 與 LINE webhook 不受影響）。${DATA_DIR_UNAVAILABLE_MESSAGE}`);
       return SettingsStore.unavailable(dir, log);
     };
 

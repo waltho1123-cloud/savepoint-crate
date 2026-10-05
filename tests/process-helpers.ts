@@ -1,11 +1,14 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import { createServer, type AddressInfo } from "node:net";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** 專案根目錄。 */
 export const repoRoot = fileURLToPath(new URL("..", import.meta.url));
-/** 只允許連 api.line.me 的 fetch 替身（見檔案內說明）。 */
+/** 只允許連 api.line.me 與 api.openai.com（OCR）的 fetch 替身（見檔案內說明）。 */
 export const lineStubPreload = fileURLToPath(new URL("./fixtures/line-stub-preload.mjs", import.meta.url));
 
 export function freePort(): Promise<number> {
@@ -77,4 +80,53 @@ export function readStubLog(path: string): Array<{ url: string; method: string; 
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line));
+}
+
+/** 真實行程測試用的帳號（密碼雜湊由呼叫端先算好；scrypt 約 50～100 ms，一個測試檔算一次就好）。 */
+export interface SeedAccount {
+  id?: string;
+  name: string;
+  email: string;
+  role: "admin" | "user";
+  passwordHash: string;
+  status?: "active" | "disabled";
+}
+
+/** 在資料目錄裡先寫好一份版本 3 的 settings.json（含帳號），讓真實行程啟動時就有人可以登入。回傳寫進去的 sessionSecret。 */
+export function seedSettingsFile(dir: string, accounts: SeedAccount[], extra: Record<string, unknown> = {}): string {
+  const sessionSecret = randomBytes(32).toString("hex");
+  const file = {
+    version: 3,
+    accounts: accounts.map((a, i) => ({
+      id: a.id ?? String(i + 1).padStart(32, "0"),
+      name: a.name,
+      email: a.email,
+      role: a.role,
+      passwordHash: a.passwordHash,
+      status: a.status ?? "active",
+      sessionVersion: 1,
+      createdAt: "2026-10-01T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+      lastLoginAt: null,
+    })),
+    sessionSecret,
+    line: { enabled: true, channelAccessToken: "", channelSecret: "", groupId: "", groupName: "", updatedAt: "" },
+    lineCaptured: [],
+    ...extra,
+  };
+  writeFileSync(join(dir, "settings.json"), `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 });
+  return sessionSecret;
+}
+
+/** 對真實行程送 POST /login（帶 CSRF 標頭），回傳 `sp_session=…`（失敗就丟錯）。 */
+export async function loginOverHttp(base: string, email: string, password: string): Promise<string> {
+  const res = await fetch(`${base}/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-requested-with": "XMLHttpRequest" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (res.status !== 200) throw new Error(`登入失敗：HTTP ${res.status} ${await res.text()}`);
+  const cookie = res.headers.getSetCookie()[0];
+  if (!cookie) throw new Error("登入回應沒有 Set-Cookie");
+  return cookie.split(";")[0]!;
 }

@@ -1,14 +1,16 @@
-import type { AdminPublic } from "./admins.js";
+import { roleLabel, type AccountPublic } from "./accounts.js";
 import type { SettingsView } from "./line-settings.js";
 import { formatTaipeiTime } from "./line.js";
-import { DATA_DIR_UNAVAILABLE_MESSAGE } from "./settings-store.js";
+import { DATA_DIR_UNAVAILABLE_MESSAGE, type Account } from "./settings-store.js";
 
 /**
- * 設定頁（GET /settings）的 HTML：伺服器端組字串，不用任何前端框架。五種狀態：
- *   unavailable → 沒有資料目錄（要掛 Volume）；setup → 全新安裝，用設定碼建立第一位管理員；
- *   upgrade → 還有舊版的單一管理密碼，要升級成管理員帳號；login → 已有管理員、尚未登入（Email＋密碼）；
- *   settings → 已登入（LINE 設定、管理員帳號管理、我的帳號）。
- * 所有動態內容（姓名、Email、群組名稱、網址、群組 ID…）一律經過 escapeHtml；頁面內的 script 是固定字串、靠 CSP nonce 執行，
+ * 伺服器端組字串的 HTML 頁面（不用任何前端框架），共用同一份樣式與同一段 script：
+ *   /login → 登入頁（Email＋密碼；還沒有任何帳號時改顯示「請管理員先到設定頁」）；
+ *   /account → 我的帳號（姓名、Email、角色、變更我的密碼；任一角色）；
+ *   /settings → 設定頁（管理員）：unavailable＝沒有資料目錄（要掛 Volume）；setup＝全新安裝，用設定碼建立第一位管理員；
+ *     upgrade＝還有舊版的單一管理密碼，要升級成管理員帳號；forbidden＝登入的是一般使用者；
+ *     settings＝LINE 設定、帳號管理。
+ * 所有動態內容（姓名、Email、群組名稱、網址、群組 ID、next…）一律經過 escapeHtml；頁面內的 script 是固定字串、靠 CSP nonce 執行，
  * 不使用 inline 事件屬性。
  */
 
@@ -95,6 +97,17 @@ th{font-size:.8rem;color:var(--muted);font-weight:600;border-top:0;white-space:n
 td.actions{white-space:nowrap}
 td.actions .btn{margin:2px 6px 2px 0}
 .me{color:var(--muted);font-size:.85rem}
+.chip.admin{background:#e0e7ff;color:#3730a3}
+.chip.user{background:#e3eef6;color:#2b4a60}
+select{width:100%;min-height:44px;padding:10px 12px;font-size:1rem;border:1.5px solid var(--line);border-radius:var(--radius-sm);background:#fff;color:var(--text)}
+select:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(58,181,236,.23)}
+.topnav{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;justify-content:space-between;margin:2px 0 6px;font-size:.92rem}
+.topnav .who{color:var(--muted)}
+.topnav .links{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.topnav a{color:var(--primary-dark);text-decoration:none;font-weight:600}
+.topnav a:hover{text-decoration:underline}
+.topnav button{min-height:32px;padding:0 12px;font-size:.88rem}
+a.btn{display:inline-flex;align-items:center;text-decoration:none}
 [hidden]{display:none!important}
 `;
 
@@ -164,8 +177,9 @@ const SCRIPT = `
 
   onSubmit('login-form', function (btn) {
     btn.disabled = true;
-    request('POST', '/settings/login', { email: $('login-email').value, password: $('login-password').value }).then(function (r) {
-      if (r.ok) { location.reload(); return; }
+    var wanted = $('login-form').getAttribute('data-next') || '/';
+    request('POST', '/login', { email: $('login-email').value, password: $('login-password').value, next: wanted }).then(function (r) {
+      if (r.ok) { location.href = (r.data && typeof r.data.next === 'string' && r.data.next) || '/'; return; }
       say('login-msg', failText(r), false);
       btn.disabled = false;
     }, function () { offline('login-msg', btn); });
@@ -237,22 +251,25 @@ const SCRIPT = `
     } catch (e) { done(false); }
   });
 
-  // ---- 管理員帳號管理：表格上的按鈕（事件委派）與共用的編輯面板（新增／編輯／重設密碼）
+  // ---- 帳號管理：表格上的按鈕（事件委派）與共用的編輯面板（新增／編輯／重設密碼）
   var editor = $('admin-editor');
   var mode = null;
   var targetId = null;
   function setRow(id, visible) { var el = $(id); if (el) el.hidden = !visible; }
-  function openEditor(nextMode, id, name, email) {
+  function openEditor(nextMode, id, name, email, role, isMe) {
     mode = nextMode;
     targetId = id;
     var withProfile = nextMode === 'add' || nextMode === 'edit';
     var withPassword = nextMode === 'add' || nextMode === 'reset';
-    $('ae-title').textContent = nextMode === 'add' ? '新增管理員' : (nextMode === 'edit' ? '編輯管理員' : '重設密碼：' + email);
+    $('ae-title').textContent = nextMode === 'add' ? '新增帳號' : (nextMode === 'edit' ? '編輯帳號' : '重設密碼：' + email);
     setRow('ae-row-name', withProfile);
     setRow('ae-row-email', withProfile);
+    setRow('ae-row-role', withProfile);
     setRow('ae-row-password', withPassword);
     $('ae-name').value = nextMode === 'edit' ? name : '';
     $('ae-email').value = nextMode === 'edit' ? email : '';
+    $('ae-role').value = nextMode === 'edit' ? (role === 'admin' ? 'admin' : 'user') : 'user';
+    $('ae-role').disabled = nextMode === 'edit' && isMe;
     $('ae-password').value = '';
     $('ae-password2').value = '';
     $('ae-msg').hidden = true;
@@ -263,7 +280,7 @@ const SCRIPT = `
     if (first) first.focus();
   }
   function closeEditor() { if (editor) editor.hidden = true; mode = null; targetId = null; }
-  function adminResult(r, btn) {
+  function accountResult(r, btn) {
     if (sessionLost(r)) return;
     if (r.ok) { location.reload(); return; }
     say('admin-msg', failText(r), false);
@@ -271,7 +288,7 @@ const SCRIPT = `
   }
 
   var addBtn = $('admin-add');
-  if (addBtn) addBtn.addEventListener('click', function () { openEditor('add', null, '', ''); });
+  if (addBtn) addBtn.addEventListener('click', function () { openEditor('add', null, '', '', 'user', false); });
   var cancelBtn = $('ae-cancel');
   if (cancelBtn) cancelBtn.addEventListener('click', closeEditor);
 
@@ -283,19 +300,21 @@ const SCRIPT = `
     var id = btn.getAttribute('data-id');
     var name = btn.getAttribute('data-name') || '';
     var email = btn.getAttribute('data-email') || '';
-    if (action === 'edit') { openEditor('edit', id, name, email); return; }
-    if (action === 'reset') { openEditor('reset', id, name, email); return; }
+    var role = btn.getAttribute('data-role') || 'user';
+    var isMe = btn.getAttribute('data-me') === '1';
+    if (action === 'edit') { openEditor('edit', id, name, email, role, isMe); return; }
+    if (action === 'reset') { openEditor('reset', id, name, email, role, isMe); return; }
     if (action === 'toggle') {
       var next = btn.getAttribute('data-status') === 'active' ? 'disabled' : 'active';
       if (next === 'disabled' && !window.confirm('確定要停用 ' + email + ' 嗎？\\n對方會立刻被登出，也無法再登入，直到你重新啟用。')) return;
       btn.disabled = true;
-      request('POST', '/api/admins/' + id + '/status', { status: next }).then(function (r) { adminResult(r, btn); }, function () { offline('admin-msg', btn); });
+      request('POST', '/api/accounts/' + id + '/status', { status: next }).then(function (r) { accountResult(r, btn); }, function () { offline('admin-msg', btn); });
       return;
     }
     if (action === 'delete') {
       if (!window.confirm('確定要刪除 ' + email + ' 嗎？\\n這個動作無法復原。')) return;
       btn.disabled = true;
-      request('DELETE', '/api/admins/' + id, {}).then(function (r) { adminResult(r, btn); }, function () { offline('admin-msg', btn); });
+      request('DELETE', '/api/accounts/' + id, {}).then(function (r) { accountResult(r, btn); }, function () { offline('admin-msg', btn); });
     }
   });
 
@@ -303,9 +322,13 @@ const SCRIPT = `
     var pw = $('ae-password').value;
     if ((mode === 'add' || mode === 'reset') && pw !== $('ae-password2').value) { say('ae-msg', '兩次輸入的密碼不一致', false); return; }
     var req;
-    if (mode === 'add') req = request('POST', '/api/admins', { name: $('ae-name').value, email: $('ae-email').value, password: pw });
-    else if (mode === 'edit') req = request('PATCH', '/api/admins/' + targetId, { name: $('ae-name').value, email: $('ae-email').value });
-    else if (mode === 'reset') req = request('POST', '/api/admins/' + targetId + '/password', { newPassword: pw });
+    if (mode === 'add') req = request('POST', '/api/accounts', { name: $('ae-name').value, email: $('ae-email').value, role: $('ae-role').value, password: pw });
+    else if (mode === 'edit') {
+      var patch = { name: $('ae-name').value, email: $('ae-email').value };
+      if (!$('ae-role').disabled) patch.role = $('ae-role').value;
+      req = request('PATCH', '/api/accounts/' + targetId, patch);
+    }
+    else if (mode === 'reset') req = request('POST', '/api/accounts/' + targetId + '/password', { newPassword: pw });
     else return;
     btn.disabled = true;
     req.then(function (r) {
@@ -324,7 +347,7 @@ const SCRIPT = `
     var next = $('new-password').value;
     if (next !== $('new-password2').value) { say('password-msg', '兩次輸入的新密碼不一致', false); return; }
     btn.disabled = true;
-    request('POST', '/settings/password', { currentPassword: $('current-password').value, newPassword: next }).then(function (r) {
+    request('POST', '/account/password', { currentPassword: $('current-password').value, newPassword: next }).then(function (r) {
       btn.disabled = false;
       if (sessionLost(r)) return;
       if (r.ok) {
@@ -340,27 +363,35 @@ const SCRIPT = `
 
   var logoutBtn = $('logout');
   if (logoutBtn) logoutBtn.addEventListener('click', function () {
-    request('POST', '/settings/logout', {}).then(function () { location.reload(); }, function () { location.reload(); });
+    request('POST', '/logout', {}).then(function () { location.href = '/login'; }, function () { location.href = '/login'; });
   });
 })();
 `;
 
 const INSECURE_NOTICE = `<p class="note warn" id="insecure-notice">目前的連線不是 HTTPS（或反向代理沒有送出 X-Forwarded-Proto: https）：密碼與登入 cookie 可能以明文傳送，cookie 也不會加 Secure。請改用 https:// 網址；如果你已經在用 https，請開 <span class="mono">/healthz</span> 確認 <span class="mono">requestIsHttps</span> 是不是 true。</p>`;
 
-function layout(ctx: PageContext, body: string): string {
+interface LayoutOptions {
+  title?: string;
+  heading?: string;
+  sub?: string;
+}
+
+function layout(ctx: PageContext, body: string, options: LayoutOptions = {}): string {
+  const heading = options.heading ?? "savepoint-crate 設定";
+  const sub = options.sub ?? "管理 LINE 群組通知與帳號";
   return `<!DOCTYPE html>
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>設定 - savepoint-crate</title>
+<title>${escapeHtml(options.title ?? "設定 - savepoint-crate")}</title>
 <style>${CSS}</style>
 </head>
 <body>
 <main class="wrap">
-<h1>savepoint-crate 設定</h1>
-<p class="sub">管理 LINE 群組通知與管理員帳號</p>
+<h1>${escapeHtml(heading)}</h1>
+<p class="sub">${escapeHtml(sub)}</p>
 ${ctx.insecure ? INSECURE_NOTICE : ""}
 ${body}
 </main>
@@ -370,14 +401,30 @@ ${body}
 `;
 }
 
+/** 登入頁與帳號頁用的標題（程式名稱與 index.html 的 h1 一致）。 */
+const APP_NAME = "IPAS 庫存盤點裝箱系統";
+
+/** 登入後的頁面頂端：誰登入了、回裝箱程式、我的帳號、（管理員）設定、登出。 */
+function renderNav(me: Pick<Account, "name" | "role">, current: "account" | "settings" | "forbidden"): string {
+  const links = [
+    `<a href="/">裝箱程式</a>`,
+    ...(current === "account" ? [] : [`<a href="/account">我的帳號</a>`]),
+    ...(me.role === "admin" && current !== "settings" ? [`<a href="/settings">設定</a>`] : []),
+  ];
+  return `<nav class="topnav">
+<span class="who">👤 ${escapeHtml(me.name)}（${escapeHtml(roleLabel(me.role))}）</span>
+<span class="links">${links.join("")}<button type="button" class="btn small" id="logout">登出</button></span>
+</nav>`;
+}
+
 export function renderUnavailablePage(ctx: PageContext): string {
   return layout(
     ctx,
     `<section class="card">
-<h2>目前無法使用設定頁</h2>
+<h2>目前無法使用</h2>
 <p class="msg err">${escapeHtml(DATA_DIR_UNAVAILABLE_MESSAGE)}</p>
-<p class="muted">設定頁需要一個「重新部署後仍會保留」的資料目錄，來存放管理密碼與 LINE 設定。在 Zeabur Dashboard 開啟這個服務 → 「硬碟（Volume）」→ 新增，掛載路徑填 <span class="mono">/app/data</span>；儲存後服務會重新啟動，再重新整理這一頁。</p>
-<p class="muted">OCR 辨識、存檔到商品主檔、以及用環境變數設定的 LINE 通知都不受影響。</p>
+<p class="muted">帳號與設定需要一個「重新部署後仍會保留」的資料目錄；沒有它就沒有地方存帳號，所以登入、裝箱程式（OCR 辨識、存檔到商品主檔、關箱通知）與設定頁目前都無法使用。請管理員在 Zeabur Dashboard 開啟這個服務 → 「硬碟（Volume）」→ 新增，掛載路徑填 <span class="mono">/app/data</span>；儲存後服務會重新啟動，再重新整理這一頁。</p>
+<p class="muted">服務本身仍在運作：<span class="mono">/healthz</span> 與 LINE webhook 不受影響。</p>
 </section>`,
   );
 }
@@ -411,7 +458,7 @@ export function renderUpgradePage(ctx: PageContext): string {
     ctx,
     `<section class="card">
 <h2>升級為管理員帳號</h2>
-<p class="muted">這個系統已改成「管理員帳號」制：每位管理員有自己的姓名、Email 與密碼。請輸入<strong>目前使用的管理密碼</strong>，再填入你的姓名與 Email，建立第一位管理員——<strong>密碼沿用目前這個，不需要重設</strong>，LINE 設定與其他資料都不會動。升級後舊的單一密碼與舊的登入會失效，之後用 Email 與密碼登入，並可以在「管理員」區塊新增其他管理員。</p>
+<p class="muted">這個系統已改成「管理員帳號」制：每位管理員有自己的姓名、Email 與密碼。請輸入<strong>目前使用的管理密碼</strong>，再填入你的姓名與 Email，建立第一位管理員——<strong>密碼沿用目前這個，不需要重設</strong>，LINE 設定與其他資料都不會動。升級後舊的單一密碼與舊的登入會失效，之後用 Email 與密碼登入，並可以在設定頁的「帳號管理」替其他同事建立帳號。</p>
 <form id="upgrade-form" autocomplete="off">
 <label for="upgrade-password">目前的管理密碼</label>
 <input type="password" id="upgrade-password" autocomplete="current-password" maxlength="200" required>
@@ -426,12 +473,12 @@ export function renderUpgradePage(ctx: PageContext): string {
   );
 }
 
-export function renderLoginPage(ctx: PageContext): string {
+export function renderLoginPage(ctx: PageContext, next = "/"): string {
   return layout(
     ctx,
     `<section class="card">
 <h2>登入</h2>
-<form id="login-form">
+<form id="login-form"${next === "/" ? "" : ` data-next="${escapeHtml(next)}"`}>
 <label for="login-email">Email</label>
 <input type="email" id="login-email" autocomplete="username" spellcheck="false" maxlength="254" required>
 <label for="login-password">密碼</label>
@@ -439,8 +486,66 @@ export function renderLoginPage(ctx: PageContext): string {
 <div class="row"><button type="submit" class="btn primary">登入</button></div>
 <p id="login-msg" class="msg" role="status" hidden></p>
 </form>
-<p class="muted">忘記密碼：請其他管理員在「管理員」區塊幫你重設。所有管理員都登入不了時，請參考 README 的「忘記所有密碼時的復原方式」（需要動到 Volume 裡的設定檔，有風險，請先讀完說明）。</p>
+<p class="muted">帳號由管理員建立。忘記密碼：請管理員在設定頁的「帳號管理」幫你重設。所有管理員都登入不了時，請參考 README 的「忘記所有密碼時的復原方式」（需要動到 Volume 裡的設定檔，有風險，請先讀完說明）。</p>
 </section>`,
+    { title: `登入 - ${APP_NAME}`, heading: APP_NAME, sub: "請用你的帳號（Email）與密碼登入" },
+  );
+}
+
+/** /login：還沒有任何帳號時沒有人登入得了——請管理員先到設定頁完成第一次設定。 */
+export function renderNoAccountsPage(ctx: PageContext, legacyPending: boolean): string {
+  return layout(
+    ctx,
+    `<section class="card">
+<h2>尚未建立任何帳號</h2>
+<p class="muted">這個系統需要先登入才能使用，但目前還沒有任何帳號。請管理員先到設定頁完成第一次設定：${
+      legacyPending
+        ? "用目前正在使用的管理密碼升級成管理員帳號（升級後再替其他人建立帳號）。"
+        : "用服務啟動記錄裡的設定碼建立第一位管理員（之後再替其他人建立帳號）。"
+    }</p>
+<div class="row"><a class="btn primary" href="/settings">前往設定頁</a></div>
+</section>`,
+    { title: `尚未建立帳號 - ${APP_NAME}`, heading: APP_NAME, sub: "請用你的帳號（Email）與密碼登入" },
+  );
+}
+
+/** 登入的是一般使用者，進設定頁：403。 */
+export function renderForbiddenPage(ctx: PageContext, me: Pick<Account, "name" | "role">): string {
+  return layout(
+    ctx,
+    `${renderNav(me, "forbidden")}
+<section class="card">
+<h2>需要管理員權限</h2>
+<p class="muted">設定頁只有管理員可以使用。你目前登入的帳號是「${escapeHtml(me.name)}」（${escapeHtml(roleLabel(me.role))}），可以使用裝箱程式與變更自己的密碼；需要調整 LINE 通知或帳號的話，請洽管理員。</p>
+<div class="row"><a class="btn primary" href="/">回裝箱程式</a></div>
+</section>`,
+    { title: `需要管理員權限 - ${APP_NAME}`, heading: "需要管理員權限", sub: APP_NAME },
+  );
+}
+
+/** /account：任一角色都可以看自己的資料、變更自己的密碼。 */
+export function renderAccountPage(ctx: PageContext, me: Pick<Account, "name" | "email" | "role">): string {
+  return layout(
+    ctx,
+    `${renderNav(me, "account")}
+<section class="card">
+<h2>我的帳號</h2>
+<p class="muted">姓名：<strong id="me-name">${escapeHtml(me.name)}</strong><br>Email：<strong id="me-email" class="mono">${escapeHtml(me.email)}</strong><br>角色：<strong id="me-role">${escapeHtml(roleLabel(me.role))}</strong><br>要修改姓名、Email 或角色，請洽管理員。</p>
+<form id="password-form" autocomplete="off">
+<label for="current-password">目前的密碼</label>
+<input type="password" id="current-password" autocomplete="current-password" maxlength="200" required>
+<label for="new-password">新密碼（至少 10 個字元）</label>
+<input type="password" id="new-password" autocomplete="new-password" minlength="10" maxlength="200" required>
+<label for="new-password2">再輸入一次新密碼</label>
+<input type="password" id="new-password2" autocomplete="new-password" minlength="10" maxlength="200" required>
+<div class="row">
+<button type="submit" class="btn primary">變更我的密碼</button>
+</div>
+<p class="muted">變更密碼後，你在其他裝置上的登入會全部失效（其他人不受影響）。</p>
+<p id="password-msg" class="msg" role="status" hidden></p>
+</form>
+</section>`,
+    { title: `我的帳號 - ${APP_NAME}`, heading: "我的帳號", sub: APP_NAME },
   );
 }
 
@@ -474,7 +579,7 @@ function renderStatus(view: SettingsView): string {
   else chips.push(chip("bad", "LINE 關箱通知：設定未完成"));
   chips.push(chip(eff.lineWebhookConfigured ? "ok" : "bad", eff.lineWebhookConfigured ? "Webhook：已啟用" : "Webhook：缺少 Channel secret"));
   chips.push(chip("", `設定來源：${eff.source === "settings" ? "設定頁" : eff.source === "env" ? "環境變數（備援）" : "尚未設定"}`));
-  chips.push(chip("", `管理員：${view.adminCount} 位`));
+  chips.push(chip("", `帳號：${view.accountCount} 個（管理員 ${view.adminCount} 位）`));
   const mountWarning =
     view.dataDirWritable && view.dataDirMounted === false
       ? `<p class="note warn">這個資料目錄看起來不是掛載的 Volume，服務重新部署後設定會消失。請在 Zeabur 掛載 Volume 到 <span class="mono">/app/data</span>。</p>`
@@ -554,16 +659,17 @@ ${body}
 </section>`;
 }
 
-function renderAdminRow(admin: AdminPublic, meId: string): string {
-  const isMe = admin.id === meId;
-  const active = admin.status === "active";
-  const data = `data-id="${escapeHtml(admin.id)}" data-name="${escapeHtml(admin.name)}" data-email="${escapeHtml(admin.email)}"`;
-  const lastLogin = admin.lastLoginAt ? formatSeenAt(admin.lastLoginAt) : "—";
-  // 對自己：只能編輯姓名／Email；重設密碼請用「我的帳號」、不能停用或刪除自己（伺服器端也會擋）
+function renderAccountRow(account: AccountPublic, meId: string): string {
+  const isMe = account.id === meId;
+  const active = account.status === "active";
+  const data = `data-id="${escapeHtml(account.id)}" data-name="${escapeHtml(account.name)}" data-email="${escapeHtml(account.email)}" data-role="${account.role}" data-me="${isMe ? "1" : "0"}"`;
+  const lastLogin = account.lastLoginAt ? formatSeenAt(account.lastLoginAt) : "—";
+  // 對自己：只能編輯姓名／Email（角色不能自己降級）；重設密碼請用「我的帳號」、不能停用或刪除自己（伺服器端也會擋）
   const selfHint = ' disabled title="不能對自己的帳號這麼做"';
   return `<tr>
-<td>${escapeHtml(admin.name)}${isMe ? ' <span class="me">（你）</span>' : ""}</td>
-<td class="mono">${escapeHtml(admin.email)}</td>
+<td>${escapeHtml(account.name)}${isMe ? ' <span class="me">（你）</span>' : ""}</td>
+<td class="mono">${escapeHtml(account.email)}</td>
+<td>${account.role === "admin" ? '<span class="chip admin">管理員</span>' : '<span class="chip user">一般使用者</span>'}</td>
 <td>${active ? '<span class="chip ok">啟用</span>' : '<span class="chip bad">停用</span>'}</td>
 <td>${escapeHtml(lastLogin)}</td>
 <td class="actions">
@@ -575,24 +681,24 @@ function renderAdminRow(admin: AdminPublic, meId: string): string {
 </tr>`;
 }
 
-function renderAdminsCard(view: SettingsView, admins: ReadonlyArray<AdminPublic>): string {
-  const rows = admins.map((admin) => renderAdminRow(admin, view.me.id)).join("\n");
+function renderAccountsCard(view: SettingsView, accounts: ReadonlyArray<AccountPublic>): string {
+  const rows = accounts.map((account) => renderAccountRow(account, view.me.id)).join("\n");
   return `<section class="card">
-<h2>管理員</h2>
-<p class="muted">每位管理員用自己的 Email 與密碼登入。停用或重設密碼會立刻讓對方所有裝置上的登入失效；不能停用或刪除自己，也不能停用或刪除最後一位啟用中的管理員。</p>
+<h2>帳號管理</h2>
+<p class="muted">所有人都要用自己的 Email 與密碼登入才能使用裝箱程式。<strong>管理員</strong>可以進設定頁、管理所有帳號；<strong>一般使用者</strong>只能使用裝箱程式與變更自己的密碼。停用、重設密碼或改角色會立刻讓對方所有裝置上的登入失效；不能停用、刪除自己，也不能把自己改成一般使用者，並且不能停用、刪除或降級最後一位啟用中的管理員。</p>
 <div class="tablewrap">
 <table id="admin-table">
-<thead><tr><th>姓名</th><th>Email</th><th>狀態</th><th>最後登入</th><th>操作</th></tr></thead>
+<thead><tr><th>姓名</th><th>Email</th><th>角色</th><th>狀態</th><th>最後登入</th><th>操作</th></tr></thead>
 <tbody>
 ${rows}
 </tbody>
 </table>
 </div>
-<div class="row"><button type="button" class="btn primary" id="admin-add">新增管理員</button></div>
+<div class="row"><button type="button" class="btn primary" id="admin-add">新增帳號</button></div>
 <p id="admin-msg" class="msg" role="status" hidden></p>
 </section>
 <section class="card" id="admin-editor" hidden>
-<h2 id="ae-title">新增管理員</h2>
+<h2 id="ae-title">新增帳號</h2>
 <form id="admin-form" autocomplete="off">
 <div id="ae-row-name">
 <label for="ae-name">姓名</label>
@@ -601,6 +707,13 @@ ${rows}
 <div id="ae-row-email">
 <label for="ae-email">Email（登入帳號）</label>
 <input type="email" id="ae-email" autocomplete="off" spellcheck="false" maxlength="254">
+</div>
+<div id="ae-row-role">
+<label for="ae-role">角色</label>
+<select id="ae-role">
+<option value="user">一般使用者（只能使用裝箱程式）</option>
+<option value="admin">管理員（可進設定頁、管理帳號）</option>
+</select>
 </div>
 <div id="ae-row-password">
 <label for="ae-password">密碼（至少 10 個字元）</label>
@@ -617,30 +730,9 @@ ${rows}
 </section>`;
 }
 
-function renderAccountCard(view: SettingsView): string {
-  return `<section class="card">
-<h2>我的帳號</h2>
-<p class="muted">姓名：<strong id="me-name">${escapeHtml(view.me.name)}</strong><br>Email：<strong id="me-email" class="mono">${escapeHtml(view.me.email)}</strong>（要修改姓名或 Email，請用上面「管理員」表格裡自己那一列的「編輯」）</p>
-<form id="password-form" autocomplete="off">
-<label for="current-password">目前的密碼</label>
-<input type="password" id="current-password" autocomplete="current-password" maxlength="200" required>
-<label for="new-password">新密碼（至少 10 個字元）</label>
-<input type="password" id="new-password" autocomplete="new-password" minlength="10" maxlength="200" required>
-<label for="new-password2">再輸入一次新密碼</label>
-<input type="password" id="new-password2" autocomplete="new-password" minlength="10" maxlength="200" required>
-<div class="row">
-<button type="submit" class="btn primary">變更我的密碼</button>
-<button type="button" class="btn" id="logout">登出</button>
-</div>
-<p class="muted">變更密碼後，你在其他裝置上的登入會全部失效（其他管理員不受影響）。</p>
-<p id="password-msg" class="msg" role="status" hidden></p>
-</form>
-</section>`;
-}
-
-export function renderSettingsPage(ctx: PageContext, view: SettingsView, admins: ReadonlyArray<AdminPublic>): string {
+export function renderSettingsPage(ctx: PageContext, view: SettingsView, accounts: ReadonlyArray<AccountPublic>): string {
   return layout(
     ctx,
-    [renderStatus(view), renderLineCard(view), renderWebhookCard(ctx), renderCapturedCard(view), renderAdminsCard(view, admins), renderAccountCard(view)].join("\n"),
+    [renderNav(view.me, "settings"), renderStatus(view), renderLineCard(view), renderWebhookCard(ctx), renderCapturedCard(view), renderAccountsCard(view, accounts)].join("\n"),
   );
 }

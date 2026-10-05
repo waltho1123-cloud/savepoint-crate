@@ -1,10 +1,10 @@
-import { summarizeAdmins } from "./admins.js";
+import { summarizeAccounts } from "./accounts.js";
 import type { FetchLike, Logger } from "./common.js";
 import type { AppEnv } from "./env.js";
 import { fetchGroupName, type LineGroupEvent } from "./line.js";
 import {
   CAPTURED_GROUPS_MAX,
-  type AdminAccount,
+  type Account,
   type CapturedGroup,
   type ReadonlySettings,
   type SettingsStore,
@@ -80,11 +80,13 @@ export interface SettingsView {
   dataDirMounted: boolean | null;
   /** 有啟用中的管理員，或仍有待升級的舊版單一密碼（和 /healthz 同一個判斷）。 */
   adminConfigured: boolean;
-  /** 管理員帳號總數（含停用的）。 */
+  /** 角色是 admin 的帳號數（含停用的）。 */
   adminCount: number;
+  /** 帳號總數（兩種角色、含停用的）。 */
+  accountCount: number;
   legacyAdminPending: boolean;
-  /** 目前登入的管理員。 */
-  me: { id: string; name: string; email: string };
+  /** 目前登入的帳號（設定頁只有管理員進得來）。 */
+  me: { id: string; name: string; email: string; role: Account["role"] };
   line: {
     enabled: boolean;
     channelAccessToken: MaskedCredential;
@@ -103,14 +105,14 @@ export interface SettingsView {
   captured: CapturedGroup[];
 }
 
-export function buildSettingsView(env: AppEnv, store: SettingsStore, me: Pick<AdminAccount, "id" | "name" | "email">): SettingsView {
+export function buildSettingsView(env: AppEnv, store: SettingsStore, me: Pick<Account, "id" | "name" | "email" | "role">): SettingsView {
   const data = store.data;
   const effective = resolveLineConfig(env, data);
   return {
     dataDirWritable: store.writable,
     dataDirMounted: store.mounted,
-    ...summarizeAdmins(data),
-    me: { id: me.id, name: me.name, email: me.email },
+    ...summarizeAccounts(data),
+    me: { id: me.id, name: me.name, email: me.email, role: me.role },
     line: {
       enabled: data.line.enabled,
       channelAccessToken: maskCredential(data.line.channelAccessToken),

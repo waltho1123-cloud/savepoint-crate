@@ -1,18 +1,19 @@
 # savepoint-crate — IPAS 庫存盤點裝箱系統
 
-倉庫人員用手機開網頁，建立箱號 → 對著商品條碼標籤拍照 → 系統用 OpenAI Vision 辨識（條碼、品名、性別、顏色、尺寸）→ 人工確認或修改 → **關箱時**逐筆寫進 Google 試算表「商品主檔」，並（選配）推播一則關箱通知到 LINE 群組。管理員另有 `/settings` 設定頁（用自己的 Email 與密碼登入後設定 LINE 通知、管理其他管理員帳號，不必改環境變數），見「設定頁與 Volume」。
+倉庫人員用手機開網頁、**用自己的帳號（Email＋密碼）登入**後，建立箱號 → 對著商品條碼標籤拍照 → 系統用 OpenAI Vision 辨識（條碼、品名、性別、顏色、尺寸）→ 人工確認或修改 → **關箱時**逐筆寫進 Google 試算表「商品主檔」，並（選配）推播一則關箱通知到 LINE 群組（訊息帶操作者的姓名）。**全站要登入**：帳號有兩種角色——管理員（可進 `/settings` 設定頁：設定 LINE 通知、建立與管理所有人的帳號與角色）與一般使用者（只能使用裝箱程式與變更自己的密碼），見「設定頁與 Volume」。
 
 ## 架構
 
-這是**單一 Node 服務**（Hono ＋ `@hono/node-server`，TypeScript）：同一個服務既提供原本的 `index.html`，也提供後端端點（辨識、存檔、關箱 LINE 通知）。OpenAI 金鑰與 Google 服務帳號金鑰只存在伺服器環境變數；LINE token 存在環境變數或設定頁的設定檔（Volume 上，見「設定頁與 Volume」）。它們都不會進入前端。
+這是**單一 Node 服務**（Hono ＋ `@hono/node-server`，TypeScript）：同一個服務既提供原本的 `index.html`，也提供後端端點（辨識、存檔、關箱 LINE 通知）。OpenAI 金鑰與 Google 服務帳號金鑰只存在伺服器環境變數；LINE token 存在環境變數或設定頁的設定檔（Volume 上，見「設定頁與 Volume」）。它們都不會進入前端。帳號（含密碼雜湊）也存在 Volume 上的設定檔。
 
 ```
-手機瀏覽器 ── GET /            ─→ index.html（純靜態頁，邏輯都在頁面內）
-          ── POST /api/ocr    ─→ 後端 ─→ OpenAI chat/completions（Vision）
-          ── POST /api/save   ─→ 後端 ─→ Google Sheets API（讀表頭＋append）
-          ── POST /api/box-closed ─→ 後端 ─→ LINE Messaging API（push 到群組；選配）
-LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；選配）
-管理員 ──── GET /settings、/api/settings*、/api/admins* ─→ 後端 ─→ 資料目錄 DATA_DIR/settings.json（Volume；設定頁用）
+手機瀏覽器 ── GET /login、POST /login ─→ 後端（Email＋密碼登入，發 session cookie）
+          ── GET /            ─→ index.html（要先登入；純靜態頁，邏輯都在頁面內）
+          ── POST /api/ocr    ─→ 後端（要登入）─→ OpenAI chat/completions（Vision）
+          ── POST /api/save   ─→ 後端（要登入）─→ Google Sheets API（讀表頭＋append）
+          ── POST /api/box-closed ─→ 後端（要登入）─→ LINE Messaging API（push 到群組，訊息帶操作者；選配）
+LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；選配；靠簽章驗證，不用登入）
+管理員 ──── GET /settings、/api/settings*、/api/accounts* ─→ 後端 ─→ 資料目錄 DATA_DIR/settings.json（Volume：帳號與 LINE 設定）
 ```
 
 > 2026-10-05 起取代原本打到 n8n（`waltho1123.zeabur.app/webhook/ipas-ocr`、`/webhook/ipas-save-product`）的兩條 webhook，詳見下方「n8n 已退役」。
@@ -21,32 +22,35 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 
 | 方法與路徑 | 說明 |
 |---|---|
-| `GET /`、`GET /index.html` | 回傳 `index.html`（`Cache-Control: no-cache`）。 |
-| `GET /healthz` | 回 `{ ok, openaiConfigured, sheetsConfigured, serviceAccountEmail, clientIp, requestIsHttps, dataDirWritable, dataDirMounted, adminConfigured, adminCount, legacyAdminPending, lineConfigured, lineWebhookConfigured, lineSource }`。`requestIsHttps`：這個請求被判斷為 HTTPS（看 `X-Forwarded-Proto`；Zeabur 的反向代理要有送，登入 cookie 才會加 `Secure`），和 `clientIp` 一樣是部署後 curl 一次就能確認代理行為的診斷欄位。`dataDirWritable`：資料目錄（Volume）可寫入，設定頁才能用；`dataDirMounted`：它是不是獨立掛載的磁碟（`false`＝只是容器內的暫存目錄，重新部署後設定會消失；`null`＝判斷不出來，例如非 Linux）；`adminConfigured`：有至少一位啟用中的管理員，或仍有待升級的舊版單一密碼（設定頁「有人進得去」）；`adminCount`：管理員帳號總數（含停用的）；`legacyAdminPending`：還有舊版的單一管理密碼沒升級成管理員帳號。`lineConfigured` 是**生效的** LINE 設定裡 token 與群組 ID 都有、且開關開著（關箱通知會推播），`lineWebhookConfigured` 是有 channel secret（webhook 啟用），`lineSource` 是生效的設定來自設定頁（`"settings"`）還是環境變數（`"env"`），都沒設定是 `null`；皆不含任何設定值。`serviceAccountEmail` 是從 `GOOGLE_SERVICE_ACCOUNT_CREDENTIALS` 解析出的 `client_email`（缺少或解析失敗時為 `null`），部署後用它知道要把試算表分享給誰；**絕不**回傳 `private_key` 或憑證其他欄位。`clientIp` 是**限流用的同一個判斷**所得到的呼叫端 IP（`X-Forwarded-For` 由右往左第一個公開位址；沒有就是 TCP 連線位址；再沒有就是 `"unknown"`），部署後 curl 一次就能確認 Zeabur 反向代理的處理是否正確（見「部署」）。 |
-| `POST /api/ocr` | 請求 `{ "image": "data:image/jpeg;base64,...", "boxId": "BOX-001" }`。成功 `{ "success": true, "data": { "barcode", "productName", "gender", "color", "size" } }`。 |
-| `POST /api/save` | 請求 `{ seqNo, date, boxId, barcode, productName, gender, color, size, quantity, time }`（與原 n8n webhook 相同）。成功 `{ "success": true, "range": "'商品主檔'!A125:K125" }`；`range` 取自 Sheets API `values.append` 回應的 `updates.updatedRange`，拿不到時省略該欄位。 |
-| `POST /api/box-closed` | 關箱後的 LINE 群組通知（見「LINE 群組通知」）。請求 `{ boxId, closedAt?, items: [{ barcode, productName, gender, color, size, qty }], total, successCount, failedCount }`。**輸入格式正確、且沒被限流（429）或擋下（413）時一律回 200**：`{ "success": true, "notified": true }`，或 `{ "success": true, "notified": false, "reason": "not_configured" }`（LINE 沒設定好，靜默略過）、`{ "success": true, "notified": false, "reason": "push_failed", "error": "…" }`（推播失敗，`error` 是簡短原因）——LINE 的狀況不會讓關箱看起來失敗。 |
-| `POST /api/line/webhook` | LINE 平台的 webhook（生效的設定裡有 channel secret 才啟用，否則 503；secret 來自設定頁或 `LINE_CHANNEL_SECRET`，見「設定頁與 Volume」）。驗證 `X-Line-Signature`（對原始 body 做 HMAC-SHA256，不符回 401），驗證通過一律回 200。群組裡的 `join` 事件或文字訊息「群組ID」／「群組 ID」，會用 `replyToken` 回覆該群組的 ID；`join` 與群組裡的所有訊息事件還會把該群組記到設定檔的「最近收到的群組」（同一群組去重、最新在前、最多 10 筆；同一個群組的訊息事件 10 分鐘內只處理一次——查名稱與寫檔都不重複，節流表在記憶體內、服務重啟後重新開始），讓設定頁一鍵帶入群組 ID；其他事件忽略。 |
-| `GET /settings` | 設定頁（HTML；管理員用）。依狀態顯示：資料目錄不可用 → 503 說明；全新安裝 → 用設定碼建立第一位管理員；還有舊版的單一管理密碼 → 「升級為管理員帳號」；有管理員但沒登入 → Email＋密碼登入；已登入 → LINE 設定、管理員、我的帳號。見「設定頁與 Volume」。 |
-| `POST /settings/setup`、`/settings/upgrade`、`/settings/login`、`/settings/logout`、`/settings/password` | 建立第一位管理員（設定碼＋姓名＋Email＋密碼）／把舊版單一密碼升級成管理員帳號（目前的密碼＋姓名＋Email）／Email＋密碼登入／登出／更改**自己**的密碼。狀態變更端點（含下面的 `/api/*`）一律只收 `Content-Type: application/json`，且必須帶標頭 `X-Requested-With: XMLHttpRequest`（CSRF 防護）。 |
-| `GET /api/settings`、`PUT /api/settings/line`、`POST /api/settings/line/test` | 讀目前設定（token／secret 只回「已設定」與末 4 碼；另有 `me`＝目前登入的管理員 `{id,name,email}`）／儲存 LINE 設定／推播測試訊息到已儲存的群組。需要登入（session cookie），否則 401。 |
-| `GET /api/admins`、`POST /api/admins`、`PATCH /api/admins/:id`、`POST /api/admins/:id/password`、`POST /api/admins/:id/status`、`DELETE /api/admins/:id` | 管理員帳號管理（需要登入）：列出（不含密碼雜湊）／新增 `{name,email,password}`／修改 `{name?,email?}`／重設**他人**密碼 `{newPassword}`／停用或啟用 `{status:"active"\|"disabled"}`／刪除。規則見「設定頁與 Volume → 管理員帳號」。 |
+| `GET /`、`GET /index.html` | 回傳 `index.html`（`Cache-Control: no-cache`）。**沒登入 → 302 導向 `/login?next=/`**（登入後回到主頁）。 |
+| `GET /healthz`（公開，不用登入） | 回 `{ ok, openaiConfigured, sheetsConfigured, serviceAccountEmail, clientIp, requestIsHttps, dataDirWritable, dataDirMounted, adminConfigured, adminCount, accountCount, legacyAdminPending, lineConfigured, lineWebhookConfigured, lineSource }`。`requestIsHttps`：這個請求被判斷為 HTTPS（看 `X-Forwarded-Proto`；Zeabur 的反向代理要有送，登入 cookie 才會加 `Secure`），和 `clientIp` 一樣是部署後 curl 一次就能確認代理行為的診斷欄位。`dataDirWritable`：資料目錄（Volume）可寫入，設定頁才能用；`dataDirMounted`：它是不是獨立掛載的磁碟（`false`＝只是容器內的暫存目錄，重新部署後設定會消失；`null`＝判斷不出來，例如非 Linux）；`adminConfigured`：有至少一位啟用中的管理員（角色 admin），或仍有待升級的舊版單一密碼（設定頁「有人進得去」）；`adminCount`：角色是 admin 的帳號數（含停用的）；`accountCount`：帳號總數（兩種角色、含停用的）；`legacyAdminPending`：還有舊版的單一管理密碼沒升級成帳號。`lineConfigured` 是**生效的** LINE 設定裡 token 與群組 ID 都有、且開關開著（關箱通知會推播），`lineWebhookConfigured` 是有 channel secret（webhook 啟用），`lineSource` 是生效的設定來自設定頁（`"settings"`）還是環境變數（`"env"`），都沒設定是 `null`；皆不含任何設定值。`serviceAccountEmail` 是從 `GOOGLE_SERVICE_ACCOUNT_CREDENTIALS` 解析出的 `client_email`（缺少或解析失敗時為 `null`），部署後用它知道要把試算表分享給誰；**絕不**回傳 `private_key` 或憑證其他欄位。`clientIp` 是**限流用的同一個判斷**所得到的呼叫端 IP（`X-Forwarded-For` 由右往左第一個公開位址；沒有就是 TCP 連線位址；再沒有就是 `"unknown"`），部署後 curl 一次就能確認 Zeabur 反向代理的處理是否正確（見「部署」）。 |
+| `POST /api/ocr` | **要登入（任一角色），而且要帶 `X-Requested-With: XMLHttpRequest`**（沒登入 401 `{success:false,error:"請先登入"}`、缺標頭 403；`/api/save`、`/api/box-closed` 同）。請求 `{ "image": "data:image/jpeg;base64,...", "boxId": "BOX-001" }`。成功 `{ "success": true, "data": { "barcode", "productName", "gender", "color", "size" } }`。 |
+| `POST /api/save` | 要登入（見 `/api/ocr`）。請求 `{ seqNo, date, boxId, barcode, productName, gender, color, size, quantity, time }`（與原 n8n webhook 相同）。成功 `{ "success": true, "range": "'商品主檔'!A125:K125" }`；`range` 取自 Sheets API `values.append` 回應的 `updates.updatedRange`，拿不到時省略該欄位。 |
+| `POST /api/box-closed` | 要登入（見 `/api/ocr`）。關箱後的 LINE 群組通知（見「LINE 群組通知」），訊息帶**登入者的姓名**（來自 session，請求內容裡的任何 `operator` 欄位都忽略）。請求 `{ boxId, closedAt?, items: [{ barcode, productName, gender, color, size, qty }], total, successCount, failedCount }`。**輸入格式正確、且沒被限流（429）或擋下（413）時一律回 200**：`{ "success": true, "notified": true }`，或 `{ "success": true, "notified": false, "reason": "not_configured" }`（LINE 沒設定好，靜默略過）、`{ "success": true, "notified": false, "reason": "push_failed", "error": "…" }`（推播失敗，`error` 是簡短原因）——LINE 的狀況不會讓關箱看起來失敗。 |
+| `POST /api/line/webhook` | 公開（靠簽章驗證，不用登入）。LINE 平台的 webhook（生效的設定裡有 channel secret 才啟用，否則 503；secret 來自設定頁或 `LINE_CHANNEL_SECRET`，見「設定頁與 Volume」）。驗證 `X-Line-Signature`（對原始 body 做 HMAC-SHA256，不符回 401），驗證通過一律回 200。群組裡的 `join` 事件或文字訊息「群組ID」／「群組 ID」，會用 `replyToken` 回覆該群組的 ID；`join` 與群組裡的所有訊息事件還會把該群組記到設定檔的「最近收到的群組」（同一群組去重、最新在前、最多 10 筆；同一個群組的訊息事件 10 分鐘內只處理一次——查名稱與寫檔都不重複，節流表在記憶體內、服務重啟後重新開始），讓設定頁一鍵帶入群組 ID；其他事件忽略。 |
+| `GET /login`、`POST /login`、`POST /logout` | 登入頁（Email＋密碼）／登入 `{ email, password, next? }` → `{ success: true, next }`（`next` 只接受同源的相對路徑：以 `/` 開頭、不是 `//`、不含反斜線與控制字元，其他一律當成 `/`）／登出（清 cookie）。已登入者開 `/login` 會被導向 `/`；還沒有任何帳號時 `/login` 顯示「請管理員先到設定頁」。 |
+| `GET /api/me` | 目前登入者 `{ "success": true, "data": { "id", "name", "email", "role" } }`（任一角色；沒登入 401）。主頁頂端的使用者列用它。 |
+| `GET /account`、`POST /account/password` | 我的帳號頁（姓名、Email、角色、變更我的密碼；任一角色；沒登入 302 導向 `/login?next=/account`）／更改**自己**的密碼 `{ currentPassword, newPassword }`（目前的密碼不對 403；成功後這個瀏覽器自動換新的登入、其他裝置的登入失效）。 |
+| `GET /settings` | 設定頁（HTML；**只有管理員**）：沒登入 302 導向 `/login?next=/settings`、登入的是一般使用者 403（「需要管理員權限」頁）、資料目錄不可用 503。還沒有任何帳號時（全新安裝、或舊版單一密碼待升級）改顯示建立第一位管理員／升級的表單（這兩個流程各有自己的秘密擋著：設定碼、目前的密碼）。已登入的管理員：LINE 設定、帳號管理。見「設定頁與 Volume」。 |
+| `POST /settings/setup`、`/settings/upgrade` | 建立第一位管理員（設定碼＋姓名＋Email＋密碼；角色一定是 admin）／把舊版單一密碼升級成管理員帳號（目前的密碼＋姓名＋Email；角色 admin）。**所有狀態變更端點**（含 `/login`、`/logout`、`/account/password` 與下面的 `/api/*`）一律只收 `Content-Type: application/json`，且必須帶標頭 `X-Requested-With: XMLHttpRequest`（CSRF 防護）。 |
+| `GET /api/settings`、`PUT /api/settings/line`、`POST /api/settings/line/test` | **只有管理員**（沒登入 401、一般使用者 403 `{success:false,error:"需要管理員權限"}`）：讀目前設定（token／secret 只回「已設定」與末 4 碼；另有 `me`＝目前登入的帳號 `{id,name,email,role}`）／儲存 LINE 設定／推播測試訊息到已儲存的群組。 |
+| `GET /api/accounts`、`POST /api/accounts`、`PATCH /api/accounts/:id`、`POST /api/accounts/:id/password`、`POST /api/accounts/:id/status`、`DELETE /api/accounts/:id` | 帳號管理（**只有管理員**）：列出（不含密碼雜湊，含角色）／新增 `{name,email,password,role?}`（`role` 是 `admin` 或 `user`，沒給就是 `user`）／修改 `{name?,email?,role?}`／重設**他人**密碼 `{newPassword}`／停用或啟用 `{status:"active"\|"disabled"}`／刪除。規則見「設定頁與 Volume → 帳號與角色」。 |
 
 失敗一律回 `{ "success": false, "error": "…" }`（繁中訊息，不含金鑰與上游原始回應），狀態碼如下：
 
 | 狀態碼 | 情況 |
 |---|---|
-| 400 | JSON 格式錯誤、缺少 `image`、`image` 不是合法 data URL、`/api/save` 欄位型別不對或整筆都是空的、`/api/box-closed` 輸入不合規則（`boxId` 空白或超過 100 字、`items` 不是陣列或超過 500 筆、文字欄位超過 200 字、`qty` 不是 1～9999 的整數、數量欄位不是非負整數）；設定頁與 `/api/admins*` 的輸入不合規則（姓名不是 1～50 字、Email 格式不對、密碼不是 10～200 字、`status` 不是 `active`／`disabled`、`PATCH` 沒有任何要改的欄位、用「重設他人密碼」端點改自己的密碼、還沒有任何管理員就想登入） |
-| 401 | `/api/line/webhook` 的 `X-Line-Signature` 缺少或不符；設定 API 沒登入（或 cookie 過期、被竄改、帳號已被停用／刪除、重設過密碼）；登入失敗（帳號不存在、帳號停用、密碼不對都是同一句「帳號或密碼不正確」）；升級時目前的密碼不對 |
-| 403 | 設定頁：首次設定碼不正確、更改自己的密碼時「目前的密碼」不正確、狀態變更請求缺少 `X-Requested-With` 標頭 |
-| 404 | `/api/admins/:id*`：找不到這位管理員（id 不存在或格式不對） |
-| 409 | `/settings/setup`：已經有管理員（或還有舊版單一密碼等著升級）；`/settings/upgrade`：沒有待升級的舊版密碼；`/settings/login`：還沒升級；`/api/admins*`：Email 重複、不能停用或刪除自己、不能停用或刪除最後一位啟用中的管理員、管理員數量已達上限（50 位） |
+| 400 | JSON 格式錯誤、缺少 `image`、`image` 不是合法 data URL、`/api/save` 欄位型別不對或整筆都是空的、`/api/box-closed` 輸入不合規則（`boxId` 空白或超過 100 字、`items` 不是陣列或超過 500 筆、文字欄位超過 200 字、`qty` 不是 1～9999 的整數、數量欄位不是非負整數）；設定頁、登入與 `/api/accounts*` 的輸入不合規則（姓名不是 1～50 字、Email 格式不對、密碼不是 10～200 字、`role` 不是 `admin`／`user`、`status` 不是 `active`／`disabled`、`PATCH` 沒有任何要改的欄位、用「重設他人密碼」端點改自己的密碼、還沒有任何帳號就想登入） |
+| 401 | `/api/line/webhook` 的 `X-Line-Signature` 缺少或不符；**OCR、存檔、關箱通知、`/api/me`、設定 API、帳號 API 沒登入**（或 cookie 過期、被竄改、帳號已被停用／刪除、重設過密碼或改過角色）；登入失敗（帳號不存在、帳號停用、密碼不對都是同一句「帳號或密碼不正確」）；升級時目前的密碼不對 |
+| 403 | 登入的是一般使用者卻存取設定頁、設定 API、帳號 API（「需要管理員權限」）；首次設定碼不正確；更改自己的密碼時「目前的密碼」不正確；狀態變更請求（含 OCR、存檔、關箱通知）缺少 `X-Requested-With` 標頭 |
+| 404 | `/api/accounts/:id*`：找不到這個帳號（id 不存在或格式不對） |
+| 409 | `/settings/setup`：已經有帳號（或還有舊版單一密碼等著升級）；`/settings/upgrade`：沒有待升級的舊版密碼；`/login`：還沒升級；`/api/accounts*`：Email 重複、不能停用或刪除自己、不能把自己改成一般使用者、不能停用、刪除或降級最後一位啟用中的管理員、帳號數量已達上限（200 個） |
 | 415 | 設定頁的狀態變更請求不是 `Content-Type: application/json` |
-| 413 | 請求內容超過 15 MB（`/settings/*`、`/api/settings/*`、`/api/admins*` 的上限是 16 KB） |
-| 429 | 同一個 IP 一分鐘內超過額度：`/api/ocr` 60 次、`/api/save` 600 次、`/api/box-closed` 60 次、`/api/line/webhook` 120 次，`/api/settings*` 與 `/api/admins*` 共用 60 次，五個額度各自計算（其他 `/api/*` 路徑算進 OCR 的額度）；設定頁另有更嚴的限制：建立第一位管理員 5 次、登入／升級／更改自己的密碼共用 10 次、測試訊息 6 次；另外 scrypt（密碼雜湊／驗證）同時最多跑 2 個、排隊 16 個，超過直接回 429「目前驗證請求過多，請稍後再試」；回應帶 `Retry-After` |
+| 413 | 請求內容超過 15 MB（登入、`/settings/*`、`/account/*`、`/api/settings/*`、`/api/accounts*` 的上限是 16 KB） |
+| 429 | 同一個 IP 一分鐘內超過額度：`/api/ocr` 60 次、`/api/save` 600 次、`/api/box-closed` 60 次、`/api/line/webhook` 120 次，`/api/settings*`、`/api/accounts*` 與 `/api/me` 共用 60 次，五個額度各自計算（其他 `/api/*` 路徑算進 OCR 的額度）；登入頁另有更嚴的限制：建立第一位管理員 5 次、登入／升級／更改自己的密碼共用 10 次、測試訊息 6 次；沒登入的 OCR／存檔／關箱通知請求在限流之前就被 401 擋下，其他沒登入的 `/api/*` 請求（`/api/me`、設定與帳號 API 的探測、不存在的路徑）算在另一組「匿名」額度，兩者都不會吃掉同一個出口 IP 上已登入同事的額度；另外 scrypt（密碼雜湊／驗證）同時最多跑 2 個、排隊 16 個，超過直接回 429「目前驗證請求過多，請稍後再試」；兩種 429 都帶 `Retry-After`（秒） |
 | 500 | 試算表／憑證設定問題：表頭缺必要欄位（訊息會列出缺哪欄）、服務帳號沒有權限或憑證無效、找不到試算表或分頁 |
 | 502 | OpenAI 或 Google 暫時失敗（OCR 已自動重試一次）、OpenAI 回傳內容無法解析 |
-| 503 | 伺服器尚未設定 `OPENAI_API_KEY`（OCR）或 Google 憑證（存檔）；或同時排隊等待寫入的存檔超過 50 筆；或 `/api/line/webhook` 沒有 channel secret（webhook 未啟用）；或資料目錄不可用時的 `/settings`、`/api/settings*`（訊息「請在 Zeabur 掛載 Volume 到 /app/data」） |
+| 503 | 伺服器尚未設定 `OPENAI_API_KEY`（OCR）或 Google 憑證（存檔）；或同時排隊等待寫入的存檔超過 50 筆；或 `/api/line/webhook` 沒有 channel secret（webhook 未啟用）；或資料目錄不可用（沒有地方存帳號，沒有人登入得了）時的登入頁、設定頁、OCR、存檔、關箱通知與各 API（訊息「請在 Zeabur 掛載 Volume 到 /app/data」；`/healthz` 與 LINE webhook 不受影響） |
 
 ## 環境變數
 
@@ -63,7 +67,7 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 | `LINE_CHANNEL_ACCESS_TOKEN` | 否 | 空（未設定） | **備援**（設定頁優先，見「設定頁與 Volume」）。LINE Messaging API 的 channel access token（長期）：關箱通知推播、webhook 回覆用。 |
 | `LINE_GROUP_ID` | 否 | 空（未設定） | **備援**。關箱通知的目標群組 ID（`C` 開頭）。**token 與群組 ID 兩者都有才會推播**，只有一個等於沒設定。 |
 | `LINE_CHANNEL_SECRET` | 否 | 空（未設定） | **備援**。channel secret，**只用來驗證 webhook 簽章**（取得群組 ID 時才需要）；沒設定時 `POST /api/line/webhook` 回 503。 |
-| `DATA_DIR` | 否 | `./data`（容器裡由 Dockerfile 設成 `/app/data`） | 設定頁的資料目錄（放 `settings.json`）。Zeabur 上要把 Volume 掛在這裡，見「設定頁與 Volume」。不存在會自動建立；不可寫入時服務照常啟動，只有設定頁回 503。 |
+| `DATA_DIR` | 否 | `./data`（容器裡由 Dockerfile 設成 `/app/data`） | 設定頁的資料目錄（放 `settings.json`）。Zeabur 上要把 Volume 掛在這裡，見「設定頁與 Volume」。不存在會自動建立；不可寫入時服務照常啟動，但沒有地方存帳號，整個網站（登入、裝箱程式、設定頁）回 503，只有 `/healthz` 與 LINE webhook 照常。 |
 | `PORT` | 否 | `8080` | 監聽埠，綁 `0.0.0.0`。Zeabur 固定注入 `PORT=8080`。 |
 
 產生 base64：`base64 < service-account.json | tr -d '\n'`（本服務也接受換行折行的 base64）。
@@ -85,9 +89,9 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 
 ## 設定頁與 Volume
 
-`/settings` 是給管理員用的設定頁：每位管理員用自己的 **Email 與密碼**登入，登入後可以設定 LINE 群組通知（Channel access token、Channel secret、群組 ID、開關）、一鍵從「最近收到的群組」帶入群組 ID、發測試訊息，也可以新增、停用、刪除其他管理員——**不必改環境變數、不必重新部署**，存檔立刻生效。設定存在資料目錄 `DATA_DIR`（容器裡是 `/app/data`）的 `settings.json`，所以**要在 Zeabur 掛一個 Volume 到 `/app/data`**；沒掛的話設定與管理員帳號會在每次重新部署時消失。
+**全站要登入**：每個人用自己的帳號（Email＋密碼）登入，才能使用裝箱程式（主頁、辨識、存檔、關箱通知）。帳號與 LINE 設定都存在資料目錄 `DATA_DIR`（容器裡是 `/app/data`）的 `settings.json`，所以**一定要在 Zeabur 掛一個 Volume 到 `/app/data`**。`/settings` 是管理員用的設定頁：設定 LINE 群組通知（Channel access token、Channel secret、群組 ID、開關）、一鍵從「最近收到的群組」帶入群組 ID、發測試訊息，也可以建立與管理所有人的帳號與角色——**不必改環境變數、不必重新部署**，存檔立刻生效。
 
-沒有 Volume（資料目錄不存在或寫不進去）時，服務**照常啟動**：OCR、存檔、環境變數版的 LINE 通知都不受影響，只有設定頁與設定 API 回 503「請在 Zeabur 掛載 Volume 到 /app/data」。
+**沒有 Volume（資料目錄不存在或寫不進去）時沒有地方存帳號，所以沒有人登入得了：登入頁、設定頁、OCR、存檔、關箱通知全部回 503「請在 Zeabur 掛載 Volume 到 /app/data」**（`/healthz` 與 LINE webhook 仍然可用，`/healthz` 的 `dataDirWritable` 會告訴你原因）。以前沒有 Volume 時 OCR 與存檔仍可使用，全站登入之後不是了——上線前請先確認 Volume 掛好。
 
 ### 在 Zeabur 掛載 Volume
 
@@ -99,54 +103,83 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
 
 | `dataDirWritable` | `dataDirMounted` | 意思 |
 |---|---|---|
-| `true` | `true` | 正常：資料目錄在獨立掛載的磁碟上，重新部署後設定還在。 |
-| `true` | `false` | 資料目錄只是容器內的暫存目錄（沒掛 Volume）：設定頁能用，但**重新部署後設定與管理員帳號會消失**；log 也會有一行警告。回去掛 Volume。 |
+| `true` | `true` | 正常：資料目錄在獨立掛載的磁碟上，重新部署後帳號與設定還在。 |
+| `true` | `false` | 資料目錄只是容器內的暫存目錄（沒掛 Volume）：能用，但**重新部署後帳號與設定會消失**（要重新建立第一位管理員）；log 也會有一行警告。回去掛 Volume。 |
 | `true` | `null` | 判斷不出來（非 Linux 環境，例如本機 macOS 開發）。 |
-| `false` | — | 資料目錄不存在又建不起來、或寫不進去：設定頁 503。log 有一行 `[settings] 資料目錄 … 不可用`。 |
+| `false` | — | 資料目錄不存在又建不起來、或寫不進去：整個網站 503。log 有一行 `[settings] 資料目錄 … 不可用`。 |
 
-**權限**：容器以 root 啟動入口腳本（`scripts/docker-entrypoint.sh`），它把 `/app/data` 的擁有者修成 `appuser`（uid／gid 10001；`chown -R -h`，不追符號連結），再用 `su-exec` 降權，之後的 node 行程**不是 root**（啟動時若發現自己還是 root，會在 log 警告——代表平台的啟動指令繞過了入口腳本）。平台掛上來的 Volume 通常是 root 擁有的空目錄，沒有這一步 node 就寫不進去。若平台本來就以非 root 啟動（`docker run --user`），入口腳本跳過修正，只檢查目錄可寫。**資料目錄的任何問題（建不了、改不了擁有者、不可寫）入口腳本都只印警告、不讓容器退出**——資料目錄只給設定頁用，OCR、存檔、環境變數版的 LINE 通知不該因為 Volume 的問題一起停擺；node 端會再寫一行 error log，設定頁回 503。（想改成「資料目錄有問題就整個起不來」：把腳本裡的 `warn` 換成 `die`。）
+**權限**：容器以 root 啟動入口腳本（`scripts/docker-entrypoint.sh`），它把 `/app/data` 的擁有者修成 `appuser`（uid／gid 10001；`chown -R -h`，不追符號連結），再用 `su-exec` 降權，之後的 node 行程**不是 root**（啟動時若發現自己還是 root，會在 log 警告——代表平台的啟動指令繞過了入口腳本）。平台掛上來的 Volume 通常是 root 擁有的空目錄，沒有這一步 node 就寫不進去。若平台本來就以非 root 啟動（`docker run --user`），入口腳本跳過修正，只檢查目錄可寫。**資料目錄的任何問題（建不了、改不了擁有者、不可寫）入口腳本都只印警告、不讓容器退出**——這樣 `/healthz` 還看得到原因；node 端會再寫一行 error log，網站回 503。（想改成「資料目錄有問題就整個起不來」：把腳本裡的 `warn` 換成 `die`。）
 
-### 管理員帳號
+### 帳號與角色
 
-每位管理員有自己的**姓名、Email（登入帳號）、密碼**；沒有預設帳號、沒有角色之分（所有啟用中的管理員權限相同）。帳號存在 `settings.json` 的 `admins`。
+每個帳號有自己的**姓名、Email（登入帳號）、密碼、角色**；沒有預設帳號。帳號存在 `settings.json` 的 `accounts`。
+
+| 角色 | 能做什麼 |
+|---|---|
+| **管理員**（`admin`） | 使用裝箱程式、查看與變更自己的帳號密碼；**另外**可以進設定頁（LINE 設定）、新增／編輯／停用／刪除所有帳號、改角色、重設別人的密碼。 |
+| **一般使用者**（`user`） | 使用裝箱程式、查看自己的帳號資料、變更自己的密碼。進設定頁或呼叫設定／帳號 API 一律 403「需要管理員權限」。 |
+
+各路徑的權限（帳號必須是啟用中；停用的帳號一律當成沒登入）：
+
+| 路徑 | 沒登入 | 一般使用者 | 管理員 |
+|---|---|---|---|
+| `GET /`、`/index.html`（裝箱程式） | 302 → `/login?next=/` | 可 | 可 |
+| `POST /api/ocr`、`/api/save`、`/api/box-closed` | 401 | 可（要帶 `X-Requested-With`） | 可 |
+| `GET /api/me`、`GET /account`、`POST /account/password` | 401／302 → `/login?next=/account` | 可 | 可 |
+| `GET /settings`、`/api/settings*`、`/api/accounts*` | 302 → `/login?next=/settings`／401 | **403** | 可 |
+| `GET /login`、`POST /login`、`POST /logout` | 可（`/login` 已登入會導向 `/`） | 可 | 可 |
+| `GET /healthz`、`POST /api/line/webhook` | 公開 | 公開 | 公開 |
+
+#### 上線提醒：部署後所有人都要登入，管理員先建帳號
+
+全站登入上線的那一刻起，**沒有帳號的人什麼都用不了**（主頁導向登入頁）。請照順序做：
+
+1. **管理員先登入**：
+   - 已經在用舊版**單一管理密碼**、還沒升級的部署（`/healthz` 顯示 `legacyAdminPending: true`、`adminCount: 0`）：升級完成之前**所有人（包括管理員）都登不進去**，登入頁會提示「請管理員先到設定頁」。管理員開 `/settings`，用目前正在使用的管理密碼升級成管理員帳號（見下面「從舊版的單一管理密碼升級」，LINE 設定原封不動）。
+   - 已經有**管理員帳號**的部署（上一版的檔案格式，管理員沒有角色欄位）：所有舊管理員自動成為「管理員」角色，照原本的 Email 與密碼登入，登入第一次寫檔時檔案自動升成版本 3。
+   - 全新安裝：照下面「全新安裝」用設定碼建立第一位管理員。
+2. **管理員到設定頁的「帳號管理」替每位同事建立帳號**（姓名、Email、密碼、角色；預設是一般使用者），再把網址、Email 與初始密碼告訴大家。同事登入後可以到「我的帳號」自己改密碼。
+3. 同事忘記密碼：管理員在「帳號管理」按「重設密碼」。管理員忘記：另一位管理員重設；所有管理員都登不進去：用下面「忘記所有密碼時的復原方式」。
+4. 瀏覽器裡的箱子資料（`localStorage`）不受影響；登入過期時頁面會導向登入頁，登入後回到原本的頁面，箱子資料還在。按「完成此箱」時會先確認登入還有效：已經過期的話**什麼都不送、箱子保持開啟**（不會鎖起來、也不會漏同步），登入後再按一次即可；若剛好是同步到一半才過期（機率很低，因為關箱前才剛確認過），箱子同樣保持開啟，但已經寫進試算表的那幾筆會在重新同步時再寫一次（試算表會出現重複列，需要人工刪除）。
+5. 登入、升級、更改自己的密碼共用「每個 IP 每分鐘 10 次」的限流（成功也算，沒有帳號鎖定）：同一個辦公室（同一個出口 IP）上線第一天若超過 10 個人在同一分鐘內登入，後面的人會看到「請求過於頻繁，請稍後再試」，等一分鐘再試即可；登入有效 7 天，平常不會同時登入。
 
 #### 全新安裝：用設定碼建立第一位管理員
 
-沒有任何預設密碼，也不需要任何環境變數。**每次服務啟動時，如果還沒有任何管理員帳號**（也沒有舊版的單一密碼等著升級），會產生一組一次性的設定碼寫進 log：
+沒有任何預設密碼，也不需要任何環境變數。**每次服務啟動時，如果還沒有任何帳號**（也沒有舊版的單一密碼等著升級），會產生一組一次性的設定碼寫進 log：
 
 ```
 [settings] 尚未設定管理密碼：請開啟 /settings，用設定碼 XXXX-XXXX 建立密碼
 ```
 
-1. 在 Zeabur 這個服務的「記錄（Logs）」找這一行（沒有這一行代表已經有管理員了、或有舊密碼待升級、或資料目錄不可用——後者見上面的對照表）。設定碼只存在記憶體，服務每次重新啟動都會換一組；用過一次（建立成功）就作廢。
-2. 開啟 `https://<網域>/settings`，輸入設定碼、**姓名**（1～50 字）、**Email**、密碼（至少 10 個字元、最多 200）→ 建立第一位管理員並自動登入。
+1. 在 Zeabur 這個服務的「記錄（Logs）」找這一行（沒有這一行代表已經有帳號了、或有舊密碼待升級、或資料目錄不可用——後者見上面的對照表）。設定碼只存在記憶體，服務每次重新啟動都會換一組；用過一次（建立成功）就作廢。
+2. 開啟 `https://<網域>/settings`，輸入設定碼、**姓名**（1～50 字）、**Email**、密碼（至少 10 個字元、最多 200）→ 建立第一位管理員（角色一定是管理員）並自動登入。
 3. **請在第一次部署後立刻做這件事。** 在建立之前，任何能看到這個服務記錄的人都能用設定碼建立管理員。設定碼錯誤累計 20 次就整組作廢、換新的一組（新的碼會寫進 log）；每個 IP 每分鐘最多試 5 次。
 
 #### 從舊版的單一管理密碼升級（已經上線的部署）
 
-舊版（`b54b21b`，只有一個管理密碼）已經上線的部署，照下面做，**不需要中斷服務、不需要動 Volume 或環境變數**：
+舊版（`b54b21b`，只有一個管理密碼）已經上線的部署，照下面做，**不需要中斷服務、不需要動 Volume 或環境變數**（升級完成之前，全站登入讓所有人都暫時用不了裝箱程式，見上面的上線提醒）：
 
-1. 部署新版，**等 Zeabur 顯示新版部署完成、舊的容器已經停掉再做下一步**（滾動部署的重疊期間，舊容器若剛好收到 LINE webhook，會把它記憶體裡的舊格式整份寫回檔案，蓋掉剛做完的升級；這種情況管理員會從檔案裡消失，要重新升級）。升級完成之前一切照舊：關箱 LINE 通知、webhook（含記錄最近收到的群組）都用設定頁原本存的 LINE 設定運作；`/healthz` 顯示 `legacyAdminPending: true`、`adminConfigured: true`、`adminCount: 0`；登入與建立端點回 409「請先升級」，不提示設定碼。
+1. 部署新版，**等 Zeabur 顯示新版部署完成、舊的容器已經停掉再做下一步**（滾動部署的重疊期間，舊容器若剛好收到 LINE webhook，會把它記憶體裡的舊格式整份寫回檔案，蓋掉剛做完的升級；這種情況管理員會從檔案裡消失，要重新升級）。升級完成之前：LINE webhook（含記錄最近收到的群組）照常用設定頁原本存的 LINE 設定運作；`/healthz` 顯示 `legacyAdminPending: true`、`adminConfigured: true`、`adminCount: 0`、`accountCount: 0`；登入與建立端點回 409「請先升級」，不提示設定碼；主頁導向登入頁，登入頁顯示「尚未建立任何帳號，請管理員先到設定頁」。
 2. 開啟 `https://<網域>/settings`：會看到「**升級為管理員帳號**」表單。輸入**目前正在使用的管理密碼**，再填你的**姓名**與 **Email**，按「升級並登入」。
-3. 升級做的事（一次原子寫入）：以你填的姓名與 Email 建立第一位管理員，**沿用同一個密碼雜湊（不要求重設密碼）**，刪除舊的 `admin` 欄位，檔案版本從 1 變成 2。**`line`（LINE 設定）、`lineCaptured`（最近收到的群組）、`sessionSecret` 與頂層、`line`、`lineCaptured` 裡任何不認識的欄位都原封不動**（只有舊的 `admin` 物件本身，連同它裡面的欄位，會被刪除），所以升級前後關箱通知完全不受影響。
-4. 升級前發的舊登入（cookie）一律失效；升級後用 **Email ＋ 原本那個密碼**登入。接著可以在「管理員」區塊新增其他管理員。
+3. 升級做的事（一次原子寫入）：以你填的姓名與 Email 建立第一個帳號（**角色：管理員**），**沿用同一個密碼雜湊（不要求重設密碼）**，刪除舊的 `admin` 欄位，檔案版本變成 3。**`line`（LINE 設定）、`lineCaptured`（最近收到的群組）、`sessionSecret` 與頂層、`line`、`lineCaptured` 裡任何不認識的欄位都原封不動**（只有舊的 `admin` 物件本身，連同它裡面的欄位，會被刪除），所以升級前後關箱通知完全不受影響。
+4. 升級前發的舊登入（cookie）一律失效；升級後用 **Email ＋ 原本那個密碼**登入。接著到「帳號管理」替其他人建立帳號。
 5. 目前的密碼輸入錯誤回 401、不改任何東西；升級走密碼驗證的並行閘門與登入的限流（每 IP 每分鐘 10 次）。
-6. **回滾**：升級前檔案維持版本 1（即使這段期間 webhook 記錄了新的群組，寫的也還是版本 1 並保留舊的 `admin`），所以升級前回滾到上一版仍然讀得懂。**升級後（版本 2）若回滾到舊版程式，舊版不認識版本 2，會把檔案當成損毀、備份成 `settings.json.corrupt-<時間>` 後以空設定重新開始**（LINE 設定在備份檔裡，需要手動搬回）——升級前先確認不需要回滾。
+6. **回滾**：升級前檔案維持版本 1（即使這段期間 webhook 記錄了新的群組，寫的也還是版本 1 並保留舊的 `admin`），所以升級前回滾到上一版仍然讀得懂。**升級後（版本 3）若回滾到舊版程式，舊版不認識版本 3，會把檔案當成損毀、備份成 `settings.json.corrupt-<時間>` 後以空設定重新開始**（LINE 設定在備份檔裡，需要手動搬回）——升級前先確認不需要回滾。
 
 #### 登入與日常管理
 
-- **登入**：Email（不分大小寫、前後空白不影響）＋密碼。成功後發 7 天有效的 session cookie（`sp_session`），cookie 綁定**帳號**與該帳號的 `sessionVersion`。登入失敗一律回同一句「帳號或密碼不正確」，不論是帳號不存在、帳號已停用或密碼不對；查無帳號與停用的帳號也會用固定的假雜湊跑一次 scrypt，回應時間不洩漏帳號存不存在。登入成功會更新「最後登入」時間；這個時間寫不進去（例如 Volume 滿了或變成唯讀）只會記一行警告，不會讓登入失敗。
-- **管理員區塊**（表格：姓名、Email、狀態、最後登入）：
-  - **新增**（姓名、Email、密碼）、**編輯**（姓名、Email）、**重設密碼**（重設別人的密碼）、**停用／啟用**、**刪除**。停用與刪除會先跳出確認。
-  - 規則（伺服器端強制，頁面只是把按鈕停用）：**不能停用或刪除自己**；不能停用或刪除最後一位啟用中的管理員；Email（不分大小寫）不可重複，重複回 409；姓名 1～50 字（不可含換行、控制字元、雙向控制字元與零寬字元，而且至少要有一個看得見的字）、Email 格式檢查（一般的 RFC 寬鬆版、只收 ASCII，長度 ≤ 254、本地部分 ≤ 64）、密碼 10～200 字；管理員總數上限 50 位。
-  - 停用、啟用、重設密碼、更改自己的密碼都會讓**該帳號**既有的登入立刻失效（`sessionVersion` 加一；停用後再啟用也不會讓舊 cookie 復活）；刪除帳號則是帳號不存在了。其他管理員的登入不受影響。更改**自己**的密碼時，目前這個瀏覽器會拿到新的 cookie 繼續登入，其他裝置要重新登入。
-  - 所有規則都在寫檔的鎖內重新檢查，包括「發出請求的人現在還是啟用中的管理員」：兩位管理員同時互相停用（或刪除）對方，只有先到的那個成功，不會變成沒有任何人能登入。
-- **我的帳號**：顯示自己的姓名與 Email、變更自己的密碼（要輸入目前的密碼）。要改自己的姓名或 Email，用管理員表格裡自己那一列的「編輯」。
-- **審計 log**：每個帳號操作留一行 `[admins] <操作者 email> <動作> <對象 email>（來源 <IP>）`，例如 `[admins] a@example.com 停用管理員 b@example.com（來源 203.0.113.9）`；登入成功與失敗記 Email 與來源 IP（Email 格式不對的失敗登入只記固定佔位字串）。**絕不記密碼。**
+- **登入**：Email（不分大小寫、前後空白不影響）＋密碼。成功後發 7 天有效的 session cookie（`sp_session`），cookie 綁定**帳號**與該帳號的 `sessionVersion`。登入失敗一律回同一句「帳號或密碼不正確」，不論是帳號不存在、帳號已停用或密碼不對；查無帳號與停用的帳號也會用固定的假雜湊跑一次 scrypt，回應時間不洩漏帳號存不存在。登入成功會更新「最後登入」時間；這個時間寫不進去（例如 Volume 滿了或變成唯讀）只會記一行警告，不會讓登入失敗。**登入後回到哪裡**由 `next` 決定：被導向登入頁時帶著原本要去的路徑（例如 `/login?next=/settings`），只接受同源的相對路徑，其他一律回 `/`。
+- **主頁頂端的使用者列**：登入後主頁最上面有一條窄列，顯示「👤 姓名（角色）」、「我的帳號」、（管理員才有）「設定」與「登出」。登出只清這個瀏覽器的 cookie。主頁的 OCR、存檔、關箱通知請求回 401（登入過期）時，頁面自動導向登入頁，登入後回到主頁；箱子資料（`localStorage`）不受影響。「完成此箱」會先用 `GET /api/me` 確認登入還有效，過期就不送出任何東西、箱子保持開啟（登入後再按一次）。
+- **我的帳號**（`/account`，任一角色）：顯示自己的姓名、Email、角色，可以變更自己的密碼（要輸入目前的密碼）。要改姓名、Email 或角色，請洽管理員。
+- **帳號管理**（設定頁，管理員）表格：姓名、Email、角色、狀態、最後登入；按鈕：**新增帳號**（姓名、Email、角色、密碼）、**編輯**（姓名、Email、角色）、**重設密碼**（重設別人的密碼）、**停用／啟用**、**刪除**。停用與刪除會先跳出確認。
+  - 規則（伺服器端強制，頁面只是把按鈕停用）：**不能停用或刪除自己**；**不能把自己改成一般使用者**；不能停用、刪除或降級**最後一位啟用中的管理員**；Email（不分大小寫）不可重複，重複回 409；姓名 1～50 字（不可含換行、控制字元、雙向控制字元與零寬字元，而且至少要有一個看得見的字）、Email 格式檢查（一般的 RFC 寬鬆版、只收 ASCII，長度 ≤ 254、本地部分 ≤ 64）、密碼 10～200 字；帳號總數上限 200 個。
+  - 停用、啟用、重設密碼、**改角色**、更改自己的密碼都會讓**該帳號**既有的登入立刻失效（`sessionVersion` 加一；停用後再啟用也不會讓舊 cookie 復活；改角色後對方要重新登入才拿到新的權限）；刪除帳號則是帳號不存在了。其他帳號的登入不受影響。更改**自己**的密碼時，目前這個瀏覽器會拿到新的 cookie 繼續登入，其他裝置要重新登入。
+  - 所有規則都在寫檔的鎖內重新檢查，包括「發出請求的人現在還是啟用中的管理員」：兩位管理員同時互相停用、互相降級（或刪除）對方，只有先到的那個成功，不會變成沒有任何管理員能登入；被停用或降級的人不能再改設定。
+- **審計 log**：每個帳號操作留一行 `[accounts] <操作者 email> <動作> <對象 email>（來源 <IP>）`，例如 `[accounts] a@example.com 新增帳號 b@example.com（角色 user）（來源 203.0.113.9）`、`[accounts] a@example.com 修改帳號 b@example.com（角色 user → admin）（來源 …）`；登入成功與失敗記 Email 與來源 IP（Email 格式不對的失敗登入只記固定佔位字串）。**絕不記密碼。**
 
 #### 忘記所有密碼時的復原方式（要改 Volume 裡的設定檔，有風險）
 
-只有在**所有管理員都登不進去**時才用這個方法；只要還有任何一位管理員能登入，請他在「管理員」區塊幫你重設密碼就好。做法是把設定檔裡的管理員帳號清空，讓「第一次使用」的設定碼流程重新出現。**`line`（LINE 設定）、`lineCaptured`、`sessionSecret` 不動**，所以關箱通知與 webhook 不受影響。
+只有在**所有管理員都登不進去**時才用這個方法；只要還有任何一位管理員能登入，請他在「帳號管理」幫你重設密碼就好。做法是把設定檔裡的帳號清空，讓「第一次使用」的設定碼流程重新出現（建立的第一位一定是管理員）。**`line`（LINE 設定）、`lineCaptured`、`sessionSecret` 不動**，所以關箱通知與 webhook 不受影響。
 
 1. **備份**（在能存取 Volume 的地方：Zeabur 這個服務的終端機；自管 Docker 用 `docker exec`，或掛同一個 Volume 的暫時容器）：
 
@@ -155,17 +188,17 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
    ```
 
    備份檔裡有明文的 LINE token，用完請刪掉。
-2. **清空管理員**（Node 內建，容器裡就有；只把 `admins` 清成空陣列、刪掉舊版殘留的 `admin`，其他欄位原樣寫回；原地改寫，檔案的擁有者與 `0600` 權限不變）：
+2. **清空帳號**（Node 內建，容器裡就有；只把帳號清成空陣列——版本 3 的檔案是 `accounts`、舊版本 1／2 的檔案叫 `admins`——並刪掉舊版殘留的 `admin`，其他欄位原樣寫回；原地改寫，檔案的擁有者與 `0600` 權限不變）：
 
    ```
-   node -e "const fs=require('fs');const p='/app/data/settings.json';const d=JSON.parse(fs.readFileSync(p,'utf8'));d.admins=[];delete d.admin;fs.writeFileSync(p,JSON.stringify(d,null,2)+'\n')"
+   node -e "const fs=require('fs');const p='/app/data/settings.json';const d=JSON.parse(fs.readFileSync(p,'utf8'));if(d.version===3)d.accounts=[];else d.admins=[];delete d.admin;fs.writeFileSync(p,JSON.stringify(d,null,2)+'\n')"
    ```
 
-   不想用指令、要手動編輯也可以：把 `"admins"` 改成 `[]`（或整個刪掉，缺少等於空）、刪掉 `"admin"`，其他都不要動。
-3. **立刻重啟服務**（Zeabur Dashboard 重啟；自管 Docker `docker restart <容器>`）。服務把整份設定放在記憶體、每次變更都整份寫回，**服務在跑的時候改檔，下一次寫入（例如 LINE webhook 剛好記錄了一個群組）就會把你的修改蓋回去**。能先停服務再改檔最好（自管 Docker：`docker stop` → 用同一個 Volume 的暫時容器跑上面那行 → `docker start`）；Zeabur 的終端機要服務在跑才進得去，所以請「改完馬上重啟」，並確認下一步的 log 有出現——沒出現就是被蓋回去了，重做一次。
-4. 重啟後 log 會出現新的設定碼（見上面「全新安裝」）。用設定碼建立新的第一位管理員；之後再在「管理員」區塊新增其他人。
+   不想用指令、要手動編輯也可以：把 `"accounts"`（舊檔是 `"admins"`）改成 `[]`（或整個刪掉，缺少等於空）、刪掉 `"admin"`，其他都不要動。
+3. **立刻重啟服務**（Zeabur Dashboard 重啟；自管 Docker `docker restart <容器>`）。服務把整份設定放在記憶體、每次變更都整份寫回，**服務在跑的時候改檔，下一次寫入（例如有人登入更新「最後登入」、LINE webhook 剛好記錄了一個群組）就會把你的修改蓋回去**。能先停服務再改檔最好（自管 Docker：`docker stop` → 用同一個 Volume 的暫時容器跑上面那行 → `docker start`）；Zeabur 的終端機要服務在跑才進得去，所以請「改完馬上重啟」，並確認下一步的 log 有出現——沒出現就是被蓋回去了，重做一次。
+4. 重啟後 log 會出現新的設定碼（見上面「全新安裝」）。用設定碼建立新的第一位管理員；之後再在「帳號管理」建立其他人。
 5. **風險**：
-   - 這會**刪除所有管理員帳號**（姓名、Email、密碼都沒了），要重新建立每一位。
+   - 這會**刪除所有帳號**（姓名、Email、密碼、角色都沒了），要重新建立每一位，大家的登入都會失效。
    - 在建立新的第一位管理員之前，任何能看到服務記錄的人都能用設定碼建立管理員（和第一次安裝一樣），請在重啟後立刻完成。
    - 手動編輯時 JSON 寫錯（多一個逗號、少一個括號）會讓檔案被當成損毀：服務啟動時自動備份成 `settings.json.corrupt-<時間>` 並以空設定重新開始，**LINE 設定也會因此消失**（要從備份搬回）。用上面的指令改就不會有這個問題；手動改完可以用 `node -e "JSON.parse(require('fs').readFileSync('/app/data/settings.json','utf8'))"` 確認是合法的 JSON。
    - 檔案要維持 `0600`、擁有者是 `appuser`：上面的指令是原地改寫，不會變；用別的方式整個換檔的話，入口腳本在容器啟動時會把擁有者修回去、程式開啟時會把權限收緊成 `0600`。
@@ -188,11 +221,12 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
 
 ### 資料檔（settings.json）
 
-- 位置 `DATA_DIR/settings.json`，檔案權限 `0600`。內容：管理員帳號（`admins`：`id`、姓名、Email、scrypt 密碼雜湊、`status`、`sessionVersion`、建立／更新／最後登入時間）、session 簽章金鑰（`sessionSecret`）、LINE 設定（**token 與 secret 是明文**，只靠檔案權限與 Volume 隔離保護）、最近收到的群組。**絕不進版控**（`.gitignore` 與 `.dockerignore` 都排除 `data/`）。
-- **格式版本**：版本 1＝舊版（只有一個管理密碼 `admin`）；版本 2＝管理員帳號（`admins`）。載入時兩種都收；**所有欄位（含不認識的，頂層、各管理員、`line`、`lineCaptured` 每一筆都是）原樣保留、寫回去**。只要還沒有管理員帳號，檔案就維持載入時的版本（舊檔維持版本 1，所以升級前回滾到舊版仍讀得懂）；加進第一位管理員的那一次寫入同時把版本改成 2、刪掉舊的 `admin` 欄位。全新安裝直接是版本 2、沒有 `admin` 欄位。
+- 位置 `DATA_DIR/settings.json`，檔案權限 `0600`。內容：帳號（`accounts`：`id`、姓名、Email、**角色**、scrypt 密碼雜湊、`status`、`sessionVersion`、建立／更新／最後登入時間）、session 簽章金鑰（`sessionSecret`）、LINE 設定（**token 與 secret 是明文**，只靠檔案權限與 Volume 隔離保護）、最近收到的群組。**絕不進版控**（`.gitignore` 與 `.dockerignore` 都排除 `data/`）。
+- **格式版本**：版本 1＝最舊的版本（只有一個管理密碼 `admin`）；版本 2＝管理員帳號（`admins`，沒有角色欄位，上一版）；**版本 3＝帳號含角色（`accounts`，目前的版本）**。載入時三種都收；版本 1、2 **只在記憶體轉換**（版本 2 的 `admins` 全部視為角色 admin），**所有欄位（含不認識的，頂層、各帳號、`line`、`lineCaptured` 每一筆都是）原樣保留、寫回去**。只要還沒有帳號，檔案就維持載入時的版本（舊檔維持版本 1／2，所以升級前回滾到上一版仍讀得懂）；**有了帳號之後的第一次寫入（例如有人登入更新「最後登入」）才把檔案升成版本 3**，同時刪掉舊的 `admin` 欄位、把 `admins` 改名 `accounts`、每位加上 `role`。全新安裝直接是版本 3。
+- **回滾須知**：版本 3 的檔案，上一版（`f7529dd`）和更早的版本都不認得，會把它當成損毀：備份成 `settings.json.corrupt-<時間>`、以空設定重新開始（LINE 設定與帳號在備份檔裡，要手動搬回）。所以**全站登入上線、有人登入過之後就不要回滾到舊版**；一定要回滾的話，先備份 `settings.json`，回滾後把備份裡的 `line`／`lineCaptured`／`sessionSecret` 搬回，並重新建立管理員（舊版只有「管理員」，沒有角色）。
 - 每次變更都「先寫暫存檔、`fsync`、再 `rename` 蓋過正式檔」（原子替換），寫入成功才更新記憶體；同時進來的變更依序執行。
-- 檔案損毀（不是合法 JSON、版本不認得、欄位型別錯誤、管理員資料不合法或 id／Email 重複）：啟動時備份成 `settings.json.corrupt-<UTC 時間>`（權限 0600）、log 一行說明、以空設定重新開始，**不會把損毀內容直接蓋掉**；需要重新用設定碼建立第一位管理員、重填 LINE 設定。
-- 讀不到（不是「不存在」而是權限或 I/O 錯誤）時，不動檔案、設定頁停用（503）。
+- 檔案損毀（不是合法 JSON、版本不認得、欄位型別錯誤、帳號資料不合法、角色不是 admin／user、id／Email 重複）：啟動時備份成 `settings.json.corrupt-<UTC 時間>`（權限 0600）、log 一行說明、以空設定重新開始，**不會把損毀內容直接蓋掉**；需要重新用設定碼建立第一位管理員、重填 LINE 設定。
+- 讀不到（不是「不存在」而是權限或 I/O 錯誤）時，不動檔案、整個網站停用（503）。
 - 開啟時還會：把既有 `settings.json` 的權限收緊成 `0600`、清掉超過 10 分鐘沒動過的殘留暫存檔（被強制結束的寫入留下的 `.settings.json.*.tmp`、`.write-probe-*`）、容忍檔案開頭的 BOM；新建的資料目錄是 `0700`。
 - **單一實例假設**：整份設定由記憶體重寫、沒有檔案鎖，所以服務只能有一個執行個體使用同一個 Volume（Zeabur 的 Volume 本來就只能掛給單一實例）。滾動部署時新舊容器會短暫重疊，重疊的那幾分鐘請不要在設定頁做變更（後寫的會蓋掉先寫的）。
 
@@ -205,6 +239,7 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
 ```
 📦 箱號 BOX-001 已完成
 共 12 種商品、35 件
+操作：王小明
 已同步 12/12 筆到商品主檔 ✓
 明細：
 1801080204 第五代溫灸刷毛圓領發熱衣(女-經典黑L) ×3
@@ -212,14 +247,15 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
 時間：2026-10-05 15:20
 ```
 
-- 部分失敗時，第 3 行改成 `⚠️ 同步 10/12 筆，2 筆失敗，請查核商品主檔`。
+- 「**操作：<姓名>**」是關這個箱子的人（登入帳號的姓名）：由後端依登入的 session 填入，**前端送來的任何 operator 欄位都忽略**；姓名裡的換行與控制字元會被壓成一個空白。
+- 部分失敗時，第 4 行改成 `⚠️ 同步 10/12 筆，2 筆失敗，請查核商品主檔`。
 - 「N 種」是商品筆數、「M 件」是數量加總；明細的品名格式與寫進商品主檔的「合併品名」相同（`品名(性別-顏色尺寸)`）。
 - 明細最多 30 行，超過寫 `…另有 k 種`；整則訊息不超過 4500 字（LINE 的上限是 5000），太長時會先砍明細行數。
 - 「時間」用前端送來的關箱時間（`closedAt`，瀏覽器時間）；沒有就用伺服器時間，一律轉成台北時間。
 
 ### 設定
 
-**建議用設定頁**（見上面「設定頁與 Volume」）：登入 `/settings` 填 token、secret，從「最近收到的群組」帶入群組 ID，存檔立刻生效，不必動環境變數。環境變數是備援（設定頁沒有 token 時才用）：
+**建議用設定頁**（見上面「設定頁與 Volume」）：以管理員登入 `/settings` 填 token、secret，從「最近收到的群組」帶入群組 ID，存檔立刻生效，不必動環境變數。環境變數是備援（設定頁沒有 token 時才用）：
 
 | 變數 | 用途 |
 |---|---|
@@ -256,7 +292,7 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
 - **失敗的提示**：回應 `notified: false` 且 `reason: "push_failed"` 時，頁面跳「LINE 通知失敗（不影響關箱）」；`not_configured`（LINE 沒設定）不提示；網路錯誤只在瀏覽器 console 留下紀錄。
 - **推播 10 秒逾時、不重試**（避免重複通知），所以 LINE 暫時失敗就會漏掉這一則——這是「通知」，不保證送達。失敗原因會寫進服務的 log（只有狀態碼與 LINE 回應的簡短說明，**不含 token**）；回給前端的 `error` 是固定的簡短句子，不轉發 LINE 的原始回應。
 - **額度**：每則推播都計入 LINE 官方帳號的每月訊息額度（依你的方案而定）。
-- **`/api/box-closed` 沒有登入機制**：和其他 `/api/*` 端點一樣，任何知道網址的人都能呼叫它，也就是能讓 bot 在群組裡發出訊息（內容由呼叫端決定）。已做的防護只有每 IP 每分鐘 60 次的限流與欄位長度上限。若被濫用：在設定頁關掉「啟用關箱通知」（立刻生效），或清空群組 ID／token（環境變數版要重新部署），必要時到 LINE Developers 重新發行 token 讓舊的失效。（設定頁本身需要登入，見「設定頁與 Volume」。）
+- **`/api/box-closed` 要登入**（任一角色，並帶 `X-Requested-With`）：只有登入的人能讓 bot 在群組裡發出訊息；訊息內容仍由呼叫端決定（但「操作：」那一行一定是登入者的姓名），另有每 IP 每分鐘 60 次的限流與欄位長度上限。若某個帳號被濫用：管理員在「帳號管理」停用它（立刻生效，審計 log 看得到是誰、哪個 IP）；要整個停掉：在設定頁關掉「啟用關箱通知」（立刻生效），或清空群組 ID／token（環境變數版要重新部署），必要時到 LINE Developers 重新發行 token 讓舊的失效。
 - **重複通知**：前端沒有「同步中」的鎖定，同一個箱子若連按兩次「確認」，會重複寫入試算表，也會重複通知（見下面「安全與限制」）。
 - **webhook 安全**：`/api/line/webhook` 用 channel secret 驗證每個請求真的來自 LINE（對**原始 body 位元組**做 HMAC-SHA256、base64 後以 `timingSafeEqual` 比對 `X-Line-Signature`），不符回 401；它只處理群組來源的 `join` 與訊息事件：`join` 與「群組ID」文字會回覆群組 ID，並把群組（ID、名稱、事件類型、時間）記進「最近收到的群組」；**不儲存任何訊息內容**。
 
@@ -273,7 +309,7 @@ pnpm test                   # vitest：OpenAI／Google 一律用 mock 的 fetch�
 pnpm build && pnpm start    # 編譯到 dist/ 後以 node dist/server.js 啟動
 ```
 
-本機開發時設定頁的資料目錄預設是 `./data`（不存在會自動建立；已在 `.gitignore`）：開 `http://localhost:8080/settings`，用啟動 log 裡的設定碼建立第一位管理員（姓名、Email、密碼）即可試用。測試用的 `DATA_DIR` 一律是暫存目錄，不會碰到你的 `./data`。
+本機開發時資料目錄預設是 `./data`（不存在會自動建立；已在 `.gitignore`）：開 `http://localhost:8080/settings`，用啟動 log 裡的設定碼建立第一位管理員（姓名、Email、密碼），之後開 `http://localhost:8080/` 會先要求登入。測試用的 `DATA_DIR` 一律是暫存目錄，不會碰到你的 `./data`。
 
 只跑單一測試檔或單一案例：`pnpm exec vitest run tests/ocr.test.ts -t "男女共版"`。
 
@@ -282,7 +318,7 @@ pnpm build && pnpm start    # 編譯到 dist/ 後以 node dist/server.js 啟動
 ```bash
 PORT=8099 OPENAI_API_KEY=x GOOGLE_SERVICE_ACCOUNT_CREDENTIALS=x node dist/server.js
 curl -s localhost:8099/healthz
-curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{}'   # 400 {"success":false,...}
+curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{}'   # 503 或 401：全站要登入（沒有資料目錄時 503「請在 Zeabur 掛載 Volume」，有資料目錄但沒登入時 401「請先登入」）
 ```
 
 ## 部署（Docker／Zeabur）
@@ -294,7 +330,7 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 - **pnpm 版本**：`package.json` 的 `packageManager`、Dockerfile 的 `corepack prepare pnpm@…`、產生 `pnpm-lock.yaml` 的 pnpm 三者必須同版（目前 9.15.9），否則 `--frozen-lockfile` 會失敗。
 - 在服務的環境變數頁設定上表的變數（至少 `OPENAI_API_KEY`、`GOOGLE_SERVICE_ACCOUNT_CREDENTIALS`）。**改環境變數後容器不會自動重啟**：請重啟服務，並用 `GET /healthz` 確認 `openaiConfigured`、`sheetsConfigured` 都變成 `true`；若仍是 `false`（重啟沒有帶到新增的變數），改為重新部署。
 - **重啟與重新部署**：收到 SIGTERM／SIGINT 後，服務停止接受新連線，並最多等 25 秒（`src/server.ts` 的 `SHUTDOWN_GRACE_MS`，比 Kubernetes 預設的 30 秒終止寬限期短）讓處理中與排隊中的存檔寫完；超過的會被中斷。有人正在關大箱子時請避免重啟或部署。
-- **Volume**：設定頁需要把 Volume 掛到 `/app/data`（Zeabur Dashboard → 服務 → 硬碟；詳見「設定頁與 Volume」）。沒掛也能部署，只是設定頁會把設定存在容器的暫存層（`/healthz` 的 `dataDirMounted` 會是 `false`，log 也有警告）。
+- **Volume（必要）**：帳號與設定都存在 `/app/data`，要把 Volume 掛上去（Zeabur Dashboard → 服務 → 硬碟；詳見「設定頁與 Volume」）。**沒有可寫的資料目錄時整個網站（登入、主頁的 OCR／存檔／關箱通知）都是 503**；資料目錄只是容器暫存層（沒掛 Volume）時能用，但每次重新部署帳號都會消失（`/healthz` 的 `dataDirMounted` 會是 `false`，log 也有警告）。
 - 本機驗證映像：`docker build -t savepoint-crate:local .`，再 `docker run --rm -p 8080:8080 -v "$(mktemp -d):/app/data" -e OPENAI_API_KEY=x -e GOOGLE_SERVICE_ACCOUNT_CREDENTIALS=x savepoint-crate:local`（`-v` 那段模擬 Volume）。
 - 部署後檢查：
   1. runtime log 出現 `savepoint-crate listening on port 8080`。
@@ -302,8 +338,8 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
   3. **確認反向代理的 IP 處理**：同一個 `/healthz` 回應的 `clientIp` 應該是你自己的對外 IP（可與「我的 IP」網站比對）。如果看到 `10.x`、`172.16–31.x`、`192.168.x`、`100.64–127.x` 這類內部位址或 `"unknown"`，或不同人 curl 得到同一個值，代表 `X-Forwarded-For` 沒有被正確取得，**所有使用者會共用同一個限流額度**，需要先處理再上線。
   4. **偽造測試**：`curl -s -H 'X-Forwarded-For: 203.0.113.99' https://<網域>/healthz` 回的 `clientIp` **不得**是 `203.0.113.99`（應該仍是你自己的對外 IP）。若回的是偽造值，代表代理沒有把真實 IP 附加在 `X-Forwarded-For` 最右邊，限流可以被客戶端自填的標頭繞過，需要先處理。
   5. **LINE 通知（選配）**：照上面「設定頁與 Volume」（或「LINE 群組通知」的環境變數備援）設定後，`/healthz` 的 `lineConfigured` 應為 `true`、`lineSource` 顯示來自 `settings` 還是 `env`；關一個測試箱子，群組應收到一則通知。沒設定 LINE 時什麼都不會發生（也不會有錯誤）。
-  6. **設定頁與 Volume**：`/healthz` 的 `dataDirWritable` 與 `dataDirMounted` 都是 `true`（見「設定頁與 Volume」的對照表）；`requestIsHttps` 是 `true`（代理有送 `X-Forwarded-Proto: https`，登入 cookie 才會加 `Secure`；是 `false` 的話設定頁頂端會顯示警告）；全新安裝：到 Zeabur 記錄找設定碼、開 `/settings` 建立第一位管理員（越早越好）；從舊版單一密碼升級：`/healthz` 先顯示 `legacyAdminPending: true`，開 `/settings` 用目前的密碼升級成管理員帳號（見「設定頁與 Volume → 從舊版的單一管理密碼升級」），之後 `legacyAdminPending` 變 `false`、`adminCount` 為 1。**設定頁的暴力破解防護（逐 IP 限流）依賴上面第 3、4 項的 `clientIp` 判斷是正確的**，請務必先做。
-  7. 最後在頁面實際拍一張標籤、關一個箱子，確認有寫進試算表。
+  6. **帳號與 Volume**：`/healthz` 的 `dataDirWritable` 與 `dataDirMounted` 都是 `true`（見「設定頁與 Volume」的對照表）；`requestIsHttps` 是 `true`（代理有送 `X-Forwarded-Proto: https`，登入 cookie 才會加 `Secure`；是 `false` 的話登入頁與設定頁頂端會顯示警告）。**部署後所有人都要登入，管理員先建帳號**：全新安裝：到 Zeabur 記錄找設定碼、開 `/settings` 建立第一位管理員（越早越好）；從舊版單一密碼升級：`/healthz` 先顯示 `legacyAdminPending: true`，開 `/settings` 用目前的密碼升級成管理員帳號（見「設定頁與 Volume → 從舊版的單一管理密碼升級」），之後 `legacyAdminPending` 變 `false`、`adminCount` 為 1；已經有管理員帳號的版本 2 檔案：照原本的 Email 與密碼登入即可。接著到「帳號管理」替每位同事建立帳號並通知大家。**登入的暴力破解防護（逐 IP 限流）依賴上面第 3、4 項的 `clientIp` 判斷是正確的**，請務必先做。
+  7. 最後用一個**一般使用者**的帳號登入主頁（確認頂端有「👤 姓名（一般使用者）」且進 `/settings` 是 403）、實際拍一張標籤、關一個箱子，確認有寫進試算表，LINE 群組收到的通知有「操作：<姓名>」。
 
 ## 回滾
 
@@ -311,7 +347,8 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 
 1. **平台層**：在 Zeabur 把服務回到前一個成功的部署（舊的純靜態頁，仍打 n8n webhook）。
 2. **只退回設定頁**（保留關箱 LINE 通知）：用「環境變數版 LINE 通知」的最後一個 commit `29d8046` 重新部署。那個版本沒有設定頁與 Volume，LINE 設定只認環境變數 `LINE_*`（所以環境變數備援要保留到確定不再回頭為止）；`/app/data` 裡的 `settings.json` 只是不再被讀取，不需要處理。
-   - **退回「單一管理密碼」的上一版**（`b54b21b`）：**只有在還沒升級成管理員帳號之前**才安全（檔案仍是版本 1，舊版讀得懂、舊密碼照常能登入）。升級之後檔案是版本 2，舊版不認識，會把它當損毀、備份成 `settings.json.corrupt-<時間>` 後以空設定重新開始（見「設定頁與 Volume → 從舊版的單一管理密碼升級」第 6 點）。
+   - **退回「單一管理密碼」的上一版**（`b54b21b`）：**只有在還沒升級成帳號之前**才安全（檔案仍是版本 1，舊版讀得懂、舊密碼照常能登入）。升級之後檔案是版本 3，舊版不認識，會把它當損毀、備份成 `settings.json.corrupt-<時間>` 後以空設定重新開始（見「設定頁與 Volume → 從舊版的單一管理密碼升級」第 6 點）。
+   - **退回「管理員帳號、沒有全站登入」的上一版**（`f7529dd`）：**只有在新版還沒寫過檔之前**才安全（檔案仍是版本 2 或 1，上一版讀得懂）。只要新版寫過一次檔（有人登入更新「最後登入」、LINE webhook 記錄新群組、任何設定變更）、檔案就已經是版本 3，上一版不認識，會把檔案當成損毀、備份後以空設定重新開始（LINE 設定與帳號在備份檔裡，要手動搬回；見「設定頁與 Volume → 資料檔」的回滾須知）。上一版的 OCR／存檔／關箱通知不需要登入，退回去就不再有操作者姓名。
 3. **程式碼層**：`git revert` 改版相關的所有 commit（把 `index.html` 與整個後端一起退回純靜態頁），或直接用改版前的最後一個 commit `db5c061`（純靜態頁）重新部署。
 4. **只退回 n8n 後端**：把 `index.html` 裡兩個常數改回
    - `OCREngine.WEBHOOK_URL = 'https://waltho1123.zeabur.app/webhook/ipas-ocr'`
@@ -341,23 +378,23 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 
 ## 安全與限制
 
-- **`/api/ocr`、`/api/save`、`/api/box-closed` 沒有登入機制**，與原 n8n webhook 相同：任何知道網址的人都能呼叫。已做的防護：每 IP 每分鐘限流（OCR 60 次、存檔 600 次、關箱通知 60 次、LINE webhook 120 次、設定 API（`/api/settings*` 與 `/api/admins*`）60 次，各自計算；記憶體內，服務重啟即重置；IP 取 `X-Forwarded-For` 由右往左第一個公開位址）、15 MB body 上限、存檔欄位驗證與公式字元處理、錯誤訊息不帶金鑰。若需要更嚴格的存取控制，請另外規劃（例如在前面加存取閘道）。只有 `/settings`、`/api/settings*` 與 `/api/admins*`（設定頁與管理員帳號管理）需要登入。
-- **設定頁的安全設計**（細節見「設定頁與 Volume」）：
-  - 管理員密碼用 scrypt（N=16384、r=8、p=1、16 位元組隨機 salt）雜湊，格式 `scrypt$N$r$p$salt$hash`，以 `timingSafeEqual` 比對；10～200 個字元。每位管理員各有自己的雜湊。
-  - 登入後發 `sp_session` cookie：值是 `<到期時間>.<帳號 id>.<sessionVersion>.<亂數>.<HMAC-SHA256 簽章>`（金鑰是設定檔裡隨機產生的 `sessionSecret`，平常不會換），`HttpOnly`、`SameSite=Lax`、`Path=/`、7 天，走 HTTPS（`X-Forwarded-Proto: https`）時加 `Secure`。驗證時除了簽章與到期，還要對照目前的帳號資料：帳號必須存在、啟用中、`sessionVersion` 相符。**登出只清除這個瀏覽器的 cookie**（伺服器不存 session）；要讓某個帳號所有裝置立刻失效，用重設密碼、更改密碼或停用（`sessionVersion` 加一）。
+- **全站要登入**（見「設定頁與 Volume」）：主頁、`/api/ocr`、`/api/save`、`/api/box-closed` 都要有效的登入 session（任一角色），並帶 `X-Requested-With: XMLHttpRequest`（CSRF 防護）；沒登入的請求在限流**之前**就被 401 擋下，不會吃掉同一個出口 IP 上其他人的限流額度（其他沒登入的 `/api/*` 請求——`/api/me`、設定與帳號 API 的探測、不存在的路徑——算在另一組匿名額度，同樣不會擠壓已登入的人）。仍然公開的只有 `/healthz`（不含任何金鑰與設定值）、`/api/line/webhook`（靠簽章驗證）與登入頁。已做的防護：登入、每 IP 每分鐘限流（OCR 60 次、存檔 600 次、關箱通知 60 次、LINE webhook 120 次、設定／帳號／目前登入者 API 60 次，各自計算；記憶體內，服務重啟即重置；IP 取 `X-Forwarded-For` 由右往左第一個公開位址）、15 MB body 上限、存檔欄位驗證與公式字元處理、錯誤訊息不帶金鑰。登入帳號是「同事」層級的存取控制，不是細緻的權限系統：任何一位登入的人都能呼叫這三支 API（內容由呼叫端決定）。
+- **登入與設定頁的安全設計**（細節見「設定頁與 Volume」）：
+  - 密碼用 scrypt（N=16384、r=8、p=1、16 位元組隨機 salt）雜湊，格式 `scrypt$N$r$p$salt$hash`，以 `timingSafeEqual` 比對；10～200 個字元。每個帳號各有自己的雜湊。
+  - 登入後發 `sp_session` cookie：值是 `<到期時間>.<帳號 id>.<sessionVersion>.<亂數>.<HMAC-SHA256 簽章>`（金鑰是設定檔裡隨機產生的 `sessionSecret`，平常不會換），`HttpOnly`、`SameSite=Lax`、`Path=/`、7 天，走 HTTPS（`X-Forwarded-Proto: https`）時加 `Secure`。驗證時除了簽章與到期，還要對照目前的帳號資料：帳號必須存在、啟用中、`sessionVersion` 相符（角色是每次請求從目前的帳號資料讀的，不簽在 cookie 裡）。**登出只清除這個瀏覽器的 cookie**（伺服器不存 session）；要讓某個帳號所有裝置立刻失效，用重設密碼、更改密碼、停用或改角色（`sessionVersion` 加一）。
   - 登入時間不洩漏帳號：查無帳號、帳號停用、Email 格式不對都拿固定的假雜湊（`DUMMY_PASSWORD_HASH`，參數與正式雜湊相同）跑一次 scrypt，一律回同一句「帳號或密碼不正確」。
-  - 所有狀態變更的設定端點只收 `Content-Type: application/json` 且必須帶 `X-Requested-With: XMLHttpRequest`（瀏覽器的跨站表單送不出這種請求），再加上 `SameSite=Lax`，作為 CSRF 防護。
-  - 暴力破解防護：建立第一位管理員 5 次／分、登入／升級／更改自己的密碼共用 10 次／分（皆每 IP，IP 的判斷見上面第 3、4 項部署檢查；換 Email 重試也不會多出額度）；設定碼累計 20 次錯誤就整組作廢換新。scrypt 同時最多跑 2 個、排隊 16 個（超過回 429），所以公開端點被灌請求也不會把 libuv 執行緒池占滿、拖慢 OCR 與存檔。**沒有「帳號鎖定」或全域失敗額度**（避免被人故意鎖死管理者），所以請用夠長、不好猜的密碼。改成 Email 登入之後，針對已知 Email 猜密碼是主要風險，而限流只依來源 IP：服務一定要走有附加 `X-Forwarded-For` 的反向代理（Zeabur 的代理會做），如果直接把服務暴露在公網，攻擊者可以偽造這個標頭來繞過逐 IP 限流（見「部署」的檢查 3、4）。登入成功／失敗、設定碼錯誤、升級失敗、改密碼失敗與每個帳號操作都會在 log 留一行（`[admins] <操作者> <動作> <對象>（來源 IP）`，不含任何密碼；被限流擋下的請求不再寫 log）。
-  - 所有狀態變更的設定端點統一用 `mutate()` 註冊（資料目錄可用 → `application/json` → `X-Requested-With`），並帶 `X-Content-Type-Options: nosniff` 與 `Cache-Control: no-store`；測試會走訪 `app.routes` 確認沒有漏掉的端點。
-  - 設定頁 HTML 帶 CSP（`default-src 'none'`，script 只允許帶每次請求隨機 nonce 的那一段，`form-action 'none'`，`frame-ancestors 'none'`）、`X-Frame-Options: DENY`、`Cache-Control: no-store`、`noindex`；所有動態內容（姓名、Email、群組名稱、網址…）都經過 HTML 跳脫。
+  - 所有狀態變更的端點只收 `Content-Type: application/json` 且必須帶 `X-Requested-With: XMLHttpRequest`（瀏覽器的跨站表單送不出這種請求），再加上 `SameSite=Lax`，作為 CSRF 防護。
+  - 暴力破解防護：建立第一位管理員 5 次／分、登入／升級／更改自己的密碼共用 10 次／分（皆每 IP，IP 的判斷見上面第 3、4 項部署檢查；換 Email 重試也不會多出額度）；設定碼累計 20 次錯誤就整組作廢換新。scrypt 同時最多跑 2 個、排隊 16 個（超過回 429），所以公開端點被灌請求也不會把 libuv 執行緒池占滿、拖慢 OCR 與存檔。**沒有「帳號鎖定」或全域失敗額度**（避免被人故意鎖死管理者），所以請用夠長、不好猜的密碼。改成 Email 登入之後，針對已知 Email 猜密碼是主要風險，而限流只依來源 IP：服務一定要走有附加 `X-Forwarded-For` 的反向代理（Zeabur 的代理會做），如果直接把服務暴露在公網，攻擊者可以偽造這個標頭來繞過逐 IP 限流（見「部署」的檢查 3、4）。登入成功／失敗、設定碼錯誤、升級失敗、改密碼失敗與每個帳號操作都會在 log 留一行（`[accounts] <操作者> <動作> <對象>（來源 IP）`，不含任何密碼；被限流擋下的請求不再寫 log）。
+  - 所有狀態變更的登入、設定與帳號端點統一用 `mutate()` 註冊（資料目錄可用 → `application/json` → `X-Requested-With`），並帶 `X-Content-Type-Options: nosniff` 與 `Cache-Control: no-store`；測試會走訪 `app.routes` 確認沒有漏掉的端點。
+  - 登入頁、帳號頁與設定頁 HTML 帶 CSP（`default-src 'none'`，script 只允許帶每次請求隨機 nonce 的那一段，`form-action 'none'`，`frame-ancestors 'none'`）、`X-Frame-Options: DENY`、`Cache-Control: no-store`、`noindex`；所有動態內容（姓名、Email、`next`、群組名稱、網址…）都經過 HTML 跳脫。
   - token 與 secret **明文**存在 Volume 的 `settings.json`（`0600`），讀取 API 與頁面只給「已設定」與末 4 碼、永遠不回傳完整內容，log 也不印。能進服務終端機或讀 Volume 的人就能讀到它——與環境變數的暴露面相同。
   - 設定碼會寫進服務 log：在建立第一位管理員之前，能看到 log 的人都能建立管理員，所以請在第一次部署後立刻建立。
-  - 已知限制：登入 session 是無狀態的 cookie，**登出只清瀏覽器端**（偷到的 cookie 7 天內仍有效，要作廢請重設該帳號的密碼或停用它）；密碼只檢查長度（10～200 字元），不檢查強度；任何一位啟用中的管理員都能新增、停用、刪除其他管理員（沒有角色之分）；`index.html` 是同源的另一個頁面，它的任何 XSS 都能借用已登入管理員的 cookie 呼叫設定 API。
+  - 已知限制：登入 session 是無狀態的 cookie，**登出只清瀏覽器端**（偷到的 cookie 7 天內仍有效，要作廢請重設該帳號的密碼或停用它）；密碼只檢查長度（10～200 字元），不檢查強度；角色只有兩種（管理員與一般使用者）、沒有更細的權限；任何一位啟用中的管理員都能新增、停用、刪除其他帳號與改角色（但不能動自己、也不能讓系統沒有管理員）；`index.html` 是同源的另一個頁面，它的任何 XSS 都能借用已登入者的 cookie 呼叫 API（一般使用者的 cookie 呼叫不了設定與帳號 API）。
 - **限流與寫入速度**：
-  - **限流（每 IP 每分鐘）**：`/api/ocr` 60 次（`OCR_RATE_LIMIT_MAX`）、`/api/save` 600 次（`SAVE_RATE_LIMIT_MAX`）、`/api/box-closed` 60 次（`BOX_CLOSED_RATE_LIMIT_MAX`）、`/api/line/webhook` 120 次（`LINE_WEBHOOK_RATE_LIMIT_MAX`）、`/api/settings*` 與 `/api/admins*` 共用 60 次（`SETTINGS_API_RATE_LIMIT_MAX`），五個額度**各自獨立計算**——關箱時前端是逐筆、循序送出，不會被拍照的次數擠壓。其他 `/api/*` 路徑（含不存在的）算進 OCR 的額度。常數在 `src/app.ts`。同一個出口 IP（例如倉庫同一個網路）的人共用一份額度。
+  - **限流（每 IP 每分鐘）**：`/api/ocr` 60 次（`OCR_RATE_LIMIT_MAX`）、`/api/save` 600 次（`SAVE_RATE_LIMIT_MAX`）、`/api/box-closed` 60 次（`BOX_CLOSED_RATE_LIMIT_MAX`）、`/api/line/webhook` 120 次（`LINE_WEBHOOK_RATE_LIMIT_MAX`）、`/api/settings*`、`/api/accounts*` 與 `/api/me` 共用 60 次（`SETTINGS_API_RATE_LIMIT_MAX`），五個額度**各自獨立計算**——關箱時前端是逐筆、循序送出，不會被拍照的次數擠壓。其他 `/api/*` 路徑（含不存在的）算進 OCR 的額度。常數在 `src/app.ts`。同一個出口 IP（例如倉庫同一個網路）的人共用一份額度。
   - **寫入速度（滾動視窗配額）**：Google Sheets API 的寫入配額預設是每分鐘 60 次／使用者（服務帳號算一個使用者；每專案 300 次，超過回 429；來源：developers.google.com/workspace/sheets/api/limits，2026-10-05 查閱）。所以伺服器對 `values.append` 做**全域的滾動視窗配額**（整個程序共用、不分來源請求）：過去 **60 秒**內已起始的 append 少於 **55 次**（留 5 次餘裕）就**立刻送出、不等待**（視窗內可以同時有多筆在途）；達到 55 次時依先進先出排隊，等最舊的那次起始時間離開視窗才送。常數是 `src/sheets.ts` 的 `APPEND_WINDOW_MAX`（55）與 `APPEND_WINDOW_MS`（60 000），建構 `SheetsClient` 時可用 `appendWindowMax`、`appendWindowMs` 覆寫。規則細節：401 之後的重送算一次新的起始、同樣受視窗限制；換不到 token 的失敗發生在取得名額之前，不佔配額；已經送出但失敗的那次照樣佔配額；前一筆不論成功或失敗都不會卡住後面的；讀表頭不受影響。
   - **實務影響**：**55 件內全速、超過才放慢**。全速＝不人為等待，每筆只是一次 Google 往返；放慢＝第 56 件起要等視窗放出名額（最多約 60 秒），之後再全速送，整體平均約每分鐘 55 件——這是為了不撞到 Google 配額而失敗。「55 件」是**過去 60 秒內累計**的件數，所有箱子、所有人共用同一份配額：例如一分鐘內連續關兩個 30 件的箱子，第二個箱子做到約第 26 件就會停頓一陣子。
-  - **⚠️ 前端沒有「同步中」的鎖定**：頁面的「正在同步到商品主檔…」提示約 2.5 秒就消失，確認對話框關閉後「完成此箱」鈕仍可按，直到全部寫完才會鎖箱。依裁定前端沒有加這個鎖定（`index.html` 只改了兩個端點常數，外加關箱 LINE 通知的 `NotifyEngine` 與關箱流程裡的一次呼叫）。所以請提醒現場：**按下確認後，等到出現「已同步 N 筆到商品主檔 ✓」再離開頁面或再按一次**——中途離開頁面，剩下的筆就不會送出；重複按會把同一箱再送一次（重複列）。超過 55 件的大箱子會在中途停頓一陣子（視前面花了多久而定，最多約 1 分鐘），更要等。
+  - **⚠️ 前端沒有「同步中」的鎖定**：頁面的「正在同步到商品主檔…」提示約 2.5 秒就消失，確認對話框關閉後「完成此箱」鈕仍可按，直到全部寫完才會鎖箱。依裁定前端沒有加這個鎖定（`index.html` 只改了端點常數，外加關箱 LINE 通知的 `NotifyEngine` 與關箱流程裡的一次呼叫，以及全站登入的 `ApiClient` 與頂端使用者列）。所以請提醒現場：**按下確認後，等到出現「已同步 N 筆到商品主檔 ✓」再離開頁面或再按一次**——中途離開頁面，剩下的筆就不會送出；重複按會把同一箱再送一次（重複列）。超過 55 件的大箱子會在中途停頓一陣子（視前面花了多久而定，最多約 1 分鐘），更要等。
   - **等待與代理逾時**：視窗已滿時，單一請求最長要等約 60 秒（等最舊的起始離開視窗），剛好在一般反向代理 60 秒左右的逾時邊緣（排在後面的也不會等更久：每過一個視窗，最舊的那批起始會一起離開）；Zeabur 的實際逾時未確認。等得比代理逾時還久，前端會先看到失敗、伺服器之後卻還是寫入，使用者重送就變成重複列。部署後請用一個超過 55 件的箱子實測一次。
   - **排隊上限**：排隊等名額（視窗已滿、還沒送出）的 append 超過 `APPEND_MAX_PENDING`（50）筆時，新的請求直接回 503「目前等待寫入的筆數過多」；已經取得名額、正在送出的不算。這個上限是為了避免異常流量讓請求與連線越積越多，**不是**等待時間的上限：排隊的人最多等約一個視窗（60 秒），與排在第幾個無關。正常使用時前端是逐筆等回應才送下一筆，排隊的人數頂多等於同時關大箱子的人數。
   - **已知限制**：(1) 排隊上限是**全域**的，沒有每個 IP 各自的佇列額度——單一來源在一分鐘內送出約 51～105 個請求（視窗已被用滿時只要 51 個：50 個排隊再加 1 個；視窗全空時要先用掉 55 個名額再排滿 50 個，共約 105 個；每分鐘 600 次的存檔額度都允許），就能讓全站的存檔暫時回 503（約一分鐘）；單純每分鐘送滿 55 筆也能用光全站的視窗配額，讓別人的存檔排隊等待；(2) client 中途斷線時，已排進佇列的請求仍會寫入（與 n8n 版相同）；(3) 佇列在記憶體裡，服務重啟或重新部署時，還沒寫進試算表的排隊中存檔會遺失（見「部署」的優雅關閉說明）；(4) 視窗內可以同時有多筆 append 在途，同時送出的多筆在試算表裡的列順序不保證與送出順序相同（前端單一裝置逐筆送出時不受影響）。
@@ -368,26 +405,28 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 ## 專案結構
 
 ```
-index.html              原本的前端頁面（OCR／存檔兩個端點常數改成 /api/ocr、/api/save；另多了 NotifyEngine 與關箱流程裡的一次呼叫，用來通知 LINE）
+index.html              原本的前端頁面（OCR／存檔兩個端點常數改成 /api/ocr、/api/save；另多了 NotifyEngine 與關箱流程裡的一次呼叫，用來通知 LINE；全站登入後多了 ApiClient（所有 /api 請求共用：帶 X-Requested-With、401 導向登入頁）與頂端使用者列 UserBar）
 src/server.ts           啟動入口（讀環境變數與 index.html、開啟資料目錄，監聽 0.0.0.0:PORT）
-src/app.ts              Hono app：路由、限流（OCR／存檔／關箱通知／LINE webhook／設定 API 各自額度）、body 上限、錯誤處理
+src/app.ts              Hono app：主頁與三支 API 的登入閘門、路由、限流（OCR／存檔／關箱通知／LINE webhook／設定 API 各自額度）、body 上限、錯誤處理
 src/ocr.ts              OCR：prompt、請求組裝、OpenAI 呼叫（timeout、重試）、回應解析
 src/sheets.ts           存檔：欄位整理、合併品名、表頭對應、Sheets REST（讀表頭＋append）、append 滾動視窗配額
 src/google-auth.ts      服務帳號 JWT（RS256）換 token、憑證解析（JSON／base64）
 src/line.ts             關箱 LINE 通知：輸入驗證、訊息組字、push／reply、查群組名稱、webhook 驗簽與事件處理
 src/line-settings.ts    生效的 LINE 設定（設定頁的設定檔優先、環境變數備援）、設定頁用的遮罩檢視、webhook 記錄最近收到的群組
 src/settings-store.ts   設定檔儲存（DATA_DIR/settings.json）：載入、原子寫入（0600）、損毀備份、Volume 偵測
-src/auth.ts             管理員密碼（scrypt）、登入 session cookie（HMAC 簽章，綁帳號與 sessionVersion）、首次設定碼、登入用的假雜湊
-src/settings-routes.ts  設定頁與設定 API 的路由（/settings、/settings/*、/api/settings*）：建立第一位管理員、升級舊版密碼、登入、登出、改自己的密碼、LINE 設定
-src/admin-routes.ts     管理員帳號管理 API（/api/admins*）：新增、修改、重設他人密碼、停用／啟用、刪除，規則都在寫檔的鎖內檢查
-src/admins.ts           管理員帳號的小工具：姓名與 Email 驗證／正規化、對外檢視（不含雜湊）、統計、鎖內重新確認操作者
-src/settings-page.ts    設定頁的 HTML（伺服器端組字串、CSP nonce、不用前端框架）
+src/auth.ts             密碼（scrypt）、登入 session cookie（HMAC 簽章，綁帳號與 sessionVersion）、首次設定碼、登入用的假雜湊
+src/auth-kit.ts         全站共用的登入工具：session 簽發／驗證、角色檢查（requireAdmin）、CSRF 標頭、逐 IP 登入限流、scrypt 並行閘門、審計 log、mutate()、next 白名單（safeNextPath）
+src/login-routes.ts     登入頁與登入／登出、/api/me、我的帳號頁與改自己的密碼（任一角色）
+src/settings-routes.ts  設定頁與設定 API 的路由（只有管理員；/settings、/settings/setup、/settings/upgrade、/api/settings*）：建立第一位管理員、升級舊版密碼、LINE 設定
+src/account-routes.ts   帳號管理 API（/api/accounts*，只有管理員）：新增、修改（含角色）、重設他人密碼、停用／啟用、刪除，規則都在寫檔的鎖內檢查
+src/accounts.ts         帳號的小工具：姓名、Email、角色的驗證／正規化、對外檢視（不含雜湊）、統計、最後一位管理員保護、鎖內重新確認操作者
+src/settings-page.ts    登入頁、帳號頁、設定頁、403 頁的 HTML（伺服器端組字串、CSP nonce、不用前端框架）
 src/http.ts             共用的 HTTP 小工具（客戶端 IP、讀 JSON、HTTPS 判斷、對外網址）
 src/rate-limit.ts       固定視窗限流、客戶端 IP 判斷、並行閘門（ConcurrencyGate，限制 scrypt 同時進行的數量）
 src/env.ts              環境變數載入
 src/common.ts           共用型別與工具（ServiceError、Logger、FetchLike）
 scripts/docker-entrypoint.sh  容器入口：修正 Volume 擁有者後用 su-exec 降權
-tests/                  vitest（含 notify-engine.test.ts：直接從 index.html 取出 NotifyEngine 在 Node 執行來測；server*.test.ts 真的啟動 src/server.ts）；tests/fixtures/n8n-golden.json 是 n8n 現行版的標準答案（產生腳本：tests/fixtures/generate-n8n-golden.mjs）
+tests/                  vitest（含 notify-engine.test.ts：直接從 index.html 取出 ApiClient、各引擎與 UserBar 在 Node 執行來測；server*.test.ts 真的啟動 src/server.ts；login-gate.test.ts：登入閘門、next 白名單、角色與權限、v2→v3）；tests/fixtures/n8n-golden.json 是 n8n 現行版的標準答案（產生腳本：tests/fixtures/generate-n8n-golden.mjs）
 docs/legacy-n8n/        已退役的 n8n 工作流匯出（歷史參考）
 Dockerfile              兩階段建置，EXPOSE／預設 PORT=8080、DATA_DIR=/app/data，入口腳本降權
 ```

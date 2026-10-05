@@ -53,7 +53,7 @@ async function main(): Promise<void> {
     console.warn("[config] 目前以 root 身分執行：容器應該經過 scripts/docker-entrypoint.sh 降權成 appuser（uid 10001）；請檢查平台的啟動指令是否繞過了 ENTRYPOINT");
   }
 
-  // 資料目錄（Volume）：不可用時 open() 會寫一行 error log，服務照常啟動，只有設定頁回 503。
+  // 資料目錄（Volume）：不可用時 open() 會寫一行 error log，服務照常啟動，但沒有地方存帳號：整個網站（登入、裝箱程式、設定頁）回 503，只有 /healthz 與 LINE webhook 照常。
   const settings = await SettingsStore.open(resolve(env.DATA_DIR), { log: consoleLogger });
 
   // LINE 關箱通知是選填功能，而且現在以設定頁的設定檔為主、環境變數只是備援：

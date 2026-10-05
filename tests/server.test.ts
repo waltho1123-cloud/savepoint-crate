@@ -2,7 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { repoRoot, startServer } from "./process-helpers.js";
+import { hashPassword } from "../src/auth.js";
+import { loginOverHttp, repoRoot, seedSettingsFile, startServer } from "./process-helpers.js";
 import { cleanupTempDirs, makeTempDir } from "./settings-helpers.js";
 
 afterEach(cleanupTempDirs);
@@ -12,6 +13,8 @@ afterEach(cleanupTempDirs);
 describe("src/server.ts（實際啟動行程）", () => {
   it("讀 PORT、綁 0.0.0.0、提供原本的 index.html，/healthz 與啟動 log 不含金鑰", async () => {
     const dataDir = await makeTempDir();
+    // 全站登入：先放一位管理員（真實行程啟動時就讀得到），再用它登入才拿得到主頁
+    seedSettingsFile(dataDir, [{ name: "測試管理員", email: "admin@example.test", role: "admin", passwordHash: await hashPassword("process-test-password-1") }]);
     const server = await startServer({
       OPENAI_API_KEY: "test-openai-key-123",
       GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: "x", // 無法解析的假憑證
@@ -21,7 +24,13 @@ describe("src/server.ts（實際啟動行程）", () => {
       // 實際綁定的位址（來自 server.address()）必須是所有介面，Docker／Zeabur 才連得進來
       expect(server.output()).toContain(`savepoint-crate listening on port ${server.port} (0.0.0.0)`);
 
-      const index = await fetch(`${server.base}/`);
+      // 沒登入：主頁導向登入頁
+      const anonymous = await fetch(`${server.base}/`, { redirect: "manual" });
+      expect(anonymous.status).toBe(302);
+      expect(anonymous.headers.get("location")).toBe("/login?next=/");
+      // 登入之後：原本的 index.html
+      const cookie = await loginOverHttp(server.base, "admin@example.test", "process-test-password-1");
+      const index = await fetch(`${server.base}/`, { headers: { cookie } });
       expect(index.status).toBe(200);
       expect(await index.text()).toBe(readFileSync(resolve(repoRoot, "index.html"), "utf8"));
 
@@ -35,8 +44,9 @@ describe("src/server.ts（實際啟動行程）", () => {
         clientIp: "127.0.0.1",
         requestIsHttps: false,
         dataDirWritable: true,
-        adminConfigured: false,
-        adminCount: 0,
+        adminConfigured: true,
+        adminCount: 1,
+        accountCount: 1,
         legacyAdminPending: false,
         lineConfigured: false,
         lineWebhookConfigured: false,

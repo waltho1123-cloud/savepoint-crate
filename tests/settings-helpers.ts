@@ -6,7 +6,7 @@ import { vi } from "vitest";
 import { createApp } from "../src/app.js";
 import { createSessionToken, hashPassword, SESSION_COOKIE_NAME, SetupCodeGuard } from "../src/auth.js";
 import { loadEnv } from "../src/env.js";
-import { SettingsStore, type AdminAccount } from "../src/settings-store.js";
+import { SettingsStore, type Account, type AccountRole } from "../src/settings-store.js";
 import { createCapturingLogger, createFetchMock, jsonResponse, makeCredentials, type MockHandler, type RecordedCall } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
@@ -43,12 +43,13 @@ export async function cleanupTempDirs(): Promise<void> {
   }
 }
 
-/** 建立一個測試用的管理員帳號物件（預設：啟用、sessionVersion 1、密碼是 TEST_ADMIN_PASSWORD）。 */
-export function makeAccount(overrides: Partial<AdminAccount> = {}): AdminAccount {
+/** 建立一個測試用的帳號物件（預設：管理員、啟用、sessionVersion 1、密碼是 TEST_ADMIN_PASSWORD）。 */
+export function makeAccount(overrides: Partial<Account> = {}): Account {
   return {
     id: TEST_ADMIN_ID,
     name: TEST_ADMIN_NAME,
     email: TEST_ADMIN_EMAIL,
+    role: "admin",
     passwordHash: TEST_ADMIN_HASH,
     status: "active",
     sessionVersion: 1,
@@ -60,7 +61,7 @@ export function makeAccount(overrides: Partial<AdminAccount> = {}): AdminAccount
 }
 
 /** 依序產生的測試帳號 id（32 位十六進位）。 */
-export function adminId(n: number): string {
+export function accountId(n: number): string {
   return String(n).padStart(32, "0");
 }
 
@@ -86,7 +87,7 @@ export interface SettingsAppOptions {
   /** true＝改成「舊版單一管理密碼」的狀態（只有舊的 admin 欄位、沒有管理員帳號），用來測升級流程。優先於 withAdmin。 */
   legacyAdmin?: boolean;
   /** 另外預先建立的管理員（接在第一位後面）。 */
-  extraAdmins?: AdminAccount[];
+  extraAccounts?: Account[];
   /** 打到 fetch（LINE）的請求怎麼回應；預設回 {}。 */
   handler?: MockHandler;
   startTime?: number;
@@ -102,14 +103,14 @@ export async function makeSettingsApp(options: SettingsAppOptions = {}) {
   const dir = await makeTempDir();
   const store =
     options.store === "unavailable" ? SettingsStore.unavailable() : (options.store ?? (await SettingsStore.open(dir, { log })));
-  if (store.writable && store.data.admins.length === 0 && store.data.admin === null) {
+  if (store.writable && store.data.accounts.length === 0 && store.data.admin === null) {
     if (options.legacyAdmin) {
       await store.update((draft) => {
         draft.admin = { passwordHash: TEST_ADMIN_HASH, updatedAt: "2026-10-01T00:00:00.000Z" };
       });
     } else if (options.withAdmin !== false) {
       await store.update((draft) => {
-        draft.admins.push(makeAccount(), ...(options.extraAdmins ?? []));
+        draft.accounts.push(makeAccount(), ...(options.extraAccounts ?? []));
       });
     }
   }
@@ -132,7 +133,7 @@ export async function makeSettingsApp(options: SettingsAppOptions = {}) {
    * 以及該帳號「現在」的 sessionVersion 產生（帳號不存在就用 1，方便測「帳號被刪除後 cookie 失效」）。
    */
   const sessionCookie = (accountId: string = TEST_ADMIN_ID): string => {
-    const account = store.data.admins.find((a) => a.id === accountId);
+    const account = store.data.accounts.find((a) => a.id === accountId);
     return `${SESSION_COOKIE_NAME}=${createSessionToken(store.data.sessionSecret, accountId, account?.sessionVersion ?? 1, clock.now)}`;
   };
   return {
@@ -161,6 +162,14 @@ export function setCookieOf(res: Response): string | undefined {
   return res.headers.getSetCookie()[0];
 }
 
+/**
+ * 把 Set-Cookie 拆成「屬性」陣列（`sp_session=…`、`Path=/`、`HttpOnly`…），用來做「整個屬性相等」的斷言：
+ * 只用 toContain("Path=/") 的話，`Path=/x` 也會通過。
+ */
+export function cookieAttributes(setCookie: string): string[] {
+  return setCookie.split(";").map((part) => part.trim());
+}
+
 /** 從 Set-Cookie 取出 `名稱=值`（去掉屬性），可直接當 Cookie 請求標頭用。 */
 export function cookiePair(res: Response): string {
   const raw = setCookieOf(res);
@@ -185,4 +194,38 @@ export function lineHandler(options: { groupName?: string; summaryStatus?: numbe
     }
     throw new Error(`測試未預期的 fetch：${c.method} ${c.url}`);
   };
+}
+
+// ---------------------------------------------------------------------------
+// 全站登入之後，OCR／存檔／關箱通知都要登入：給這些 API 的測試用的「有帳號的設定檔 store」與它的登入標頭。
+// ---------------------------------------------------------------------------
+
+export interface AuthFixture {
+  store: SettingsStore;
+  account: Account;
+  /** `sp_session=…`：這位帳號的登入 cookie（有效期 100 年，不受測試注入的假時鐘影響）。 */
+  cookie: string;
+  /** 打 OCR／存檔／關箱通知要帶的標頭：登入 cookie ＋ X-Requested-With。 */
+  headers: Record<string, string>;
+  dir: string;
+}
+
+/**
+ * 建立一個暫存資料目錄與設定檔 store，裡面有一個帳號（預設角色 user：任一角色都能用裝箱程式的 API，
+ * 用一般使用者來測才看得出「不需要管理員」）。暫存目錄由 cleanupTempDirs 一併刪除。
+ */
+export async function createAuthFixture(options: { role?: AccountRole; name?: string; email?: string } = {}): Promise<AuthFixture> {
+  const dir = await makeTempDir();
+  const store = await SettingsStore.open(dir, { log: createCapturingLogger() });
+  const account = makeAccount({
+    id: accountId(7001),
+    name: options.name ?? "測試使用者",
+    email: options.email ?? "user@example.test",
+    role: options.role ?? "user",
+  });
+  await store.update((draft) => {
+    draft.accounts.push(account);
+  });
+  const cookie = `${SESSION_COOKIE_NAME}=${createSessionToken(store.data.sessionSecret, account.id, account.sessionVersion, Date.now(), 100 * 365 * 24 * 3600 * 1000)}`;
+  return { store, account, cookie, headers: { cookie, "x-requested-with": "XMLHttpRequest" }, dir };
 }

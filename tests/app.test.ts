@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { createApp, MAX_BODY_BYTES, OCR_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, SAVE_RATE_LIMIT_MAX } from "../src/app.js";
+import { createApp, MAX_BODY_BYTES, OCR_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS, SAVE_RATE_LIMIT_MAX, SETTINGS_API_RATE_LIMIT_MAX } from "../src/app.js";
 import { APPEND_WINDOW_MAX, APPEND_WINDOW_MS } from "../src/sheets.js";
 import { loadEnv } from "../src/env.js";
 import { buildOcrRequestBody, parseImageInput } from "../src/ocr.js";
@@ -17,11 +17,20 @@ import {
   TEST_ACCESS_TOKEN,
   type MockHandler,
 } from "./helpers.js";
+import { cleanupTempDirs, createAuthFixture, type AuthFixture } from "./settings-helpers.js";
 
 const creds = makeCredentials();
 const INDEX_HTML = "<!DOCTYPE html><html><head><title>IPAS 測試頁</title></head><body>原本的 index.html</body></html>";
 
-function makeApp(overrides: { env?: Record<string, string>; now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) {
+// 全站登入之後，OCR／存檔／關箱通知都要登入（任一角色）：整個測試檔共用一個有一般使用者帳號的設定檔 store 與登入標頭。
+// 不需要登入的測試（healthz 的欄位、404 等）用 makeApp({ noStore: true })：沒有資料目錄，行為和以前一樣。
+let auth: AuthFixture;
+beforeAll(async () => {
+  auth = await createAuthFixture();
+});
+afterAll(cleanupTempDirs);
+
+function makeApp(overrides: { env?: Record<string, string>; now?: () => number; sleep?: (ms: number) => Promise<void>; noStore?: boolean } = {}) {
   const log = createCapturingLogger();
   const sleep = overrides.sleep ?? vi.fn(async () => undefined);
   const app = createApp({
@@ -34,11 +43,21 @@ function makeApp(overrides: { env?: Record<string, string>; now?: () => number; 
     log,
     sleep,
     now: overrides.now,
+    ...(overrides.noStore ? {} : { settings: auth.store }),
   });
   return { app, log, sleep };
 }
 
+/** 帶著登入 cookie 與 X-Requested-With 的 POST（要測沒登入的情況，把 cookie 與標頭蓋掉，或用 postAnonymous）。 */
 async function post(app: ReturnType<typeof createApp>, path: string, body: unknown, headers: Record<string, string> = {}) {
+  return app.request(path, {
+    method: "POST",
+    headers: { "content-type": "application/json", ...auth.headers, ...headers },
+    body: typeof body === "string" ? body : JSON.stringify(body),
+  });
+}
+
+async function postAnonymous(app: ReturnType<typeof createApp>, path: string, body: unknown, headers: Record<string, string> = {}) {
   return app.request(path, {
     method: "POST",
     headers: { "content-type": "application/json", ...headers },
@@ -58,13 +77,21 @@ afterEach(() => {
 });
 
 describe("靜態頁", () => {
-  it.each(["/", "/index.html"])("GET %s 回 index.html，Cache-Control: no-cache", async (path) => {
+  it.each(["/", "/index.html"])("GET %s（已登入）回 index.html，Cache-Control: no-cache", async (path) => {
     const { app } = makeApp();
-    const res = await app.request(path);
+    const res = await app.request(path, { headers: { cookie: auth.cookie } });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     expect(res.headers.get("cache-control")).toBe("no-cache");
     expect(await res.text()).toBe(INDEX_HTML);
+  });
+
+  it.each(["/", "/index.html"])("GET %s（沒登入）302 導向 /login?next=/，不回 index.html", async (path) => {
+    const { app } = makeApp();
+    const res = await app.request(path);
+    expect(res.status).toBe(302);
+    expect(res.headers.get("location")).toBe("/login?next=/");
+    expect(await res.text()).not.toContain("原本的 index.html");
   });
 
   it("未知路徑回 404；/api/ 底下回 JSON 404", async () => {
@@ -78,7 +105,7 @@ describe("靜態頁", () => {
 
 describe("GET /healthz", () => {
   it("憑證是 base64 JSON（Zeabur 實際格式）：回報已設定與服務帳號 email", async () => {
-    const { app } = makeApp();
+    const { app } = makeApp({ noStore: true });
     const res = await app.request("/healthz");
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
@@ -93,6 +120,7 @@ describe("GET /healthz", () => {
       dataDirMounted: null,
       adminConfigured: false,
       adminCount: 0,
+      accountCount: 0,
       legacyAdminPending: false,
       lineConfigured: false,
       lineWebhookConfigured: false,
@@ -101,14 +129,14 @@ describe("GET /healthz", () => {
   });
 
   it("憑證是原始 JSON：同樣解析出 email", async () => {
-    const { app } = makeApp({ env: { GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: creds.json } });
+    const { app } = makeApp({ noStore: true, env: { GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: creds.json } });
     const body = (await (await app.request("/healthz")).json()) as { serviceAccountEmail: string | null; sheetsConfigured: boolean };
     expect(body.sheetsConfigured).toBe(true);
     expect(body.serviceAccountEmail).toBe(creds.email);
   });
 
   it("沒有設定憑證：serviceAccountEmail 為 null、sheetsConfigured 為 false", async () => {
-    const { app } = makeApp({ env: { GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: "" } });
+    const { app } = makeApp({ noStore: true, env: { GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: "" } });
     expect(await (await app.request("/healthz")).json()).toEqual({
       ok: true,
       openaiConfigured: true,
@@ -120,6 +148,7 @@ describe("GET /healthz", () => {
       dataDirMounted: null,
       adminConfigured: false,
       adminCount: 0,
+      accountCount: 0,
       legacyAdminPending: false,
       lineConfigured: false,
       lineWebhookConfigured: false,
@@ -130,7 +159,7 @@ describe("GET /healthz", () => {
   it.each(["x", "壞掉的字串", Buffer.from("not json").toString("base64"), JSON.stringify({ client_email: "a@b.c" })])(
     "憑證解析失敗（%s）：serviceAccountEmail 為 null、sheetsConfigured 為 false",
     async (bad) => {
-      const { app } = makeApp({ env: { GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: bad } });
+      const { app } = makeApp({ noStore: true, env: { GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: bad } });
       const body = (await (await app.request("/healthz")).json()) as Record<string, unknown>;
       expect(body.serviceAccountEmail).toBeNull();
       expect(body.sheetsConfigured).toBe(false);
@@ -138,7 +167,7 @@ describe("GET /healthz", () => {
   );
 
   it("沒有 OpenAI 金鑰：openaiConfigured 為 false", async () => {
-    const { app } = makeApp({ env: { OPENAI_API_KEY: "" } });
+    const { app } = makeApp({ noStore: true, env: { OPENAI_API_KEY: "" } });
     expect(((await (await app.request("/healthz")).json()) as { openaiConfigured: boolean }).openaiConfigured).toBe(false);
   });
 
@@ -149,7 +178,7 @@ describe("GET /healthz", () => {
     const connection = (remoteAddress: string) => ({ incoming: { socket: { remoteAddress } } });
 
     it("帶 X-Forwarded-For：回公開位址（最右邊那個，左邊客戶端自填的不採信）", async () => {
-      const { app } = makeApp();
+      const { app } = makeApp({ noStore: true });
       expect(await clientIp(app, { "x-forwarded-for": "203.0.113.9" })).toBe("203.0.113.9");
       expect(await clientIp(app, { "x-forwarded-for": "198.51.100.1, 203.0.113.9" })).toBe("203.0.113.9");
       // 代理鏈把內部位址附加在右邊時，略過私有位址
@@ -158,25 +187,25 @@ describe("GET /healthz", () => {
     });
 
     it("不帶 X-Forwarded-For：回連線位址", async () => {
-      const { app } = makeApp();
+      const { app } = makeApp({ noStore: true });
       expect(await clientIp(app, {}, connection("198.51.100.7"))).toBe("198.51.100.7");
     });
 
     it("X-Forwarded-For 整串都是私有位址或格式錯誤：退回連線位址", async () => {
-      const { app } = makeApp();
+      const { app } = makeApp({ noStore: true });
       expect(await clientIp(app, { "x-forwarded-for": "10.0.0.5, 192.168.1.1" }, connection("172.20.0.3"))).toBe("172.20.0.3");
       expect(await clientIp(app, { "x-forwarded-for": "garbage" }, connection("172.20.0.3"))).toBe("172.20.0.3");
     });
 
     it("X-Forwarded-For 含 IPv6 zone id（%…）：略過，不會把客戶端給的字串回顯出來", async () => {
-      const { app } = makeApp();
+      const { app } = makeApp({ noStore: true });
       const forged = "2001:db8::1%aaaa-attacker.controlled:text";
       expect(await clientIp(app, { "x-forwarded-for": forged }, connection("198.51.100.7"))).toBe("198.51.100.7");
       expect(await clientIp(app, { "x-forwarded-for": forged })).toBe("unknown");
     });
 
     it('什麼都沒有（沒有 X-Forwarded-For、也沒有連線位址）：回 "unknown"', async () => {
-      const { app } = makeApp();
+      const { app } = makeApp({ noStore: true });
       expect(await clientIp(app)).toBe("unknown");
       expect(await clientIp(app, {}, {})).toBe("unknown");
     });
@@ -195,9 +224,10 @@ describe("GET /healthz", () => {
   });
 
   it("絕不回傳 private_key 或憑證的其他欄位，也不含 OpenAI 金鑰", async () => {
-    const { app } = makeApp();
+    const { app } = makeApp({ noStore: true });
     const text = await (await app.request("/healthz")).text();
     expect(Object.keys(JSON.parse(text) as object).sort()).toEqual([
+      "accountCount",
       "adminConfigured",
       "adminCount",
       "clientIp",
@@ -534,6 +564,112 @@ describe("POST /api/save", () => {
   });
 });
 
+describe("登入閘門：OCR、存檔、關箱通知一定要登入（任一角色）並帶 CSRF 標頭；webhook 與 healthz 仍然公開", () => {
+  const PROTECTED: Array<[string, unknown]> = [
+    ["/api/ocr", { image: SAMPLE_IMAGE }],
+    ["/api/save", { seqNo: "1", date: "2026/10/05", boxId: "B1", barcode: "123", productName: "品", quantity: 1, time: "2026-10-05 15:20:00" }],
+    ["/api/box-closed", { boxId: "B1", items: [], total: 0, successCount: 0, failedCount: 0 }],
+  ];
+
+  it.each(PROTECTED)("POST %s 沒有登入 → 401「請先登入」，不呼叫任何上游服務", async (path, body) => {
+    const calls = stubFetch(() => jsonResponse({}));
+    const { app } = makeApp();
+    for (const headers of [{}, { "x-requested-with": "XMLHttpRequest" }, { cookie: "sp_session=garbage" }, { cookie: "" }] as Array<Record<string, string>>) {
+      const res = await postAnonymous(app, path, body, headers);
+      expect(res.status, JSON.stringify(headers)).toBe(401);
+      expect(await res.json()).toEqual({ success: false, error: "請先登入" });
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each(PROTECTED)("POST %s 已登入但沒帶 X-Requested-With（或值不對）→ 403，不呼叫任何上游服務", async (path, body) => {
+    const calls = stubFetch(() => jsonResponse({}));
+    const { app } = makeApp();
+    for (const headers of [{ cookie: auth.cookie }, { cookie: auth.cookie, "x-requested-with": "fetch" }, { cookie: auth.cookie, "x-requested-with": "" }] as Array<Record<string, string>>) {
+      const res = await postAnonymous(app, path, body, headers);
+      expect(res.status, JSON.stringify(headers)).toBe(403);
+      expect(await res.json()).toEqual({ success: false, error: "缺少必要的請求標頭" });
+    }
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each(PROTECTED)("POST %s 登入＋標頭齊全就通過閘門（一般使用者與管理員都可以）", async (path, body) => {
+    stubFetch((c) => (c.url.includes("api.openai.com") ? jsonResponse({ choices: [{ message: { content: '{"barcode":"1"}' } }] }) : createGoogleMock().mock(c.url, { method: c.method, body: c.body })));
+    const { app } = makeApp();
+    // 通過閘門之後，結果由各端點自己決定（這裡只確認不是 401／403）
+    const user = await post(app, path, body);
+    expect([401, 403]).not.toContain(user.status);
+    const adminFixture = await createAuthFixture({ role: "admin", email: "boss@example.test" });
+    const adminApp = createApp({ env: loadEnv({ OPENAI_API_KEY: "k", GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: creds.base64 }), indexHtml: INDEX_HTML, log: createCapturingLogger(), settings: adminFixture.store });
+    const admin = await postAnonymous(adminApp, path, body, adminFixture.headers);
+    expect([401, 403]).not.toContain(admin.status);
+  });
+
+  it("cookie 無效的各種情況都是 401：竄改簽章、過期、帳號被停用、帳號被刪除、重設過密碼（sessionVersion 變了）、別的部署簽的", async () => {
+    const calls = stubFetch(() => jsonResponse({}));
+    const fixture = await createAuthFixture();
+    const mk = () => createApp({ env: loadEnv({ OPENAI_API_KEY: "k", GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: creds.base64 }), indexHtml: INDEX_HTML, log: createCapturingLogger(), settings: fixture.store });
+    const app = mk();
+    const body = { image: SAMPLE_IMAGE };
+    const send = (cookie: string) => postAnonymous(app, "/api/ocr", body, { cookie, "x-requested-with": "XMLHttpRequest" });
+    const flipped = `${fixture.cookie.slice(0, -2)}${fixture.cookie.endsWith("A") ? "B" : "A"}x`;
+    expect((await send(flipped)).status).toBe(401);
+    // 簽章對、但帳號狀態變了
+    await fixture.store.update((draft) => {
+      draft.accounts[0]!.status = "disabled";
+    });
+    expect((await send(fixture.cookie)).status).toBe(401);
+    await fixture.store.update((draft) => {
+      draft.accounts[0]!.status = "active";
+    });
+    expect((await send(fixture.cookie)).status).not.toBe(401); // 啟用回來，舊 cookie 本身仍有效（sessionVersion 沒變）
+    await fixture.store.update((draft) => {
+      draft.accounts[0]!.sessionVersion = 2;
+    });
+    expect((await send(fixture.cookie)).status).toBe(401);
+    await fixture.store.update((draft) => {
+      draft.accounts.splice(0, 1);
+    });
+    expect((await send(fixture.cookie)).status).toBe(401);
+    const other = await createAuthFixture();
+    expect((await send(other.cookie)).status).toBe(401); // 別的部署（不同的簽章金鑰）
+    expect(calls.map((c) => c.url)).toEqual(["https://api.openai.com/v1/chat/completions"]); // 只有「啟用回來之後仍有效」的那一次真的往上游走
+  });
+
+  it("沒登入的請求不會吃掉限流額度：先送一大堆沒登入的，之後登入的人照常可用", async () => {
+    const { app } = makeApp({ now: () => 1_000_000 });
+    const ip = { "x-forwarded-for": "203.0.113.55" };
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX + 20; i++) expect((await postAnonymous(app, "/api/ocr", {}, ip)).status).toBe(401);
+    expect((await post(app, "/api/ocr", {}, ip)).status).toBe(400); // 缺 image：通過閘門與限流，到達處理器
+  });
+
+  it("沒登入時 GET 這些端點仍然是 405（方法不對不必先登入）；不存在的 /api 路徑仍是 404", async () => {
+    const { app } = makeApp();
+    for (const path of ["/api/ocr", "/api/save", "/api/box-closed"]) {
+      const res = await app.request(path);
+      expect(res.status, path).toBe(405);
+    }
+    expect((await app.request("/api/nope")).status).toBe(404);
+  });
+
+  it("LINE webhook 與 /healthz 不需要登入：webhook 靠簽章（簽章不對是 401「簽章驗證失敗」，不是「請先登入」）", async () => {
+    const { app } = makeApp({ env: { LINE_CHANNEL_SECRET: "test-line-channel-secret-456" } });
+    const hook = await postAnonymous(app, "/api/line/webhook", "{}", { "x-line-signature": "bad" });
+    expect(hook.status).toBe(401);
+    expect(await hook.json()).toEqual({ success: false, error: "簽章驗證失敗" });
+    expect((await app.request("/healthz")).status).toBe(200);
+  });
+
+  it("沒有資料目錄（沒有地方存帳號）：OCR、存檔、關箱通知回 503 與掛載 Volume 的說明，而不是 401", async () => {
+    const { app } = makeApp({ noStore: true });
+    for (const [path, body] of PROTECTED) {
+      const res = await post(app, path, body);
+      expect(res.status, path).toBe(503);
+      expect(await res.json()).toEqual({ success: false, error: "請在 Zeabur 掛載 Volume 到 /app/data" });
+    }
+  });
+});
+
 describe("速率限制（OCR 每 IP 每分鐘 60 次、存檔每 IP 每分鐘 600 次，各自獨立計算）", () => {
   const ip = (address: string) => ({ "x-forwarded-for": address });
 
@@ -585,14 +721,35 @@ describe("速率限制（OCR 每 IP 每分鐘 60 次、存檔每 IP 每分鐘 60
     expect((await post(app, "/api/ocr", {}, ip("203.0.113.4"))).status).toBe(429);
   });
 
-  it("其他 /api/* 路徑（含不存在的）算進 OCR 的額度，不會吃掉存檔額度", async () => {
+  it("其他 /api/* 路徑（含不存在的；已登入）算進 OCR 的額度，不會吃掉存檔額度", async () => {
     const { app } = makeApp({ now: () => 1_000_000 });
+    const who = { ...auth.headers, ...ip("203.0.113.5") };
     for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) {
-      expect((await app.request("/api/nope", { headers: ip("203.0.113.5") })).status).toBe(404);
+      expect((await app.request("/api/nope", { headers: who })).status).toBe(404);
     }
-    expect((await app.request("/api/nope", { headers: ip("203.0.113.5") })).status).toBe(429);
+    expect((await app.request("/api/nope", { headers: who })).status).toBe(429);
     expect((await post(app, "/api/ocr", {}, ip("203.0.113.5"))).status).toBe(429);
     expect((await post(app, "/api/save", {}, ip("203.0.113.5"))).status).toBe(400);
+  });
+
+  it("沒登入的請求（/api/me、不存在的路徑…）有自己的「匿名」額度：灌爆它不會讓同一個出口 IP 上已登入的人被 429", async () => {
+    const { app } = makeApp({ now: () => 1_000_000 });
+    const address = ip("203.0.113.40");
+    const signedIn = { ...auth.headers, ...address };
+    // 匿名：不存在的路徑（OCR 那一桶）與 /api/me（設定那一桶）各自用完自己的額度（照樣有限流，不是不設防）
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) expect((await app.request("/api/nope", { headers: address })).status).toBe(404);
+    expect((await app.request("/api/nope", { headers: address })).status).toBe(429);
+    for (let i = 0; i < SETTINGS_API_RATE_LIMIT_MAX; i++) expect((await app.request("/api/me", { headers: address })).status).toBe(401);
+    expect((await app.request("/api/me", { headers: address })).status).toBe(429);
+    // 同一個 IP 上已登入的人：OCR 額度與 /api/me 額度都是完整的
+    for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) {
+      const res = await post(app, "/api/ocr", {}, address);
+      if (res.status !== 400) throw new Error(`已登入的第 ${i + 1} 次 OCR 預期通過限流（輸入驗證 400），實際 ${res.status}`);
+    }
+    for (let i = 0; i < SETTINGS_API_RATE_LIMIT_MAX; i++) expect((await app.request("/api/me", { headers: signedIn })).status).toBe(200);
+    // 已登入的人自己的額度照樣會用完
+    expect((await post(app, "/api/ocr", {}, address)).status).toBe(429);
+    expect((await app.request("/api/me", { headers: signedIn })).status).toBe(429);
   });
 
   it("路徑變體落在哪個額度：/api/save（含查詢字串、百分比編碼）算存檔額度；其餘變體算 OCR 額度", async () => {
@@ -601,7 +758,7 @@ describe("速率限制（OCR 每 IP 每分鐘 60 次、存檔每 IP 每分鐘 60
     // 其餘變體（都是不存在的路徑，回 404）：用 OCR 額度，不會吃掉存檔額度
     const others = ["/api/save/", "/api/Save", "/api/saveX", "/api/save%2F", "/api/nope"];
     for (let i = 0; i < OCR_RATE_LIMIT_MAX; i++) {
-      expect((await app.request(others[i % others.length]!, { headers: ip("203.0.113.30") })).status).toBe(404);
+      expect((await app.request(others[i % others.length]!, { headers: { ...auth.headers, ...ip("203.0.113.30") } })).status).toBe(404);
     }
     expect((await post(app, "/api/ocr", {}, ip("203.0.113.30"))).status).toBe(429);
     expect((await post(app, "/api/save", {}, ip("203.0.113.30"))).status).toBe(400); // 存檔額度完全沒被動到
@@ -645,6 +802,6 @@ describe("速率限制（OCR 每 IP 每分鐘 60 次、存檔每 IP 每分鐘 60
     const { app } = makeApp({ now: () => 1_000_000 });
     for (let i = 0; i <= OCR_RATE_LIMIT_MAX + 5; i++) await post(app, "/api/ocr", {}, ip("203.0.113.6"));
     expect((await app.request("/healthz", { headers: ip("203.0.113.6") })).status).toBe(200);
-    expect((await app.request("/", { headers: ip("203.0.113.6") })).status).toBe(200);
+    expect((await app.request("/", { headers: { ...ip("203.0.113.6"), cookie: auth.cookie } })).status).toBe(200);
   });
 });
