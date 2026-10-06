@@ -41,12 +41,12 @@ export interface RunningServer {
 
 /**
  * 真的啟動 src/server.ts（用 tsx 執行）。子行程只拿到最少的環境變數（PATH、PORT 與呼叫端給的），沒有任何真實金鑰；
- * 只連本機 127.0.0.1。preload 是額外的 --import 模組（例如只允許打 LINE 的 fetch 替身）。
+ * 只連本機 127.0.0.1。preload 是額外的 --import 模組（例如只允許打 LINE 的 fetch 替身）；root 是要當成專案根目錄的資料夾（預設是真正的專案）。
  */
-export async function startServer(env: Record<string, string>, options: { preload?: string } = {}): Promise<RunningServer> {
+export async function startServer(env: Record<string, string>, options: { preload?: string; root?: string } = {}): Promise<RunningServer> {
   const port = await freePort();
   const child = spawn(process.execPath, ["--import", "tsx", ...(options.preload ? ["--import", options.preload] : []), "src/server.ts"], {
-    cwd: repoRoot,
+    cwd: options.root ?? repoRoot,
     env: { PATH: process.env.PATH ?? "", PORT: String(port), ...env },
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -71,6 +71,33 @@ export async function startServer(env: Record<string, string>, options: { preloa
       clearTimeout(killTimer);
     },
   };
+}
+
+/**
+ * 啟動 src/server.ts 並等它自己結束（用在「啟動就該失敗」的情況，例如缺少靜態資源）。root＝要當成專案根目錄的資料夾
+ * （裡面要有 src/、package.json、index.html，以及指向 node_modules 的符號連結）；沒給就是真正的專案根目錄。
+ */
+export async function runServerUntilExit(env: Record<string, string>, options: { root?: string; timeoutMs?: number } = {}): Promise<{ code: number | null; output: string }> {
+  const port = await freePort();
+  const child = spawn(process.execPath, ["--import", "tsx", "src/server.ts"], {
+    cwd: options.root ?? repoRoot,
+    env: { PATH: process.env.PATH ?? "", PORT: String(port), ...env },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let output = "";
+  child.stdout.on("data", (chunk: Buffer) => void (output += chunk.toString()));
+  child.stderr.on("data", (chunk: Buffer) => void (output += chunk.toString()));
+  const code = await new Promise<number | null>((resolveExit) => {
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      resolveExit(null);
+    }, options.timeoutMs ?? 25_000);
+    child.once("exit", (exitCode) => {
+      clearTimeout(timer);
+      resolveExit(exitCode);
+    });
+  });
+  return { code, output };
 }
 
 /** 讀 LINE_STUB_LOG（每行一筆 JSON）。 */

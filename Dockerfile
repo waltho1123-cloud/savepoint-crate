@@ -41,8 +41,9 @@ RUN pnpm install --frozen-lockfile --prod=true \
     && rm -rf /root/.local/share/pnpm/store /root/.cache
 
 COPY --from=build /app/dist ./dist
-# server.ts 從 dist/ 的上一層（/app）讀取 index.html。
+# server.ts 從 dist/ 的上一層（/app）讀取 index.html 與 public/assets（WIWI 配色 token 與 Logo）。
 COPY index.html ./index.html
+COPY public ./public
 COPY scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh
 RUN chmod 755 ./scripts/docker-entrypoint.sh
 

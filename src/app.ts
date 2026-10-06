@@ -4,6 +4,7 @@ import { bodyLimit } from "hono/body-limit";
 
 import { summarizeAccounts } from "./accounts.js";
 import { SetupCodeGuard } from "./auth.js";
+import { registerAssetRoutes, type StaticAssets } from "./assets.js";
 import { assertXhr, createAuthKit } from "./auth-kit.js";
 import { consoleLogger, describeError, ServiceError, sleep, type FetchLike, type Logger } from "./common.js";
 import type { AppEnv } from "./env.js";
@@ -39,6 +40,11 @@ export interface AppDeps {
   env: AppEnv;
   /** index.html 的內容（server.ts 啟動時讀一次）。 */
   indexHtml: string;
+  /**
+   * 靜態資源（public/assets 底下的 WIWI 配色與 Logo，server.ts 啟動時讀進記憶體，見 assets.ts）；`GET /assets/*` 只從這張表回應。
+   * 不給就沒有任何資源（`/assets/*` 一律 404）。
+   */
+  assets?: StaticAssets;
   /** 預設用全域 fetch（每次呼叫時才取 globalThis.fetch，所以測試用 vi.stubGlobal 也攔得到）。 */
   fetchImpl?: FetchLike;
   /** OCR 重試之間、以及 Google append 視窗已滿時等名額的等待；測試時注入以免真的等待。 */
@@ -67,6 +73,7 @@ export interface AppDeps {
  *   POST /api/box-closed → 關箱後推播到 LINE 群組（同上；訊息帶操作者姓名；LINE 沒設定時靜默略過）
  *   POST /api/line/webhook → LINE webhook：在群組裡回覆該群組的 ID、記錄最近收到的群組（需要 channel secret；公開，靠簽章驗證）
  *   /login、/logout、/api/me、/account  → 登入、登出、目前登入者、我的帳號（唯讀；沒有自己改密碼的端點，見 login-routes.ts）
+ *   /assets/*  → 靜態資源（WIWI 配色 token 與 Logo；公開、不需登入，見 assets.ts）
  *   /settings、/api/settings*、/api/accounts*、POST /settings/*  → 設定頁、設定 API 與帳號管理（只有管理員；見 settings-routes.ts、account-routes.ts）
  *
  * LINE 的 token、群組 ID、secret 先看設定頁存的設定檔（settings），沒有才退回環境變數（見 line-settings.ts）。
@@ -259,6 +266,8 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ success: true });
   });
 
+  // 靜態資源（WIWI 配色 token 與 Logo）：不需要登入（登入頁就要用），只從啟動時讀好的資源表回應
+  registerAssetRoutes(app, deps.assets);
   registerLoginRoutes(app, kit);
   registerSettingsRoutes(app, kit, { env, setupGuard, fetchImpl });
 

@@ -15,6 +15,9 @@ import { DATA_DIR_UNAVAILABLE_MESSAGE, type Account } from "./settings-store.js"
  */
 
 export const WEBHOOK_PATH = "/api/line/webhook";
+/** WIWI 配色 token 與 Logo：同源的靜態資源（public/assets，由 app.ts 的 /assets/* 提供，見 assets.ts）。 */
+export const WIWI_COLORS_PATH = "/assets/wiwi-colors.css";
+export const WIWI_LOGO_PATH = "/assets/wiwi-logo.svg";
 
 export function escapeHtml(value: string): string {
   const entities: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;", "`": "&#96;" };
@@ -27,7 +30,7 @@ export function pageSecurityHeaders(nonce: string): Record<string, string> {
     "Content-Security-Policy": [
       "default-src 'none'",
       `script-src 'nonce-${nonce}'`,
-      "style-src 'unsafe-inline'",
+      "style-src 'self' 'unsafe-inline'", // 'self'：WIWI 配色 token 是同源的 /assets/wiwi-colors.css；頁面自己的樣式仍是 inline
       "connect-src 'self'",
       "img-src 'self' data:",
       "base-uri 'none'",
@@ -52,55 +55,70 @@ export interface PageContext {
 }
 
 const CSS = `
-:root{--primary:#3ab5ec;--primary-dark:#1a9fd8;--bg:#eef5fa;--card:#fff;--text:#0c1e2e;--muted:#5e7d94;--line:rgba(0,0,0,.09);--radius:16px;--radius-sm:10px}
+/* 顏色全部來自 /assets/wiwi-colors.css 的 --wiwi-* 語意 token（頁面的 html 元素帶 data-thermal="warm"）；這裡不寫任何色碼或 rgb()，tests/branding.test.ts 會擋。
+   橘（fill）只當底色與圖形、不當字；品牌文字用 text-strong（頁面底是灰的，不是純白）；互動控制項邊框用 border-strong；次要文字用 text-muted。 */
+:root{--primary:var(--wiwi-thermal-solid);--primary-dark:var(--wiwi-thermal-text-strong);--bg:var(--wiwi-surface-sunken);--card:var(--wiwi-surface);--text:var(--wiwi-text);--muted:var(--wiwi-text-muted);--line:var(--wiwi-border);--radius:16px;--radius-sm:10px;--shadow-soft:var(--wiwi-border)}
+@supports (color:color-mix(in srgb,red 50%,transparent)){:root{--shadow-soft:color-mix(in srgb,var(--wiwi-text) 8%,transparent)}}
 *{box-sizing:border-box}
 html{-webkit-text-size-adjust:100%}
-body{margin:0;background:var(--bg);color:var(--text);font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Noto Sans TC",Roboto,sans-serif;line-height:1.6;font-size:16px}
+body{margin:0;background:var(--bg);background-image:radial-gradient(ellipse at 15% 10%,var(--wiwi-thermal-tint) 0%,transparent 55%),radial-gradient(ellipse at 85% 90%,var(--wiwi-thermal-tint) 0%,transparent 50%);background-attachment:fixed;color:var(--text);font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang TC","Noto Sans TC",Roboto,sans-serif;line-height:1.6;font-size:16px}
+::placeholder{color:var(--muted);opacity:1}
+:focus-visible{outline:3px solid var(--wiwi-focus-ring);outline-offset:2px}
 .wrap{max-width:640px;margin:0 auto;padding:16px 16px 48px}
+.wrap.center{text-align:center}
+.wrap.center .card{text-align:left}
+.brand-logo{display:block;flex:none;height:48px;width:auto;margin:4px 0 6px}
+.wrap.center .brand-logo{margin:12px auto 8px}
 h1{font-size:1.35rem;margin:.5rem 0 .1rem}
 h2{font-size:1.05rem;margin:0 0 .5rem}
 .sub{color:var(--muted);margin:0 0 .6rem;font-size:.9rem}
-.card{background:var(--card);border-radius:var(--radius);padding:18px 18px 16px;margin:14px 0;box-shadow:0 8px 32px rgba(14,120,180,.08)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:18px 18px 16px;margin:14px 0;box-shadow:0 8px 32px var(--shadow-soft)}
 label{display:block;font-weight:600;font-size:.9rem;margin:14px 0 6px}
-input[type=text],input[type=password],input[type=email]{width:100%;min-height:44px;padding:10px 12px;font-size:1rem;border:1.5px solid var(--line);border-radius:var(--radius-sm);background:#fff;color:var(--text)}
-input[type=text]:focus,input[type=password]:focus,input[type=email]:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(58,181,236,.23)}
+input[type=text],input[type=password],input[type=email]{width:100%;min-height:44px;padding:10px 12px;font-size:1rem;border:1.5px solid var(--wiwi-border-strong);border-radius:var(--radius-sm);background:var(--wiwi-surface);color:var(--text)}
+input[type=text]:focus-visible,input[type=password]:focus-visible,input[type=email]:focus-visible{outline:2px solid var(--wiwi-focus-ring);outline-offset:1px;border-color:var(--wiwi-focus-ring)}
 .mono{font-family:'SF Mono','Fira Code',ui-monospace,monospace;font-size:.88rem;word-break:break-all}
+td.mono{word-break:normal}
 .check{display:flex;align-items:center;gap:8px;font-weight:500;margin:10px 0 0;font-size:.95rem}
 .check input{width:20px;height:20px;margin:0}
-.btn{min-height:44px;padding:0 18px;border:0;border-radius:var(--radius-sm);font-size:1rem;font-weight:600;cursor:pointer;background:#e3eef6;color:var(--text)}
-.btn.primary{background:var(--primary);color:#fff}
+input[type=checkbox]{accent-color:var(--wiwi-thermal-solid)}
+.btn{min-height:44px;padding:0 18px;border:1px solid var(--wiwi-border-strong);border-radius:var(--radius-sm);font-size:1rem;font-weight:600;cursor:pointer;background:var(--wiwi-surface);color:var(--text)}
+.btn:hover{background:var(--wiwi-thermal-tint)}
+.btn.primary{background:var(--wiwi-thermal-solid);color:var(--wiwi-thermal-on-solid);border-color:var(--wiwi-thermal-solid)}
+.btn.primary:hover{background:var(--wiwi-thermal-solid-hover);border-color:var(--wiwi-thermal-solid-hover)}
+.btn.primary:active{background:var(--wiwi-thermal-solid-active);border-color:var(--wiwi-thermal-solid-active)}
 .btn.small{min-height:36px;padding:0 12px;font-size:.9rem}
-.btn.danger{background:#fde4e9;color:#be123c}
+.btn.danger{background:var(--wiwi-danger-tint);color:var(--wiwi-danger);border-color:var(--wiwi-danger)}
+.btn.danger:hover{background:var(--wiwi-danger);color:var(--wiwi-danger-tint)}
 .btn:disabled{opacity:.55;cursor:not-allowed}
 .row{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
 .msg{margin:12px 0 0;padding:10px 12px;border-radius:var(--radius-sm);font-size:.92rem}
-.msg.ok{background:#d1fae5;color:#065f46}
-.msg.err{background:#ffe4e6;color:#9f1239}
-.note{background:#eaf6fd;color:#0b5f87;padding:10px 12px;border-radius:var(--radius-sm);font-size:.9rem;margin:10px 0 0}
-.note.warn{background:#fef3c7;color:#92400e}
+.msg.ok{background:var(--wiwi-success-tint);color:var(--wiwi-success)}
+.msg.err{background:var(--wiwi-danger-tint);color:var(--wiwi-danger)}
+.note{background:var(--wiwi-thermal-tint);color:var(--text);border-left:4px solid var(--wiwi-thermal-border);padding:10px 12px;border-radius:var(--radius-sm);font-size:.9rem;margin:10px 0 0}
+.note.warn{background:var(--wiwi-warning-tint);color:var(--wiwi-warning);border-left-color:var(--wiwi-warning)}
 .muted{color:var(--muted);font-size:.9rem;margin:.4rem 0 0}
 .chips{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:8px}
-.chip{padding:5px 11px;border-radius:999px;font-size:.85rem;font-weight:600;background:#e3eef6;color:#2b4a60}
-.chip.ok{background:#d1fae5;color:#065f46}
-.chip.bad{background:#ffe4e6;color:#9f1239}
-.chip.warn{background:#fef3c7;color:#92400e}
+.chip{padding:5px 11px;border-radius:999px;font-size:.85rem;font-weight:600;white-space:nowrap;background:var(--wiwi-surface-sunken);color:var(--text);border:1px solid var(--line)}
+.chip.ok{background:var(--wiwi-success-tint);color:var(--wiwi-success);border-color:var(--wiwi-success)}
+.chip.bad{background:var(--wiwi-danger-tint);color:var(--wiwi-danger);border-color:var(--wiwi-danger)}
+.chip.warn{background:var(--wiwi-warning-tint);color:var(--wiwi-warning);border-color:var(--wiwi-warning)}
 .groups{list-style:none;padding:0;margin:0}
 .groups li{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:10px 0;border-top:1px solid var(--line)}
 .groups li:first-child{border-top:0}
 .gname{font-weight:600}
 .urlbox{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.urlbox code{flex:1 1 220px;padding:10px 12px;background:#f3f8fb;border-radius:var(--radius-sm)}
+.urlbox code{flex:1 1 220px;padding:10px 12px;background:var(--wiwi-surface-sunken);border-radius:var(--radius-sm)}
 .tablewrap{overflow-x:auto;margin:10px -4px 0}
 table{width:100%;border-collapse:collapse;font-size:.92rem}
 th,td{text-align:left;padding:8px 6px;vertical-align:middle;border-top:1px solid var(--line)}
 th{font-size:.8rem;color:var(--muted);font-weight:600;border-top:0;white-space:nowrap}
-td.actions{white-space:nowrap}
+td.actions{min-width:150px}
 td.actions .btn{margin:2px 6px 2px 0}
 .me{color:var(--muted);font-size:.85rem}
-.chip.admin{background:#e0e7ff;color:#3730a3}
-.chip.user{background:#e3eef6;color:#2b4a60}
-select{width:100%;min-height:44px;padding:10px 12px;font-size:1rem;border:1.5px solid var(--line);border-radius:var(--radius-sm);background:#fff;color:var(--text)}
-select:focus{outline:none;border-color:var(--primary);box-shadow:0 0 0 3px rgba(58,181,236,.23)}
+.chip.admin{background:var(--wiwi-thermal-tint);color:var(--wiwi-thermal-text-strong);border-color:var(--wiwi-thermal-border)}
+.chip.user{background:var(--wiwi-surface-sunken);color:var(--muted)}
+select{width:100%;min-height:44px;padding:10px 12px;font-size:1rem;border:1.5px solid var(--wiwi-border-strong);border-radius:var(--radius-sm);background:var(--wiwi-surface);color:var(--text)}
+select:focus-visible{outline:2px solid var(--wiwi-focus-ring);outline-offset:1px;border-color:var(--wiwi-focus-ring)}
 .topnav{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;justify-content:space-between;margin:2px 0 6px;font-size:.92rem}
 .topnav .who{color:var(--muted)}
 .topnav .links{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
@@ -362,22 +380,26 @@ interface LayoutOptions {
   title?: string;
   heading?: string;
   sub?: string;
+  /** 登入頁這類「對外」的頁面：Logo、標題與副標置中（卡片內容仍靠左）。 */
+  centered?: boolean;
 }
 
 function layout(ctx: PageContext, body: string, options: LayoutOptions = {}): string {
   const heading = options.heading ?? "savepoint-crate 設定";
   const sub = options.sub ?? "管理 LINE 群組通知與帳號";
   return `<!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="zh-Hant" data-thermal="warm">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>${escapeHtml(options.title ?? "設定 - savepoint-crate")}</title>
+<link rel="stylesheet" href="${WIWI_COLORS_PATH}">
 <style>${CSS}</style>
 </head>
 <body>
-<main class="wrap">
+<main class="wrap${options.centered ? " center" : ""}">
+<img class="brand-logo" src="${WIWI_LOGO_PATH}" alt="WIWI" width="53" height="48">
 <h1>${escapeHtml(heading)}</h1>
 <p class="sub">${escapeHtml(sub)}</p>
 ${ctx.insecure ? INSECURE_NOTICE : ""}
@@ -476,7 +498,7 @@ export function renderLoginPage(ctx: PageContext, next = "/"): string {
 </form>
 <p class="muted">帳號由管理員建立。忘記密碼：請管理員在設定頁的「帳號管理」幫你重設。所有管理員都登入不了時，請參考 README 的「忘記所有密碼時的復原方式」（需要動到 Volume 裡的設定檔，有風險，請先讀完說明）。</p>
 </section>`,
-    { title: `登入 - ${APP_NAME}`, heading: APP_NAME, sub: "請用你的帳號（Email）與密碼登入" },
+    { title: `登入 - ${APP_NAME}`, heading: APP_NAME, sub: "請用你的帳號（Email）與密碼登入", centered: true },
   );
 }
 
@@ -493,7 +515,7 @@ export function renderNoAccountsPage(ctx: PageContext, legacyPending: boolean): 
     }</p>
 <div class="row"><a class="btn primary" href="/settings">前往設定頁</a></div>
 </section>`,
-    { title: `尚未建立帳號 - ${APP_NAME}`, heading: APP_NAME, sub: "請用你的帳號（Email）與密碼登入" },
+    { title: `尚未建立帳號 - ${APP_NAME}`, heading: APP_NAME, sub: "請用你的帳號（Email）與密碼登入", centered: true },
   );
 }
 

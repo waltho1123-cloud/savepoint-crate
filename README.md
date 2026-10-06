@@ -9,6 +9,7 @@
 ```
 手機瀏覽器 ── GET /login、POST /login ─→ 後端（Email＋密碼登入，發 session cookie）
           ── GET /            ─→ index.html（要先登入；純靜態頁，邏輯都在頁面內）
+          ── GET /assets/*     ─→ 靜態資源（WIWI 配色 token 與 Logo；公開，不用登入）
           ── POST /api/ocr    ─→ 後端（要登入）─→ OpenAI chat/completions（Vision）
           ── POST /api/save   ─→ 後端（要登入）─→ Google Sheets API（讀表頭＋append）
           ── POST /api/box-closed ─→ 後端（要登入）─→ LINE Messaging API（push 到群組，訊息帶操作者；選配）
@@ -23,6 +24,7 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 | 方法與路徑 | 說明 |
 |---|---|
 | `GET /`、`GET /index.html` | 回傳 `index.html`（`Cache-Control: no-cache`）。**沒登入 → 302 導向 `/login?next=/`**（登入後回到主頁）。 |
+| `GET /assets/<檔名>`（公開，不用登入） | WIWI 品牌配色與 Logo（`public/assets/` 底下的 `wiwi-colors.css`、`wiwi-logo.svg`、`wiwi-logo-white.svg`）：`Cache-Control: public, max-age=86400`、`X-Content-Type-Options: nosniff`、正確的 Content-Type（CSS `text/css; charset=utf-8`、SVG `image/svg+xml`）；只有「剛好是資源表裡的檔名」才有內容，其餘（不存在、路徑穿越寫法、子目錄、大小寫不同…）一律 404，非 GET／HEAD 回 405。見「品牌配色與靜態資源」。 |
 | `GET /healthz`（公開，不用登入） | 回 `{ ok, openaiConfigured, sheetsConfigured, serviceAccountEmail, clientIp, requestIsHttps, dataDirWritable, dataDirMounted, adminConfigured, adminCount, accountCount, legacyAdminPending, lineConfigured, lineWebhookConfigured, lineSource }`。`requestIsHttps`：這個請求被判斷為 HTTPS（看 `X-Forwarded-Proto`；Zeabur 的反向代理要有送，登入 cookie 才會加 `Secure`），和 `clientIp` 一樣是部署後 curl 一次就能確認代理行為的診斷欄位。`dataDirWritable`：資料目錄（Volume）可寫入，設定頁才能用；`dataDirMounted`：它是不是獨立掛載的磁碟（`false`＝只是容器內的暫存目錄，重新部署後設定會消失；`null`＝判斷不出來，例如非 Linux）；`adminConfigured`：有至少一位啟用中的管理員（角色 admin），或仍有待升級的舊版單一密碼（設定頁「有人進得去」）；`adminCount`：角色是 admin 的帳號數（含停用的）；`accountCount`：帳號總數（兩種角色、含停用的）；`legacyAdminPending`：還有舊版的單一管理密碼沒升級成帳號。`lineConfigured` 是**生效的** LINE 設定裡 token 與群組 ID 都有、且開關開著（關箱通知會推播），`lineWebhookConfigured` 是有 channel secret（webhook 啟用），`lineSource` 是生效的設定來自設定頁（`"settings"`）還是環境變數（`"env"`），都沒設定是 `null`；皆不含任何設定值。`serviceAccountEmail` 是從 `GOOGLE_SERVICE_ACCOUNT_CREDENTIALS` 解析出的 `client_email`（缺少或解析失敗時為 `null`），部署後用它知道要把試算表分享給誰；**絕不**回傳 `private_key` 或憑證其他欄位。`clientIp` 是**限流用的同一個判斷**所得到的呼叫端 IP（`X-Forwarded-For` 由右往左第一個公開位址；沒有就是 TCP 連線位址；再沒有就是 `"unknown"`），部署後 curl 一次就能確認 Zeabur 反向代理的處理是否正確（見「部署」）。 |
 | `POST /api/ocr` | **要登入（任一角色），而且要帶 `X-Requested-With: XMLHttpRequest`**（沒登入 401 `{success:false,error:"請先登入"}`、缺標頭 403；`/api/save`、`/api/box-closed` 同）。請求 `{ "image": "data:image/jpeg;base64,...", "boxId": "BOX-001" }`。成功 `{ "success": true, "data": { "barcode", "productName", "gender", "color", "size" } }`。 |
 | `POST /api/save` | 要登入（見 `/api/ocr`）。請求 `{ seqNo, date, boxId, barcode, productName, gender, color, size, quantity, time }`（與原 n8n webhook 相同）。成功 `{ "success": true, "range": "'商品主檔'!A125:K125" }`；`range` 取自 Sheets API `values.append` 回應的 `updates.updatedRange`，拿不到時省略該欄位。 |
@@ -43,7 +45,7 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 | 400 | JSON 格式錯誤、缺少 `image`、`image` 不是合法 data URL、`/api/save` 欄位型別不對或整筆都是空的、`/api/box-closed` 輸入不合規則（`boxId` 空白或超過 100 字、`items` 不是陣列或超過 500 筆、文字欄位超過 200 字、`qty` 不是 1～9999 的整數、數量欄位不是非負整數）；設定頁、登入與 `/api/accounts*` 的輸入不合規則（姓名不是 1～50 字、Email 格式不對、密碼不是 10～200 字、`role` 不是 `admin`／`user`、`status` 不是 `active`／`disabled`、`PATCH` 沒有任何要改的欄位、還沒有任何帳號就想登入） |
 | 401 | `/api/line/webhook` 的 `X-Line-Signature` 缺少或不符；**OCR、存檔、關箱通知、`/api/me`、設定 API、帳號 API 沒登入**（或 cookie 過期、被竄改、帳號已被停用／刪除、重設過密碼或改過角色）；登入失敗（帳號不存在、帳號停用、密碼不對都是同一句「帳號或密碼不正確」）；升級時目前的密碼不對 |
 | 403 | 登入的是一般使用者卻存取設定頁、設定 API、帳號 API（「需要管理員權限」）；首次設定碼不正確；狀態變更請求（含 OCR、存檔、關箱通知）缺少 `X-Requested-With` 標頭 |
-| 404 | `/api/accounts/:id*`：找不到這個帳號（id 不存在或格式不對）；沒有這個路徑（包括已經不存在的自助改密碼 `POST /account/password`） |
+| 404 | `/api/accounts/:id*`：找不到這個帳號（id 不存在或格式不對）；沒有這個路徑（包括已經不存在的自助改密碼 `POST /account/password`）；`/assets/*` 沒有這個檔案（含各種路徑穿越寫法） |
 | 409 | `/settings/setup`：已經有帳號（或還有舊版單一密碼等著升級）；`/settings/upgrade`：沒有待升級的舊版密碼；`/login`：還沒升級；`/api/accounts*`：Email 重複、不能停用或刪除自己、不能把自己改成一般使用者、不能停用、刪除或降級最後一位啟用中的管理員、帳號數量已達上限（200 個） |
 | 415 | 設定頁的狀態變更請求不是 `Content-Type: application/json` |
 | 413 | 請求內容超過 15 MB（登入、登出、`/settings/*`、`/api/settings/*`、`/api/accounts*` 的上限是 16 KB） |
@@ -301,6 +303,23 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
 - **重複通知**：前端沒有「同步中」的鎖定，同一個箱子若連按兩次「確認」，會重複寫入試算表，也會重複通知（見下面「安全與限制」）。
 - **webhook 安全**：`/api/line/webhook` 用 channel secret 驗證每個請求真的來自 LINE（對**原始 body 位元組**做 HMAC-SHA256、base64 後以 `timingSafeEqual` 比對 `X-Line-Signature`），不符回 401；它只處理群組來源的 `join` 與訊息事件：`join` 與「群組ID」文字會回覆群組 ID，並把群組（ID、名稱、事件類型、時間）記進「最近收到的群組」；**不儲存任何訊息內容**。
 
+## 品牌配色與靜態資源（WIWI）
+
+所有頁面（主頁 `index.html`、登入頁、設定頁、我的帳號、403／503 頁…）都用 WIWI 品牌配色。配色與 Logo 的正本是 skill `wiwi-web-colors`（`~/.claude/skills/wiwi-web-colors/`；色票取自 wiwi.com.tw 官網 CSS 與原廠 Logo，內建的 124 組搭配全數通過 WCAG 2.1 AA）。
+
+- **檔案**：`public/assets/` 放三個從 skill 原樣複製來的檔案——`wiwi-colors.css`（語意 token）、`wiwi-logo.svg`（淺底用的全標）、`wiwi-logo-white.svg`（深底用）。**不手改、不手抄色碼**：`tests/branding.test.ts` 用 sha256 釘住它們（與 skill 原檔 byte-identical）。
+- **提供方式**（`src/assets.ts`）：`GET /assets/<檔名>`，不需要登入（登入頁就要用）。啟動時把 `public/assets/` 第一層的檔案一次讀進記憶體，請求只用「檔名」查表，**碰不到檔案系統，所以不可能路徑穿越**（`..`、百分比編碼的 `..`、編碼的斜線與反斜線、空字元、雙重編碼、大小寫變體都只是「表裡沒有這個名字」→ 404）；只收一般檔案（不進子目錄、不跟符號連結、不收隱藏檔、檔名限英數與 `._-`），副檔名要在白名單內（css、svg、png、jpg／jpeg、webp、gif、ico、woff、woff2），每個檔案最大 2 MB。缺少 `wiwi-colors.css` 或 `wiwi-logo.svg` 時**服務啟動直接失敗**（結束碼 1、log 指出缺什麼與預期位置；比照 `index.html`——部署時新版起不來，Zeabur 會繼續用舊版，比上線一個沒有樣式的網站好）。`server.ts` 從 `dist/` 的上一層找 `public/`（與 `index.html` 同一個方式），Dockerfile 的 runtime 階段 `COPY public ./public`。
+- **頁面怎麼用**：`<html lang="zh-Hant" data-thermal="warm">`（整站溫感橘，官網預設，不混極）、`<link rel="stylesheet" href="/assets/wiwi-colors.css">` 放在頁面自己的 `<style>` 之前。頁面自己的 CSS **只寫語意 token**（`--wiwi-text`、`--wiwi-thermal-solid`、`--wiwi-border-strong`…），不寫色碼、不寫 `rgb()`；要半透明（玻璃擬態、陰影）就用 `color-mix()` 從 token 調（瀏覽器不支援時退回不透明的 token，`@supports` 包起來）。舊的變數名稱（`--primary`、`--text`、`--bg`…）保留，但全部改成指向 token（JS 產生的 HTML 裡有 `var(--primary-dark)` 這類用法）。設定頁系列的 CSP：`style-src 'self' 'unsafe-inline'`（同源的配色檔 ＋ 頁面自己的 inline 樣式）、`img-src 'self' data:`（同源的 Logo）；`index.html` 沒有 CSP 標頭。
+- **配色鐵律**（skill 的五個坑；`tests/branding.test.ts` 會擋）：
+  1. 橘 `#F2971B` 與藍綠 `#44BCCE` 只能當底色與圖形，**不能當字，也不能壓白字**（只有 2.28:1）——橘底上的字用 `--wiwi-thermal-on-fill`（`#333333`，5.55:1）。
+  2. 白底上的品牌文字可以用 `--wiwi-thermal-text`（`#CD4400`，4.75:1）；**非純白底（淡底、灰底、半透明卡片）一律用加深版 `--wiwi-thermal-text-strong`（`#A83800`）**——差 0.07 的坑，目視看不出來。這些頁面的底大多不是純白，所以頁面 CSS 一律用 `--wiwi-thermal-text-strong`，測試的允許清單不放白底專用的 `--wiwi-thermal-text`。
+  3. `#8A8A8A`（`--wiwi-text-subtle`）不當內文；次要文字用 `--wiwi-text-muted`（`#626262`，6.10:1），placeholder 也是。
+  4. 輸入框、按鈕、分頁等互動控制項的邊框用 `--wiwi-border-strong`（>= 3:1）；`--wiwi-border`（淺灰）只給卡片與分隔線這類裝飾。選取狀態的橘底再加一圈深橘邊（橘單獨對白底只有 2.2:1）。
+  5. 主要按鈕 = `--wiwi-thermal-solid` 底 + `--wiwi-thermal-on-solid`（白字）；品牌淡底卡片 = `--wiwi-thermal-tint` + `--wiwi-text`；狀態色（成功、警告、危險）只用「狀態色字 + 各自的 `-tint` 底」。
+  用量比例約為：中性 70%／品牌淡底 20%／品牌原色 7%／深色 solid 3%——品牌色只出現在該被看見的地方（header 底線、選取中的分頁、主要按鈕、banner 淡底）。
+- **Logo**：主頁 header 標題左側、每個設定頁系列頁面（登入、設定、我的帳號、403／503…）的頂端（登入頁置中）。`<img>` 高度 48px（不低於 48px，字標才不會糊）；header 是淺色底（Logo 的橘與藍綠要在淺底上才看得見）。
+- **改過配色或樣式之後**：跑 `python3 ~/.claude/skills/wiwi-web-colors/scripts/audit.py public/assets/wiwi-colors.css`（離開碼 0＝124 組全過；沒改色碼就不必跑）與 `pnpm test`（branding 測試守規則）。要更新 skill 的新版檔案：重新複製三個檔案（`cmp` 確認 byte-identical）、跑 audit.py、再更新 `tests/branding.test.ts` 裡的 sha256。
+
 ## 本機開發
 
 需要 Node 22 與 pnpm 9.15.9（版本釘在 `package.json` 的 `packageManager`）。
@@ -328,7 +347,7 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 
 ## 部署（Docker／Zeabur）
 
-用專案根目錄的 `Dockerfile` 建置（兩階段：build 階段編譯 TypeScript，runtime 階段只裝 production 依賴並複製 `index.html`），容器的入口腳本（`scripts/docker-entrypoint.sh`）以 root 啟動、把資料目錄 `/app/data` 修成 `appuser` 擁有後用 `su-exec` 降權，所以實際執行 `node dist/server.js` 的行程**不是 root**（映像裡沒有 `USER` 指令，是入口腳本自己降權）。
+用專案根目錄的 `Dockerfile` 建置（兩階段：build 階段編譯 TypeScript，runtime 階段只裝 production 依賴並複製 `index.html` 與 `public/`（WIWI 配色與 Logo）），容器的入口腳本（`scripts/docker-entrypoint.sh`）以 root 啟動、把資料目錄 `/app/data` 修成 `appuser` 擁有後用 `su-exec` 降權，所以實際執行 `node dist/server.js` 的行程**不是 root**（映像裡沒有 `USER` 指令，是入口腳本自己降權）。
 
 - **埠號**：Zeabur 反向代理固定打容器 8080 並注入 `PORT=8080`，程式讀 `process.env.PORT`，不要在 `CMD` 寫死埠號。
 - **NODE_ENV**：Zeabur 會把 `NODE_ENV=production` 注入 build 階段，pnpm 會因此跳過 devDependencies 導致建置失敗；Dockerfile 的 build 階段已明確設 `ENV NODE_ENV=development` 並用 `--prod=false`，不要拿掉。
@@ -391,7 +410,7 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
   - 所有狀態變更的端點只收 `Content-Type: application/json` 且必須帶 `X-Requested-With: XMLHttpRequest`（瀏覽器的跨站表單送不出這種請求），再加上 `SameSite=Lax`，作為 CSRF 防護。
   - 暴力破解防護：建立第一位管理員 5 次／分、登入與升級共用 10 次／分（皆每 IP，IP 的判斷見上面第 3、4 項部署檢查；換 Email 重試也不會多出額度）；設定碼累計 20 次錯誤就整組作廢換新。scrypt 同時最多跑 2 個、排隊 16 個（超過回 429），所以公開端點被灌請求也不會把 libuv 執行緒池占滿、拖慢 OCR 與存檔。**沒有「帳號鎖定」或全域失敗額度**（避免被人故意鎖死管理者），所以請用夠長、不好猜的密碼。改成 Email 登入之後，針對已知 Email 猜密碼是主要風險，而限流只依來源 IP：服務一定要走有附加 `X-Forwarded-For` 的反向代理（Zeabur 的代理會做），如果直接把服務暴露在公網，攻擊者可以偽造這個標頭來繞過逐 IP 限流（見「部署」的檢查 3、4）。登入成功／失敗、設定碼錯誤、升級失敗與每個帳號操作（含重設密碼）都會在 log 留一行（`[accounts] <操作者> <動作> <對象>（來源 IP）`，不含任何密碼；被限流擋下的請求不再寫 log）。
   - 所有狀態變更的登入、設定與帳號端點統一用 `mutate()` 註冊（資料目錄可用 → `application/json` → `X-Requested-With`），並帶 `X-Content-Type-Options: nosniff` 與 `Cache-Control: no-store`；測試會走訪 `app.routes` 確認沒有漏掉的端點。
-  - 登入頁、帳號頁與設定頁 HTML 帶 CSP（`default-src 'none'`，script 只允許帶每次請求隨機 nonce 的那一段，`form-action 'none'`，`frame-ancestors 'none'`）、`X-Frame-Options: DENY`、`Cache-Control: no-store`、`noindex`；所有動態內容（姓名、Email、`next`、群組名稱、網址…）都經過 HTML 跳脫。
+  - 登入頁、帳號頁與設定頁 HTML 帶 CSP（`default-src 'none'`，script 只允許帶每次請求隨機 nonce 的那一段，`style-src 'self' 'unsafe-inline'`（同源的 WIWI 配色檔＋頁面自己的 inline 樣式），`img-src 'self' data:`（同源的 Logo），`form-action 'none'`，`frame-ancestors 'none'`）、`X-Frame-Options: DENY`、`Cache-Control: no-store`、`noindex`；所有動態內容（姓名、Email、`next`、群組名稱、網址…）都經過 HTML 跳脫。
   - token 與 secret **明文**存在 Volume 的 `settings.json`（`0600`），讀取 API 與頁面只給「已設定」與末 4 碼、永遠不回傳完整內容，log 也不印。能進服務終端機或讀 Volume 的人就能讀到它——與環境變數的暴露面相同。
   - 設定碼會寫進服務 log：在建立第一位管理員之前，能看到 log 的人都能建立管理員，所以請在第一次部署後立刻建立。
   - 已知限制：登入 session 是無狀態的 cookie，**登出只清瀏覽器端**（偷到的 cookie 7 天內仍有效，要作廢請重設該帳號的密碼或停用它）；密碼只檢查長度（10～200 字元），不檢查強度；角色只有兩種（管理員與一般使用者）、沒有更細的權限；任何一位啟用中的管理員都能新增、停用、刪除其他帳號與改角色（但不能動自己、也不能讓系統沒有管理員）；`index.html` 是同源的另一個頁面，它的任何 XSS 都能借用已登入者的 cookie 呼叫 API（一般使用者的 cookie 呼叫不了設定與帳號 API）。
@@ -410,8 +429,10 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 ## 專案結構
 
 ```
-index.html              原本的前端頁面（OCR／存檔兩個端點常數改成 /api/ocr、/api/save；另多了 NotifyEngine 與關箱流程裡的一次呼叫，用來通知 LINE；全站登入後多了 ApiClient（所有 /api 請求共用：帶 X-Requested-With、401 導向登入頁）與頂端使用者列 UserBar）
-src/server.ts           啟動入口（讀環境變數與 index.html、開啟資料目錄，監聽 0.0.0.0:PORT）
+index.html              原本的前端頁面（OCR／存檔兩個端點常數改成 /api/ocr、/api/save；另多了 NotifyEngine 與關箱流程裡的一次呼叫，用來通知 LINE；全站登入後多了 ApiClient（所有 /api 請求共用：帶 X-Requested-With、401 導向登入頁）與頂端使用者列 UserBar；WIWI 品牌配色：只寫語意 token、header 有 Logo）
+public/assets/          WIWI 配色 token（wiwi-colors.css）與 Logo（wiwi-logo.svg、wiwi-logo-white.svg）：從 skill wiwi-web-colors 原樣複製，不手改；GET /assets/* 提供（見「品牌配色與靜態資源」）
+src/server.ts           啟動入口（讀環境變數、index.html 與 public/assets、開啟資料目錄，監聽 0.0.0.0:PORT）
+src/assets.ts           靜態資源：啟動時把 public/assets 讀進記憶體、GET /assets/* 只用檔名查表（不可能路徑穿越）、缺必要檔案就啟動失敗
 src/app.ts              Hono app：主頁與三支 API 的登入閘門、路由、限流（OCR／存檔／關箱通知／LINE webhook／設定 API 各自額度）、body 上限、錯誤處理
 src/ocr.ts              OCR：prompt、請求組裝、OpenAI 呼叫（timeout、重試）、回應解析
 src/sheets.ts           存檔：欄位整理、合併品名、表頭對應、Sheets REST（讀表頭＋append）、append 滾動視窗配額
@@ -431,7 +452,7 @@ src/rate-limit.ts       固定視窗限流、客戶端 IP 判斷、並行閘門�
 src/env.ts              環境變數載入
 src/common.ts           共用型別與工具（ServiceError、Logger、FetchLike）
 scripts/docker-entrypoint.sh  容器入口：修正 Volume 擁有者後用 su-exec 降權
-tests/                  vitest（含 notify-engine.test.ts：直接從 index.html 取出 ApiClient、各引擎與 UserBar 在 Node 執行來測；server*.test.ts 真的啟動 src/server.ts；login-gate.test.ts：登入閘門、next 白名單、角色與權限、v2→v3）；tests/fixtures/n8n-golden.json 是 n8n 現行版的標準答案（產生腳本：tests/fixtures/generate-n8n-golden.mjs）
+tests/                  vitest（含 assets.test.ts：靜態資源路由與路徑穿越；branding.test.ts：配色檔 sha256、CSS 只寫 token 且守住配色鐵律、頁面結構與 CSP；notify-engine.test.ts：直接從 index.html 取出 ApiClient、各引擎與 UserBar 在 Node 執行來測；server*.test.ts 真的啟動 src/server.ts；login-gate.test.ts：登入閘門、next 白名單、角色與權限、v2→v3）；tests/fixtures/n8n-golden.json 是 n8n 現行版的標準答案（產生腳本：tests/fixtures/generate-n8n-golden.mjs）
 docs/legacy-n8n/        已退役的 n8n 工作流匯出（歷史參考）
 Dockerfile              兩階段建置，EXPOSE／預設 PORT=8080、DATA_DIR=/app/data，入口腳本降權
 ```

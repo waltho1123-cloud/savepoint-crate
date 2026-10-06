@@ -1,70 +1,93 @@
 <!DOCTYPE html>
-<html lang="zh-TW">
+<html lang="zh-Hant" data-thermal="warm">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>IPAS 庫存盤點裝箱系統</title>
+<link rel="stylesheet" href="/assets/wiwi-colors.css">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* ===== 顏色：全部來自 /assets/wiwi-colors.css 的 --wiwi-* 語意 token =====
+   整站 html 元素帶 data-thermal="warm"（溫感橘，官網預設）。這個檔案裡不寫任何色碼或 rgb()：要半透明就用 color-mix() 從 token 調出來
+   （tests/branding.test.ts 會擋）。鐵律：
+   - 橘（--wiwi-thermal-fill）與藍綠只當底色、圖形，不當字，也不壓白字（2.28:1）；底在橘上的字用 --wiwi-thermal-on-fill。
+   - 品牌文字一律 --wiwi-thermal-text-strong（這一頁的底都不是純白，accent 只給純白底）。
+   - 互動控制項（輸入框、按鈕、分頁）的邊框用 --wiwi-border-strong（>= 3:1）；卡片、分隔線這類裝飾才用 --wiwi-border。
+   - 次要文字用 --wiwi-text-muted（6.10:1）；--wiwi-text-subtle（3.45:1）不當內文。
+   - 主要按鈕 = --wiwi-thermal-solid 底 + --wiwi-thermal-on-solid 字；狀態色只用「狀態色字 + 各自的 -tint 底」。
+   舊的變數名稱保留（JS 產生的 HTML 裡有 var(--primary-dark)、var(--text-muted) 之類的用法），但全部改成指向 token。 */
 :root {
-  --primary: #3ab5ec;
-  --primary-light: #65c9f2;
-  --primary-dark: #1a9fd8;
-  --primary-glow: rgba(58,181,236,.23);
-  --danger: #f43f5e;
-  --danger-hover: #e11d48;
-  --success: #10b981;
-  --success-hover: #059669;
-  --bg: #eef5fa;
-  --card: rgba(255,255,255,.62);
-  --card-solid: #ffffff;
-  --text: #0c1e2e;
-  --text-muted: #5e7d94;
-  --border: rgba(255,255,255,.45);
-  --border-subtle: rgba(0,0,0,.06);
+  --primary: var(--wiwi-thermal-solid);            /* 主要按鈕底：白字 4.75:1 */
+  --primary-dark: var(--wiwi-thermal-text-strong); /* 非純白底上的品牌文字（淡底 5.87:1、灰底 6.07:1） */
+  --bg: var(--wiwi-surface-sunken);
+  --card-solid: var(--wiwi-surface);
+  --text: var(--wiwi-text);
+  --text-muted: var(--wiwi-text-muted);
+  --border-subtle: var(--wiwi-border);
   --radius: 16px;
   --radius-sm: 10px;
-  --glass-bg: rgba(255,255,255,.48);
-  --glass-border: rgba(255,255,255,.55);
-  --glass-shadow: 0 8px 32px rgba(14,120,180,.08);
-  --neu-shadow: 6px 6px 14px rgba(0,0,0,.06), -4px -4px 12px rgba(255,255,255,.8);
-  --neu-shadow-sm: 3px 3px 8px rgba(0,0,0,.05), -2px -2px 6px rgba(255,255,255,.7);
-  --neu-inset: inset 2px 2px 5px rgba(0,0,0,.06), inset -2px -2px 5px rgba(255,255,255,.7);
+  /* 玻璃擬態與陰影：預設是不透明的 token；瀏覽器支援 color-mix() 才改成半透明（見下面的 @supports） */
+  --card: var(--wiwi-surface);
+  --glass-bg: var(--wiwi-surface);
+  --glass-bg-strong: var(--wiwi-surface);
+  --glass-border: var(--wiwi-border);
+  --shadow-soft: var(--wiwi-border);
+  --shadow-lift: var(--wiwi-border);
+  --highlight: var(--wiwi-surface);
+  --primary-glow: var(--wiwi-border);
+  --glass-shadow: 0 8px 32px var(--shadow-soft);
+  --neu-shadow-sm: 3px 3px 8px var(--shadow-soft), -2px -2px 6px var(--highlight);
+  --neu-inset: inset 2px 2px 5px var(--shadow-soft), inset -2px -2px 5px var(--highlight);
+}
+@supports (color: color-mix(in srgb, red 50%, transparent)) {
+  :root {
+    --card: color-mix(in srgb, var(--wiwi-surface) 78%, transparent);
+    --glass-bg: color-mix(in srgb, var(--wiwi-surface) 70%, transparent);
+    --glass-bg-strong: color-mix(in srgb, var(--wiwi-surface) 92%, transparent);
+    --glass-border: color-mix(in srgb, var(--wiwi-surface) 60%, var(--wiwi-border));
+    --shadow-soft: color-mix(in srgb, var(--wiwi-text) 8%, transparent);
+    --shadow-lift: color-mix(in srgb, var(--wiwi-text) 14%, transparent);
+    --highlight: color-mix(in srgb, var(--wiwi-surface) 80%, transparent);
+    --primary-glow: color-mix(in srgb, var(--wiwi-thermal-solid) 28%, transparent);
+  }
 }
 
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   background: var(--bg);
   background-image:
-    radial-gradient(ellipse at 15% 10%, rgba(101,201,242,.19) 0%, transparent 55%),
-    radial-gradient(ellipse at 85% 90%, rgba(58,181,236,.13) 0%, transparent 50%),
-    radial-gradient(ellipse at 50% 50%, rgba(162,225,250,.11) 0%, transparent 60%);
+    radial-gradient(ellipse at 15% 10%, var(--wiwi-thermal-tint) 0%, transparent 55%),
+    radial-gradient(ellipse at 85% 90%, var(--wiwi-thermal-tint) 0%, transparent 50%);
   background-attachment: fixed;
   color: var(--text);
   line-height: 1.6;
   min-height: 100dvh;
 }
+::placeholder { color: var(--text-muted); opacity: 1; }
+:focus-visible { outline: 3px solid var(--wiwi-focus-ring); outline-offset: 2px; }
 
-/* ===== Header — Glassmorphism ===== */
+/* ===== Header — 白底（Logo 的橘與藍綠要在淺底上才看得見）＋品牌橘底線 ===== */
 .header {
-  background: rgba(58,181,236,.75);
-  backdrop-filter: blur(20px) saturate(1.4);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
-  color: #fff;
-  padding: 16px 24px;
+  background: var(--glass-bg-strong);
+  backdrop-filter: blur(20px) saturate(1.2);
+  -webkit-backdrop-filter: blur(20px) saturate(1.2);
+  color: var(--text);
+  padding: 8px 24px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 12px;
   position: sticky;
   top: 0;
   z-index: 100;
-  border-bottom: 1px solid rgba(255,255,255,.2);
+  border-bottom: 3px solid var(--wiwi-thermal-border);
 }
+.brand-logo { display: block; flex: none; height: 48px; width: auto; }
 .header h1 {
   font-size: 1.1rem;
   font-weight: 700;
   letter-spacing: .3px;
+  margin-right: auto;
 }
 .header-actions { display: flex; gap: 8px; }
 
@@ -78,7 +101,7 @@ body {
   padding: 6px 16px;
   font-size: .82rem;
   color: var(--text-muted);
-  background: rgba(255,255,255,.6);
+  background: var(--wiwi-surface-sunken);
   border-bottom: 1px solid var(--border-subtle);
 }
 .userbar[hidden], .userbar a[hidden] { display: none; }
@@ -86,7 +109,7 @@ body {
 .userbar a { color: var(--primary-dark); font-weight: 600; text-decoration: none; }
 .userbar a:hover { text-decoration: underline; }
 .userbar button {
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--wiwi-border-strong);
   background: var(--card-solid);
   color: var(--text);
   border-radius: var(--radius-sm);
@@ -102,7 +125,7 @@ body {
   align-items: center;
   gap: 6px;
   padding: 10px 20px;
-  border: none;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   font-size: .9rem;
   font-weight: 600;
@@ -112,43 +135,47 @@ body {
   letter-spacing: .2px;
 }
 .btn:active { transform: scale(.96); }
+/* 主要按鈕：實心深橘 + 白字（4.75:1；hover／active 換更深的 solid） */
 .btn-primary {
-  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
-  color: #fff;
+  background: var(--wiwi-thermal-solid);
+  color: var(--wiwi-thermal-on-solid);
   box-shadow: 0 4px 14px var(--primary-glow);
 }
 .btn-primary:hover {
-  box-shadow: 0 6px 20px rgba(99,102,241,.35);
+  background: var(--wiwi-thermal-solid-hover);
+  box-shadow: 0 6px 20px var(--primary-glow);
   transform: translateY(-1px);
 }
+.btn-primary:active { background: var(--wiwi-thermal-solid-active); }
+/* 危險／成功：狀態色字 + 各自的淡底 + 同色邊框；hover 反過來（淡底字壓在狀態色上，同一組對比） */
 .btn-danger {
-  background: linear-gradient(135deg, var(--danger), var(--danger-hover));
-  color: #fff;
-  box-shadow: 0 4px 14px rgba(244,63,94,.2);
+  background: var(--wiwi-danger-tint);
+  color: var(--wiwi-danger);
+  border-color: var(--wiwi-danger);
 }
-.btn-danger:hover { box-shadow: 0 6px 20px rgba(244,63,94,.3); transform: translateY(-1px); }
+.btn-danger:hover { background: var(--wiwi-danger); color: var(--wiwi-danger-tint); transform: translateY(-1px); }
 .btn-success {
-  background: linear-gradient(135deg, var(--success), var(--success-hover));
-  color: #fff;
-  box-shadow: 0 4px 14px rgba(16,185,129,.2);
+  background: var(--wiwi-success-tint);
+  color: var(--wiwi-success);
+  border-color: var(--wiwi-success);
 }
-.btn-success:hover { box-shadow: 0 6px 20px rgba(16,185,129,.3); transform: translateY(-1px); }
+.btn-success:hover { background: var(--wiwi-success); color: var(--wiwi-success-tint); transform: translateY(-1px); }
 .btn-outline {
   background: var(--glass-bg);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  border: 1px solid var(--glass-border);
+  border: 1px solid var(--wiwi-border-strong);
   color: var(--text);
 }
-.btn-outline:hover { background: rgba(255,255,255,.7); }
+.btn-outline:hover { background: var(--wiwi-thermal-tint); }
 .btn-sm { padding: 7px 14px; font-size: .82rem; }
 .btn:disabled { opacity: .4; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
 
 /* ===== Cards — Glass + Neumorphism ===== */
 .card {
   background: var(--card);
-  backdrop-filter: blur(18px) saturate(1.3);
-  -webkit-backdrop-filter: blur(18px) saturate(1.3);
+  backdrop-filter: blur(18px) saturate(1.2);
+  -webkit-backdrop-filter: blur(18px) saturate(1.2);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius);
   box-shadow: var(--glass-shadow);
@@ -156,7 +183,7 @@ body {
   margin-bottom: 16px;
   transition: box-shadow .25s ease;
 }
-.card:hover { box-shadow: 0 10px 40px rgba(14,120,180,.1); }
+.card:hover { box-shadow: 0 10px 40px var(--shadow-lift); }
 .card-title {
   font-size: .95rem;
   font-weight: 700;
@@ -171,7 +198,7 @@ body {
 /* Main layout */
 .main { max-width: 920px; margin: 0 auto; padding: 20px 16px; }
 
-/* ===== Inputs — Neumorphism inset ===== */
+/* ===== Inputs — 邊框用 border-strong（互動控制項 >= 3:1） ===== */
 .box-create-row {
   display: flex;
   gap: 10px;
@@ -183,28 +210,26 @@ body {
   flex: 1;
   min-width: 140px;
   padding: 11px 16px;
-  border: 1px solid rgba(0,0,0,.06);
+  border: 1px solid var(--wiwi-border-strong);
   border-radius: var(--radius-sm);
   font-size: 16px;
-  outline: none;
-  background: rgba(255,255,255,.5);
+  background: var(--wiwi-surface);
   box-shadow: var(--neu-inset);
   transition: all .2s;
   color: var(--text);
 }
 .box-create-row input:focus,
 .manual-input-row input:focus {
-  border-color: var(--primary-light);
+  border-color: var(--wiwi-focus-ring);
   box-shadow: var(--neu-inset), 0 0 0 3px var(--primary-glow);
 }
 .manual-input-row input { font-family: 'SF Mono', 'Fira Code', monospace; }
 
-/* ===== Current box banner — Glassmorphism ===== */
+/* ===== Current box banner — 品牌淡底 ===== */
 .current-box-banner {
-  background: rgba(228,244,253,.58);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  border: 1px solid rgba(155,220,250,.35);
+  background: var(--wiwi-thermal-tint);
+  color: var(--text);
+  border: 1px solid var(--wiwi-thermal-border);
   border-radius: var(--radius);
   padding: 14px 20px;
   display: flex;
@@ -228,20 +253,21 @@ body {
   text-transform: uppercase;
 }
 .status-open {
-  background: rgba(16,185,129,.12);
-  color: #059669;
-  border: 1px solid rgba(16,185,129,.2);
+  background: var(--wiwi-success-tint);
+  color: var(--wiwi-success);
+  border: 1px solid var(--wiwi-success);
 }
 .status-closed {
-  background: rgba(244,63,94,.1);
-  color: #e11d48;
-  border: 1px solid rgba(244,63,94,.18);
+  background: var(--wiwi-surface-sunken);
+  color: var(--text-muted);
+  border: 1px solid var(--wiwi-border-strong);
 }
 
 /* ===== Scanner ===== */
 .scanner-area {
   position: relative;
-  background: #0f0f1a;
+  background: var(--wiwi-surface-sunken);
+  border: 2px dashed var(--wiwi-border-strong);
   border-radius: var(--radius-sm);
   overflow: hidden;
   aspect-ratio: 4/3;
@@ -251,17 +277,29 @@ body {
   justify-content: center;
 }
 .scanner-area video { width: 100%; height: 100%; object-fit: cover; border-radius: var(--radius-sm); }
-.btn-capture { background: linear-gradient(135deg, #10b981, #059669); color: #fff; font-size: 1rem; font-weight: 700; padding: 14px 28px; border: none; border-radius: var(--radius-sm); cursor: pointer; width: 100%; }
+.btn-capture {
+  background: var(--wiwi-thermal-solid);
+  color: var(--wiwi-thermal-on-solid);
+  font-size: 1rem;
+  font-weight: 700;
+  padding: 14px 28px;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  width: 100%;
+  box-shadow: 0 4px 14px var(--primary-glow);
+}
+.btn-capture:hover { background: var(--wiwi-thermal-solid-hover); }
+.btn-capture:active { background: var(--wiwi-thermal-solid-active); }
 .btn-capture:disabled { opacity: .5; cursor: not-allowed; }
 .scanner-placeholder {
-  color: #64668a;
+  color: var(--text-muted);
   text-align: center;
   padding: 40px 20px;
 }
 .scanner-placeholder .icon {
   font-size: 2.2rem;
   margin-bottom: 10px;
-  opacity: .7;
 }
 
 /* ===== Scan list ===== */
@@ -273,12 +311,12 @@ body {
   padding: 11px 12px;
   margin-bottom: 6px;
   border-radius: var(--radius-sm);
-  background: rgba(255,255,255,.4);
+  background: var(--glass-bg);
   box-shadow: var(--neu-shadow-sm);
   gap: 10px;
   transition: all .15s;
 }
-.scan-list li:hover { background: rgba(255,255,255,.65); }
+.scan-list li:hover { background: var(--wiwi-thermal-tint); }
 .scan-item-info { flex: 1; min-width: 0; }
 .scan-item-barcode {
   font-weight: 700;
@@ -288,7 +326,7 @@ body {
 }
 .scan-item-name { color: var(--text-muted); font-size: .82rem; margin-top: 1px; }
 .scan-item-detail { color: var(--text-muted); font-size: .78rem; margin-top: 1px; display: flex; gap: 6px; flex-wrap: wrap; }
-.scan-item-detail span { background: rgba(58,181,236,.1); padding: 1px 6px; border-radius: 4px; }
+.scan-item-detail span { background: var(--wiwi-thermal-tint); padding: 1px 6px; border-radius: 4px; }
 .scan-item-time { color: var(--text-muted); font-size: .78rem; white-space: nowrap; }
 .scan-list .empty {
   color: var(--text-muted);
@@ -311,20 +349,20 @@ body {
   font-size: .82rem;
   font-weight: 600;
   cursor: pointer;
-  border: 1px solid var(--border-subtle);
-  background: rgba(255,255,255,.5);
+  border: 1px solid var(--wiwi-border-strong);
+  background: var(--wiwi-surface);
   box-shadow: var(--neu-shadow-sm);
   transition: all .2s;
   color: var(--text);
 }
-.box-tab:hover { background: rgba(255,255,255,.75); }
+.box-tab:hover { background: var(--wiwi-thermal-tint); }
+.box-tab.closed { background: var(--wiwi-surface-sunken); color: var(--text-muted); }
 .box-tab.active {
-  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
-  color: #fff;
-  border-color: transparent;
+  background: var(--wiwi-thermal-fill);
+  color: var(--wiwi-thermal-on-fill);
+  border-color: var(--wiwi-thermal-solid); /* 橘 fill 對白底只有 2.2:1，選取狀態的邊界用深橘（4.75:1） */
   box-shadow: 0 4px 14px var(--primary-glow);
 }
-.box-tab.closed { opacity: .55; }
 .box-tab-wrapper {
   display: inline-flex;
   align-items: center;
@@ -341,42 +379,43 @@ body {
 .box-action-btn {
   width: 22px;
   height: 22px;
-  border: none;
+  border: 1px solid var(--wiwi-border-strong);
   border-radius: 50%;
   font-size: .68rem;
   cursor: pointer;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0,0,0,.06);
+  background: var(--wiwi-surface-sunken);
   color: var(--text-muted);
   transition: all .2s;
   padding: 0;
   line-height: 1;
 }
-.box-action-btn:hover { background: rgba(0,0,0,.12); color: var(--text); }
+.box-action-btn:hover { background: var(--wiwi-thermal-tint); color: var(--primary-dark); }
 .box-action-btn.delete:hover {
-  background: var(--danger);
-  color: #fff;
-  box-shadow: 0 2px 8px rgba(244,63,94,.3);
+  background: var(--wiwi-danger);
+  color: var(--wiwi-danger-tint);
+  border-color: var(--wiwi-danger);
 }
 
 /* Inline edit input */
 .box-edit-input {
   padding: 5px 10px;
-  border: 2px solid var(--primary-light);
+  border: 2px solid var(--wiwi-thermal-solid);
   border-radius: 8px;
   font-size: .82rem;
   font-weight: 600;
-  outline: none;
   width: 120px;
+  background: var(--wiwi-surface);
+  color: var(--text);
   box-shadow: 0 0 0 3px var(--primary-glow);
 }
 
 /* ===== Stats table — Clean minimal ===== */
 .stats-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .88rem; }
 .stats-table th {
-  background: rgba(241,243,248,.8);
+  background: var(--wiwi-surface-sunken);
   text-align: left;
   padding: 11px 14px;
   font-weight: 700;
@@ -390,9 +429,9 @@ body {
 .stats-table th:last-child { border-radius: 0 var(--radius-sm) 0 0; }
 .stats-table td {
   padding: 11px 14px;
-  border-bottom: 1px solid rgba(0,0,0,.04);
+  border-bottom: 1px solid var(--border-subtle);
 }
-.stats-table tr:hover td { background: rgba(58,181,236,.05); }
+.stats-table tr:hover td { background: var(--wiwi-thermal-tint); }
 .stats-table .mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: .85rem; }
 .stats-table .qty {
   font-weight: 800;
@@ -401,7 +440,7 @@ body {
 }
 .stats-empty { text-align: center; color: var(--text-muted); padding: 36px; }
 
-/* ===== Toast — Glass pill ===== */
+/* ===== Toast — 預設是反白（深字底＋白字），成功／失敗用狀態色字 + 淡底 ===== */
 .toast-container {
   position: fixed;
   bottom: 24px;
@@ -414,25 +453,25 @@ body {
   align-items: center;
 }
 .toast {
-  background: rgba(12,30,46,.85);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
-  color: #fff;
+  background: var(--wiwi-text);
+  color: var(--wiwi-surface);
   padding: 11px 24px;
   border-radius: 28px;
   font-size: .88rem;
   font-weight: 500;
-  box-shadow: 0 8px 28px rgba(0,0,0,.2);
+  box-shadow: 0 8px 28px var(--shadow-lift);
   animation: toastIn .35s cubic-bezier(.22,1,.36,1);
-  border: 1px solid rgba(255,255,255,.1);
+  border: 1px solid var(--wiwi-text);
 }
 .toast.success {
-  background: rgba(16,185,129,.88);
-  border-color: rgba(255,255,255,.15);
+  background: var(--wiwi-success-tint);
+  color: var(--wiwi-success);
+  border-color: var(--wiwi-success);
 }
 .toast.error {
-  background: rgba(244,63,94,.88);
-  border-color: rgba(255,255,255,.15);
+  background: var(--wiwi-danger-tint);
+  color: var(--wiwi-danger);
+  border-color: var(--wiwi-danger);
 }
 @keyframes toastIn {
   from { opacity: 0; transform: translateY(14px) scale(.95); }
@@ -444,15 +483,15 @@ body {
 
 /* Box label print area (hidden on screen) */
 .box-label-print { display: none; }
-.box-label-header { text-align: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid #000; }
+.box-label-header { text-align: center; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 2px solid var(--wiwi-text); }
 .box-label-header h2 { font-size: 1.4rem; margin-bottom: 4px; }
-.box-label-meta { font-size: .85rem; color: #555; }
+.box-label-meta { font-size: .85rem; color: var(--text-muted); }
 .box-label-table { width: 100%; border-collapse: collapse; font-size: .9rem; }
-.box-label-table th { background: #eee; text-align: left; padding: 8px 10px; font-weight: 700; border-bottom: 2px solid #333; }
-.box-label-table td { padding: 8px 10px; border-bottom: 1px solid #ddd; }
+.box-label-table th { background: var(--wiwi-surface-sunken); text-align: left; padding: 8px 10px; font-weight: 700; border-bottom: 2px solid var(--wiwi-text); }
+.box-label-table td { padding: 8px 10px; border-bottom: 1px solid var(--wiwi-border); }
 .box-label-table .mono { font-family: monospace; }
 .box-label-table .qty { font-weight: 700; text-align: center; }
-.box-label-footer { margin-top: 16px; padding-top: 10px; border-top: 1px solid #ccc; font-size: .85rem; color: #555; text-align: right; }
+.box-label-footer { margin-top: 16px; padding-top: 10px; border-top: 1px solid var(--wiwi-border); font-size: .85rem; color: var(--text-muted); text-align: right; }
 
 /* Sections visibility */
 .section { display: none; }
@@ -483,7 +522,7 @@ body {
   font-size: .88rem;
   font-weight: 600;
   cursor: pointer;
-  border: none;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--text-muted);
   transition: all .2s;
@@ -491,16 +530,17 @@ body {
 }
 .nav-tab:hover { color: var(--text); }
 .nav-tab.active {
-  color: #fff;
-  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
+  color: var(--wiwi-thermal-on-fill);
+  background: var(--wiwi-thermal-fill);
+  border-color: var(--wiwi-thermal-solid); /* 選取狀態的邊界用深橘（對白底 4.75:1），橘 fill 單獨只有 2.2:1 */
   box-shadow: 0 4px 14px var(--primary-glow);
 }
 
-/* ===== Dialog — Glassmorphism ===== */
+/* ===== Dialog ===== */
 .dialog-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(12,30,46,.3);
+  background: var(--wiwi-overlay);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   display: flex;
@@ -511,15 +551,14 @@ body {
 }
 @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 .dialog {
-  background: rgba(255,255,255,.82);
-  backdrop-filter: blur(20px) saturate(1.3);
-  -webkit-backdrop-filter: blur(20px) saturate(1.3);
-  border: 1px solid rgba(255,255,255,.5);
+  background: var(--wiwi-surface-raised);
+  color: var(--text);
+  border: 1px solid var(--wiwi-border);
   border-radius: var(--radius);
   padding: 28px;
   max-width: 380px;
   width: 90%;
-  box-shadow: 0 20px 60px rgba(14,120,180,.12);
+  box-shadow: 0 20px 60px var(--shadow-lift);
   animation: dialogIn .25s cubic-bezier(.22,1,.36,1);
 }
 @keyframes dialogIn {
@@ -532,11 +571,11 @@ body {
 .dialog-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
 .dialog-form label { font-size: .85rem; font-weight: 600; color: var(--text); }
 .dialog-form input, .dialog-form select {
-  padding: 9px 12px; border: 1px solid rgba(0,0,0,.08); border-radius: var(--radius-sm);
-  font-size: 16px; outline: none; background: rgba(255,255,255,.5); box-shadow: var(--neu-inset);
+  padding: 9px 12px; border: 1px solid var(--wiwi-border-strong); border-radius: var(--radius-sm);
+  font-size: 16px; background: var(--wiwi-surface); box-shadow: var(--neu-inset);
   color: var(--text); transition: border-color .2s;
 }
-.dialog-form input:focus, .dialog-form select:focus { border-color: var(--primary-light); }
+.dialog-form input:focus, .dialog-form select:focus { border-color: var(--wiwi-focus-ring); }
 .dialog-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
 .dialog-form .form-row > div { display: flex; flex-direction: column; gap: 4px; }
 
@@ -552,7 +591,7 @@ body {
 /* ===== Responsive ===== */
 @media (max-width: 600px) {
   .header h1 { font-size: .95rem; }
-  .header { padding: 14px 16px; }
+  .header { padding: 6px 12px; gap: 10px; }
   .btn { padding: 10px 16px; font-size: .88rem; }
   .main { padding: 14px 10px; }
   .card { padding: 18px 16px; }
@@ -560,10 +599,10 @@ body {
 
 /* ===== Print styles ===== */
 @media print {
-  body { background: #fff !important; background-image: none !important; }
+  body { background: var(--wiwi-surface) !important; background-image: none !important; }
   .header, .nav-tabs, .toast-container, .no-print, .btn { display: none !important; }
   .main { max-width: 100%; padding: 0; }
-  .card { box-shadow: none; padding: 0; background: #fff; backdrop-filter: none; border: none; }
+  .card { box-shadow: none; padding: 0; background: var(--wiwi-surface); backdrop-filter: none; border: none; }
 
   .section { display: none !important; }
   .box-label-print { display: none !important; }
@@ -574,20 +613,20 @@ body {
     text-align: center;
     margin-bottom: 20px;
     padding-bottom: 14px;
-    border-bottom: 2px solid #000;
+    border-bottom: 2px solid var(--wiwi-text);
   }
   body.print-mode-stats .print-header h2 { font-size: 1.3rem; margin-bottom: 4px; }
-  body.print-mode-stats .print-header .print-meta { font-size: .85rem; color: #555; }
+  body.print-mode-stats .print-header .print-meta { font-size: .85rem; color: var(--text-muted); }
   body.print-mode-stats .stats-table { font-size: .85rem; border-collapse: collapse; }
   body.print-mode-stats .stats-table th {
-    background: #eee;
+    background: var(--wiwi-surface-sunken);
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
 
   body.print-mode-box .box-label-print { display: block !important; }
   body.print-mode-box .box-label-table th {
-    background: #eee;
+    background: var(--wiwi-surface-sunken);
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
@@ -604,9 +643,10 @@ body {
 </div>
 
 <header class="header">
+  <img class="brand-logo" src="/assets/wiwi-logo.svg" alt="WIWI" width="53" height="48">
   <h1>IPAS 庫存盤點裝箱系統</h1>
   <div class="header-actions">
-    <button class="btn btn-sm btn-outline" style="color:#fff;border-color:rgba(255,255,255,.4)" onclick="confirmClearAll()">清除資料</button>
+    <button class="btn btn-sm btn-outline" onclick="confirmClearAll()">清除資料</button>
   </div>
 </header>
 
@@ -658,7 +698,7 @@ body {
         <button class="btn btn-outline" id="btn-stop-scan" style="display:none">關閉相機</button>
       </div>
       <button class="btn-capture" id="btn-capture" style="display:none;margin-top:10px" disabled>📸 拍照辨識</button>
-      <div id="ocr-status" style="margin-top:8px;font-size:.85rem;color:var(--primary);text-align:center;display:none"></div>
+      <div id="ocr-status" style="margin-top:8px;font-size:.85rem;color:var(--primary-dark);text-align:center;display:none"></div>
       <div class="manual-input-row">
         <input type="text" id="input-manual-barcode" placeholder="手動輸入條碼">
         <button class="btn btn-primary btn-sm" id="btn-add-manual">加入</button>

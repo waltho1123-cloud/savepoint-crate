@@ -221,6 +221,11 @@ describe("頁面共通", () => {
     for (const directive of ["default-src 'none'", "form-action 'none'", "frame-ancestors 'none'", "base-uri 'none'", "connect-src 'self'"]) {
       expect(csp).toContain(directive);
     }
+    // WIWI 配色 token 是同源的 /assets/wiwi-colors.css（style-src 'self'），頁面自己的樣式仍是 inline；Logo 是同源圖片（img-src 'self'）
+    expect(csp).toContain("style-src 'self' 'unsafe-inline'");
+    expect(csp).toContain("img-src 'self' data:");
+    expect(csp).not.toMatch(/(?:default|style|img|script)-src[^;]*\*/); // 沒有萬用字元來源
+    expect(csp).not.toMatch(/https?:/); // 沒有放行任何外部網域
     expect(headers["Cache-Control"]).toBe("no-store");
     expect(headers["X-Frame-Options"]).toBe("DENY");
     expect(headers["X-Content-Type-Options"]).toBe("nosniff");

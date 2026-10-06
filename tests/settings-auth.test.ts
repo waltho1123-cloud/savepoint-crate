@@ -789,6 +789,8 @@ describe("GET /settings（頁面的狀態）", () => {
       expect(csp).toContain("form-action 'none'");
       expect(csp).toContain("frame-ancestors 'none'");
       expect(csp).toContain("connect-src 'self'");
+      expect(csp).toContain("style-src 'self' 'unsafe-inline'"); // 同源的 /assets/wiwi-colors.css ＋ 頁面自己的 inline 樣式
+      expect(csp).toContain("img-src 'self' data:");
       expect(csp).not.toContain("script-src 'unsafe-inline'");
       expect(res.headers.get("cache-control")).toBe("no-store");
       expect(res.headers.get("x-content-type-options")).toBe("nosniff");

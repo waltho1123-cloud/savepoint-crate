@@ -1,0 +1,192 @@
+@charset "UTF-8";
+/*! ==========================================================================
+ *  WIWI 配色系統 v1.0  ——  興濠企業有限公司
+ *  --------------------------------------------------------------------------
+ *  只有顏色。沒有元件、沒有版面、沒有 class 名稱綁定。
+ *  你的按鈕、卡片、表格要長什麼樣自己決定，顏色從這裡拿就好。
+ *
+ *  基準：wiwi.com.tw 官網 CSS 與原廠 Logo SVG 實測值（2026-07 稽核）。
+ *  官網既有色票全部錨定不動，只推導兩個新色（見下方註記 ★）。
+ *
+ *  核心：感溫雙極。橘＝溫感／發熱，藍綠＝涼感／防曬。
+ *       兩極不是主色副色，是同一份設計的兩種語意狀態。
+ *
+ *      <html data-thermal="warm">      整站預設溫感
+ *      <section data-thermal="cool">   這一區切涼感，可任意巢狀
+ *      <html data-theme="dark">        深色（後台工具）
+ *  ========================================================================== */
+
+/* ==========================================================================
+   1. 色階 — 原始值，不帶語意
+   ========================================================================== */
+
+:root {
+  /* --- 溫感橘 ---------------------------------------------------------
+     ⚠ 50–600 白底對比皆 < 3:1。這段只能當底色與圖形，不能當白底上的文字。 */
+  --wiwi-orange-50:  #FEF9F0;
+  --wiwi-orange-100: #FDF2E1;  /* 品牌既有 O_TINT，與簡報／IG 系統同值 */
+  --wiwi-orange-200: #FBDCAB;
+  --wiwi-orange-300: #F8C46F;
+  --wiwi-orange-400: #F5AE42;
+  --wiwi-orange-500: #F2971B;  /* ★ 官網 Logo 溫感橘 ── 白底 2.28:1，僅底色 */
+  --wiwi-orange-600: #DD8103;  /* 白底 2.91:1，僅底色 */
+  --wiwi-orange-700: #B76A01;  /* 白底 4.14:1，大字可用 */
+  --wiwi-orange-800: #8D5202;  /* 白底 6.29:1，內文可用 */
+  --wiwi-orange-900: #643A02;  /* 白底 9.78:1 */
+
+  /* --- 涼感藍綠 ------------------------------------------------------- */
+  --wiwi-teal-50:  #F5FBFC;
+  --wiwi-teal-100: #EAF7F9;  /* 品牌既有 T_TINT */
+  --wiwi-teal-200: #C4E9EF;
+  --wiwi-teal-300: #96D8E3;
+  --wiwi-teal-400: #6BC9D8;
+  --wiwi-teal-500: #44BCCE;  /* ★ 官網 Logo 涼感藍綠 ── 白底 2.25:1，僅底色 */
+  --wiwi-teal-600: #22A1B4;  /* 白底 3.08:1，大字可用 */
+  --wiwi-teal-700: #157E8E;  /* ★ 新推導：涼感 accent，白底 4.77:1（對稱 #CD4400 的 4.75:1） */
+  --wiwi-teal-800: #0F6471;  /* 白底 6.81:1 */
+  --wiwi-teal-900: #0B4851;  /* 白底 10.19:1 */
+
+  /* --- 深橘 ember ── 官網 --accent，溫感側唯一可當文字的品牌色 ---------- */
+  --wiwi-ember-500: #CD4400;  /* ★ 官網 --accent ── 白底 4.75:1 */
+  --wiwi-ember-600: #A83800;  /* 白底 6.50:1 */
+  --wiwi-ember-700: #822B00;  /* 白底 9.15:1 */
+
+  /* --- 中性 ------------------------------------------------------------ */
+  --wiwi-gray-50:  #F7F7F7;
+  --wiwi-gray-100: #F0F0F0;
+  --wiwi-gray-200: #DDDDDD;  /* ★ 官網 LINE */
+  --wiwi-gray-300: #C4C4C4;
+  --wiwi-gray-400: #8A8A8A;  /* ★ 官網 GRAY ── 白底 3.45:1，內文不合格，只能大字／邊框 */
+  --wiwi-gray-500: #626262;  /* ★ 新推導：可及次要內文，白底 6.10:1、品牌淡底 5.51:1 */
+  --wiwi-gray-600: #555555;
+  --wiwi-gray-700: #333333;  /* ★ 官網 INK */
+  --wiwi-gray-800: #22262A;
+  --wiwi-gray-900: #14181A;
+  --wiwi-white: #FFFFFF;
+
+  /* --- 狀態色（非品牌色，只給系統回饋） --------------------------------- */
+  --wiwi-green-500: #1F7A45;  --wiwi-green-100: #E6F4EC;
+  --wiwi-amber-500: #8A5A00;  --wiwi-amber-100: #FDF3DC;
+  --wiwi-red-500:   #C0281F;  --wiwi-red-100:   #FCEAE8;
+  --wiwi-blue-500:  #1E5FA8;  --wiwi-blue-100:  #E8F0FA;
+}
+
+/* ==========================================================================
+   2. 語意層 — 實際使用的就是這一層
+   ========================================================================== */
+
+:root {
+  --wiwi-bg:             var(--wiwi-white);
+  --wiwi-surface:        var(--wiwi-white);
+  --wiwi-surface-sunken: var(--wiwi-gray-50);   /* 頁尾、側欄、表頭 */
+  --wiwi-surface-raised: var(--wiwi-white);     /* 浮層 */
+
+  --wiwi-text:        var(--wiwi-gray-700);  /* 12.63:1 */
+  --wiwi-text-muted:  var(--wiwi-gray-500);  /*  6.10:1 ── 不要用 gray-400，內文不合格 */
+  --wiwi-text-subtle: var(--wiwi-gray-400);  /*  3.45:1 ── 只能 ≥18.66px 粗體或圖形 */
+
+  --wiwi-border:        var(--wiwi-gray-200);  /* 裝飾：卡片、分隔線，無對比要求 */
+  --wiwi-border-strong: var(--wiwi-gray-400);  /* 互動控制項邊界：WCAG 1.4.11 需 ≥3:1 */
+
+  --wiwi-focus-ring: var(--wiwi-ember-500);
+  --wiwi-overlay:    rgba(20, 24, 26, 0.55);
+
+  --wiwi-success: var(--wiwi-green-500);  --wiwi-success-tint: var(--wiwi-green-100);
+  --wiwi-warning: var(--wiwi-amber-500);  --wiwi-warning-tint: var(--wiwi-amber-100);
+  --wiwi-danger:  var(--wiwi-red-500);    --wiwi-danger-tint:  var(--wiwi-red-100);
+  --wiwi-info:    var(--wiwi-blue-500);   --wiwi-info-tint:    var(--wiwi-blue-100);
+}
+
+[data-theme="dark"] {
+  --wiwi-bg:             var(--wiwi-gray-900);
+  --wiwi-surface:        var(--wiwi-gray-800);
+  --wiwi-surface-sunken: #101315;
+  --wiwi-surface-raised: #2A2F34;
+
+  --wiwi-text:        #ECEEF0;
+  --wiwi-text-muted:  #A8AEB4;
+  --wiwi-text-subtle: #7C8288;
+
+  --wiwi-border:        #343A40;
+  --wiwi-border-strong: #6A727A;
+
+  --wiwi-focus-ring: var(--wiwi-orange-500);
+  --wiwi-overlay:    rgba(0, 0, 0, 0.7);
+
+  --wiwi-success: #4ADE80;  --wiwi-success-tint: #16281D;
+  --wiwi-warning: #FBBF4E;  --wiwi-warning-tint: #2A2110;
+  --wiwi-danger:  #F87171;  --wiwi-danger-tint:  #2C1717;
+  --wiwi-info:    #7DB3F0;  --wiwi-info-tint:    #14202E;
+}
+
+/* ==========================================================================
+   3. 感溫通道 — 兩極用同一組 token 名稱
+   --------------------------------------------------------------------------
+   你的元件永遠只寫 --wiwi-thermal-*，不要直接寫橘或藍綠。
+   這樣同一份 CSS 兩條產品線通用，夏季檔期頁不必複製第二份。
+
+     --wiwi-thermal-tint          淡底
+     --wiwi-thermal-fill          品牌填色（官網原色本人）⚠ 只能配深字
+     --wiwi-thermal-on-fill       fill 上的文字
+     --wiwi-thermal-solid         實心強調（可配白字的深色版）
+     --wiwi-thermal-on-solid      solid 上的文字
+     --wiwi-thermal-text          品牌色文字 ⚠ 只在純白底成立
+     --wiwi-thermal-text-strong   非純白底上的品牌色文字
+     --wiwi-thermal-border        邊框
+   ========================================================================== */
+
+:root,
+[data-thermal="warm"] {
+  --wiwi-thermal-tint:         var(--wiwi-orange-100);
+  --wiwi-thermal-tint-strong:  var(--wiwi-orange-200);
+  --wiwi-thermal-fill:         var(--wiwi-orange-500);
+  --wiwi-thermal-fill-hover:   var(--wiwi-orange-400);
+  --wiwi-thermal-on-fill:      var(--wiwi-gray-700);   /* 5.55:1 ── 白字只有 2.28:1，不合格 */
+  --wiwi-thermal-solid:        var(--wiwi-ember-500);
+  --wiwi-thermal-solid-hover:  var(--wiwi-ember-600);
+  --wiwi-thermal-solid-active: var(--wiwi-ember-700);
+  --wiwi-thermal-on-solid:     var(--wiwi-white);      /* 4.75:1 */
+  --wiwi-thermal-text:         var(--wiwi-ember-500);  /* 純白底 4.75:1 */
+  --wiwi-thermal-text-strong:  var(--wiwi-ember-600);  /* 淡底 5.87:1、沉下面 6.07:1 */
+  --wiwi-thermal-border:       var(--wiwi-orange-500);
+  --wiwi-thermal-arrow:        "▲";
+  --wiwi-thermal-label:        "溫感";
+}
+
+[data-thermal="cool"] {
+  --wiwi-thermal-tint:         var(--wiwi-teal-100);
+  --wiwi-thermal-tint-strong:  var(--wiwi-teal-200);
+  --wiwi-thermal-fill:         var(--wiwi-teal-500);
+  --wiwi-thermal-fill-hover:   var(--wiwi-teal-400);
+  --wiwi-thermal-on-fill:      var(--wiwi-gray-700);   /* 5.61:1 */
+  --wiwi-thermal-solid:        var(--wiwi-teal-700);
+  --wiwi-thermal-solid-hover:  var(--wiwi-teal-800);
+  --wiwi-thermal-solid-active: var(--wiwi-teal-900);
+  --wiwi-thermal-on-solid:     var(--wiwi-white);      /* 4.77:1 */
+  --wiwi-thermal-text:         var(--wiwi-teal-700);   /* 純白底 4.77:1 */
+  --wiwi-thermal-text-strong:  var(--wiwi-teal-800);   /* 淡底 6.22:1、沉下面 6.36:1 */
+  --wiwi-thermal-border:       var(--wiwi-teal-500);
+  --wiwi-thermal-arrow:        "▼";
+  --wiwi-thermal-label:        "涼感";
+}
+
+/* 深色模式：官網原色在深底上是 7.4:1 的合格文字色，淺色模式辦不到的事，這裡做得到。
+   solid 刻意不覆寫——若把 solid 也設成原色，就會和 fill 撞成同一個色。 */
+[data-theme="dark"],
+[data-theme="dark"] [data-thermal="warm"],
+[data-theme="dark"][data-thermal="warm"] {
+  --wiwi-thermal-tint:        #2A1E0B;
+  --wiwi-thermal-tint-strong: #3D2C10;
+  --wiwi-thermal-text:        var(--wiwi-orange-500);  /* 7.84:1 */
+  --wiwi-thermal-text-strong: var(--wiwi-orange-500);  /* 深淡底 7.15:1 */
+  --wiwi-thermal-border:      var(--wiwi-orange-600);
+}
+
+[data-theme="dark"] [data-thermal="cool"],
+[data-theme="dark"][data-thermal="cool"] {
+  --wiwi-thermal-tint:        #0C2429;
+  --wiwi-thermal-tint-strong: #113238;
+  --wiwi-thermal-text:        var(--wiwi-teal-500);    /* 7.94:1 */
+  --wiwi-thermal-text-strong: var(--wiwi-teal-500);    /* 深淡底 7.18:1 */
+  --wiwi-thermal-border:      var(--wiwi-teal-600);
+}
