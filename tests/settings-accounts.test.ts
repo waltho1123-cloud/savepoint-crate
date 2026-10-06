@@ -236,7 +236,7 @@ describe("純函式：角色相關（parseRole、roleLabel、parseNewAccountInpu
     expect(() => parseNewAccountInput({ ...base, role: "root" })).toThrowError(expect.objectContaining({ status: 400, message: "角色必須是 admin（管理員）或 user（一般使用者）" }) as never);
     expect(() => parseNewAccountInput({ ...base, role: null })).toThrowError(expect.objectContaining({ status: 400 }) as never);
     expect(() => parseNewAccountInput({ name: "", email: "bad", password: "x", role: "root" })).toThrowError(expect.objectContaining({ message: expect.stringContaining("姓名需為") }) as never);
-    expect(() => parseNewAccountInput({ ...base, password: "x", role: "root" })).toThrowError(expect.objectContaining({ message: "密碼至少要 10 個字元" }) as never);
+    expect(() => parseNewAccountInput({ ...base, password: "x", role: "root" })).toThrowError(expect.objectContaining({ message: "密碼至少要 8 個字元" }) as never);
   });
 
   it("assertNotLastActiveAdmin：啟用中的管理員而且沒有其他啟用中的管理員 → 409（停用、刪除、降級各有自己的訊息）；有其他人、或對象是一般使用者／已停用，都放行", () => {
@@ -385,10 +385,10 @@ describe("POST /api/accounts（新增管理員）", () => {
       ["Email 格式不對", newBody({ email: "not-an-email" }), "Email 格式不正確"],
       ["Email 缺少", { name: "甲", password: GOOD_PASSWORD }, "Email 格式不正確"],
       ["Email 太長", newBody({ email: `${"a".repeat(250)}@b.co` }), "Email 格式不正確"],
-      ["密碼 9 字元", newBody({ password: "123456789" }), "密碼至少要 10 個字元"],
+      ["密碼 7 字元", newBody({ password: "1234567" }), "密碼至少要 8 個字元"],
       ["密碼 201 字元", newBody({ password: "x".repeat(201) }), "密碼最多 200 個字元"],
-      ["密碼缺少", { name: "甲", email: "a@example.test" }, "密碼至少要 10 個字元"],
-      ["密碼不是字串", newBody({ password: 1234567890123 }), "密碼至少要 10 個字元"],
+      ["密碼缺少", { name: "甲", email: "a@example.test" }, "密碼至少要 8 個字元"],
+      ["密碼不是字串", newBody({ password: 1234567890123 }), "密碼至少要 8 個字元"],
     ];
     for (const [name, body, message] of cases) {
       const res = await ctx.authed("POST", "/api/accounts", body, freshIp());

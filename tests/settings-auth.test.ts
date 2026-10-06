@@ -175,11 +175,11 @@ describe("POST /settings/setup（全新安裝：用設定碼建立第一位管�
     expect(ctx.store.data.accounts).toEqual([]);
   });
 
-  it("設定碼對、但密碼太短（9 字元）／太長（201）／缺少／不是字串 → 400，設定碼仍然有效、可以重試", async () => {
+  it("設定碼對、但密碼太短（7 字元）／太長（201）／缺少／不是字串 → 400，設定碼仍然有效、可以重試", async () => {
     const ctx = await makeSettingsApp({ withAdmin: false });
-    const short = await call(ctx.app, "POST", "/settings/setup", setupBody({ password: "123456789" }), freshIp());
+    const short = await call(ctx.app, "POST", "/settings/setup", setupBody({ password: "1234567" }), freshIp());
     expect(short.status).toBe(400);
-    expect(await short.json()).toEqual({ success: false, error: "密碼至少要 10 個字元" });
+    expect(await short.json()).toEqual({ success: false, error: "密碼至少要 8 個字元" });
     for (const password of ["x".repeat(201), undefined, 123456789012, null]) {
       expect((await call(ctx.app, "POST", "/settings/setup", setupBody({ password }), freshIp())).status).toBe(400);
     }

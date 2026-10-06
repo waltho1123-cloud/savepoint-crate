@@ -452,10 +452,10 @@ export function renderSetupPage(ctx: PageContext): string {
 <input type="text" id="setup-name" autocomplete="name" maxlength="50" required>
 <label for="setup-email">Email（之後用它登入）</label>
 <input type="email" id="setup-email" autocomplete="username" spellcheck="false" maxlength="254" required>
-<label for="setup-password">密碼（至少 10 個字元）</label>
-<input type="password" id="setup-password" autocomplete="new-password" minlength="10" maxlength="200" required>
+<label for="setup-password">密碼（至少 8 個字元）</label>
+<input type="password" id="setup-password" autocomplete="new-password" minlength="8" maxlength="200" required>
 <label for="setup-password2">再輸入一次密碼</label>
-<input type="password" id="setup-password2" autocomplete="new-password" minlength="10" maxlength="200" required>
+<input type="password" id="setup-password2" autocomplete="new-password" minlength="8" maxlength="200" required>
 <div class="row"><button type="submit" class="btn primary">建立管理員並登入</button></div>
 <p id="setup-msg" class="msg" role="status" hidden></p>
 </form>
@@ -716,10 +716,10 @@ ${rows}
 </select>
 </div>
 <div id="ae-row-password">
-<label for="ae-password">密碼（至少 10 個字元）</label>
-<input type="password" id="ae-password" autocomplete="new-password" minlength="10" maxlength="200">
+<label for="ae-password">密碼（至少 8 個字元）</label>
+<input type="password" id="ae-password" autocomplete="new-password" minlength="8" maxlength="200">
 <label for="ae-password2">再輸入一次密碼</label>
-<input type="password" id="ae-password2" autocomplete="new-password" minlength="10" maxlength="200">
+<input type="password" id="ae-password2" autocomplete="new-password" minlength="8" maxlength="200">
 </div>
 <div class="row">
 <button type="submit" class="btn primary" id="ae-submit">儲存</button>

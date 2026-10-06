@@ -98,7 +98,7 @@ export function parseNameAndEmail(body: Record<string, unknown>): { name: string
 }
 
 /**
- * 驗證建立帳號的請求內容：姓名、Email、密碼（10～200 字元）、角色；不合法丟 400（姓名 → Email → 密碼 → 角色的順序）。
+ * 驗證建立帳號的請求內容：姓名、Email、密碼（8～200 字元）、角色；不合法丟 400（姓名 → Email → 密碼 → 角色的順序）。
  * 沒給 role 時用 defaultRole（API 預設 user：最小權限）；給了就必須是 admin 或 user。
  */
 export function parseNewAccountInput(

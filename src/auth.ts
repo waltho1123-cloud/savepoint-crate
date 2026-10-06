@@ -20,7 +20,7 @@ const SCRYPT_MAX_N = 1 << 16;
 const SCRYPT_MAX_R = 16;
 const SCRYPT_MAX_P = 4;
 
-export const PASSWORD_MIN_LENGTH = 10;
+export const PASSWORD_MIN_LENGTH = 8;
 export const PASSWORD_MAX_LENGTH = 200;
 
 function scryptAsync(password: string, salt: Buffer, keyLength: number, options: ScryptOptions): Promise<Buffer> {
@@ -78,7 +78,7 @@ export async function verifyPassword(password: string, stored: string): Promise<
 export const DUMMY_PASSWORD_HASH =
   "scrypt$16384$8$1$igxZU7LeML7BpuqmXa1ffQ$XDKBGZkx7N1yX3-7E36f4-yK4xaKXNCid0HVPepGeco";
 
-/** 新密碼的規則：10～200 字元。回傳錯誤訊息；合格回 null。 */
+/** 新密碼的規則：8～200 字元。回傳錯誤訊息；合格回 null。 */
 export function validateNewPassword(password: string): string | null {
   if (password.length < PASSWORD_MIN_LENGTH) return `密碼至少要 ${PASSWORD_MIN_LENGTH} 個字元`;
   if (password.length > PASSWORD_MAX_LENGTH) return `密碼最多 ${PASSWORD_MAX_LENGTH} 個字元`;

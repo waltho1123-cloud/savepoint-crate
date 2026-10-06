@@ -114,11 +114,11 @@ describe("hashPassword／verifyPassword（scrypt）", () => {
 
 describe("validateNewPassword", () => {
   it(`長度 ${PASSWORD_MIN_LENGTH}～${PASSWORD_MAX_LENGTH} 字元合格，邊界外回傳錯誤訊息`, () => {
-    expect(validateNewPassword("x".repeat(PASSWORD_MIN_LENGTH - 1))).toBe("密碼至少要 10 個字元");
+    expect(validateNewPassword("x".repeat(PASSWORD_MIN_LENGTH - 1))).toBe("密碼至少要 8 個字元");
     expect(validateNewPassword("x".repeat(PASSWORD_MIN_LENGTH))).toBeNull();
     expect(validateNewPassword("x".repeat(PASSWORD_MAX_LENGTH))).toBeNull();
     expect(validateNewPassword("x".repeat(PASSWORD_MAX_LENGTH + 1))).toBe("密碼最多 200 個字元");
-    expect(validateNewPassword("")).toBe("密碼至少要 10 個字元");
+    expect(validateNewPassword("")).toBe("密碼至少要 8 個字元");
   });
 });
 
