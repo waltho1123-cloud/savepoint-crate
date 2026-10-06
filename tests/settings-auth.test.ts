@@ -82,7 +82,6 @@ describe("狀態變更端點的 CSRF 防護（Content-Type 與 X-Requested-With�
     ["POST", "/settings/upgrade", { currentPassword: TEST_ADMIN_PASSWORD, name: "甲", email: "a@example.test" }],
     ["POST", "/login", loginBody()],
     ["POST", "/logout", {}],
-    ["POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD }],
     ["PUT", "/api/settings/line", { enabled: true }],
     ["POST", "/api/settings/line/test", {}],
   ];
@@ -131,7 +130,7 @@ describe("狀態變更端點的 CSRF 防護（Content-Type 與 X-Requested-With�
 });
 
 describe("設定頁的限流額度（規格的數字，每個 IP 每分鐘）", () => {
-  it("建立第一位管理員 5 次、登入／升級／更改密碼共用 10 次（其他測試的迴圈是跟著常數跑的，所以這裡把數字本身釘住）", () => {
+  it("建立第一位管理員 5 次、登入／升級共用 10 次（其他測試的迴圈是跟著常數跑的，所以這裡把數字本身釘住）", () => {
     expect(SETUP_RATE_LIMIT_MAX).toBe(5);
     expect(LOGIN_RATE_LIMIT_MAX).toBe(10);
   });
@@ -653,111 +652,63 @@ describe("POST /logout", () => {
   });
 });
 
-describe("POST /account/password（更改「自己」的密碼）", () => {
+describe("沒有「改自己的密碼」的端點（密碼只由管理員設定：POST /api/accounts/:id/password）", () => {
   const second = () => makeAccount({ id: accountId(2), name: "第二位", email: "second@example.test" });
+  const PATHS = ["/account/password", "/account/password/", "/settings/password", "/account/passwd", "/api/account/password", "/api/me/password", "/api/password"];
 
-  it("沒登入 → 401；密碼不會被改", async () => {
-    const ctx = await makeSettingsApp();
-    const hash = ctx.store.data.accounts[0]!.passwordHash;
-    const res = await call(ctx.app, "POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD });
-    expect(res.status).toBe(401);
-    expect(ctx.store.data.accounts[0]!.passwordHash).toBe(hash);
-  });
-
-  it("目前的密碼錯誤 → 403（不是 401，免得頁面當成登入過期），有 log 但沒有密碼", async () => {
-    const ctx = await makeSettingsApp();
-    const res = await ctx.authed("POST", "/account/password", { currentPassword: "not-my-password", newPassword: GOOD_PASSWORD }, ip("203.0.113.81"));
-    expect(res.status).toBe(403);
-    expect(await res.json()).toEqual({ success: false, error: "目前的密碼不正確" });
-    expect(ctx.log.lines).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 變更自己的密碼失敗：目前的密碼不正確 ${TEST_ADMIN_EMAIL}（來源 203.0.113.81）`);
-    const logged = ctx.log.lines.join("\n");
-    expect(logged).not.toContain("not-my-password");
-    expect(logged).not.toContain(GOOD_PASSWORD);
-  });
-
-  it("新密碼太短／太長 → 400；和目前的相同 → 400；缺欄位 → 錯誤；都不會改動", async () => {
-    const ctx = await makeSettingsApp();
-    const hash = ctx.store.data.accounts[0]!.passwordHash;
-    const short = await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: "short" });
-    expect(short.status).toBe(400);
-    expect(await short.json()).toEqual({ success: false, error: "密碼至少要 10 個字元" });
-    expect((await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: "x".repeat(201) })).status).toBe(400);
-    const same = await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: TEST_ADMIN_PASSWORD });
-    expect(same.status).toBe(400);
-    expect(await same.json()).toEqual({ success: false, error: "新密碼不能和目前的密碼相同" });
-    expect((await ctx.authed("POST", "/account/password", { newPassword: GOOD_PASSWORD })).status).toBe(403);
-    expect((await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD })).status).toBe(400);
-    expect(ctx.store.data.accounts[0]!.passwordHash).toBe(hash);
-    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(1);
-  });
-
-  it("成功：新密碼可登入、舊密碼不行；自己的 sessionVersion 加一（舊 cookie 失效），目前這個瀏覽器拿到新 cookie；sessionSecret 不動", async () => {
-    const ctx = await makeSettingsApp();
-    const oldCookie = ctx.sessionCookie();
-    const secretBefore = ctx.store.data.sessionSecret;
-    const res = await call(ctx.app, "POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD }, { cookie: oldCookie });
-    expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ success: true });
-
-    const me = ctx.store.data.accounts[0]!;
-    expect(me.sessionVersion).toBe(2);
-    expect(me.updatedAt).toBe(new Date(NOW_MS).toISOString());
-    expect(ctx.store.data.sessionSecret).toBe(secretBefore); // 不再換全域的簽章金鑰：其他管理員不受影響
-    const file = await readFile(join(ctx.dir, SETTINGS_FILE_NAME), "utf8");
-    expect(file).not.toContain(GOOD_PASSWORD);
-    expect(file).not.toContain(TEST_ADMIN_PASSWORD);
-
-    expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: oldCookie })).status).toBe(401); // 舊 cookie 失效
-    const fresh = cookiePair(res);
-    expect(decodeURIComponent(fresh.split("=")[1]!).split(".")[2]).toBe("2"); // 新 cookie 帶新的 sessionVersion
-    expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: fresh })).status).toBe(200);
-    expect((await call(ctx.app, "POST", "/login", loginBody())).status).toBe(401); // 舊密碼
-    expect((await call(ctx.app, "POST", "/login", loginBody({ password: GOOD_PASSWORD }))).status).toBe(200);
-    expect(ctx.log.lines).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 變更自己的密碼 ${TEST_ADMIN_EMAIL}（來源 unknown）`);
-  });
-
-  it("只影響自己：其他管理員的登入（cookie）與密碼都不變", async () => {
+  it("POST /account/password（以及舊的 /settings/password 等路徑）整個不存在：沒登入、一般使用者、管理員都是 404，什麼都不會改", async () => {
     const ctx = await makeSettingsApp({ extraAccounts: [second()] });
-    const otherCookie = ctx.sessionCookie(accountId(2));
-    const otherHash = ctx.store.data.accounts[1]!.passwordHash;
-    const res = await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD });
-    expect(res.status).toBe(200);
-    expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: otherCookie })).status).toBe(200);
-    expect(ctx.store.data.accounts[1]!.passwordHash).toBe(otherHash);
-    expect(ctx.store.data.accounts[1]!.sessionVersion).toBe(1);
-  });
-
-  it("改的是登入者自己的密碼，不是第一位的：第二位登入後改密碼，驗證的是第二位目前的密碼", async () => {
-    const ctx = await makeSettingsApp({ extraAccounts: [{ ...second(), passwordHash: await auth.hashPassword("second-admin-password-1") }] });
-    const wrong = await ctx.authedAs(accountId(2), "POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD });
-    expect(wrong.status).toBe(403); // 第一位的密碼不能拿來當第二位的「目前的密碼」
-    const ok = await ctx.authedAs(accountId(2), "POST", "/account/password", { currentPassword: "second-admin-password-1", newPassword: GOOD_PASSWORD });
-    expect(ok.status).toBe(200);
-    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(1); // 第一位沒被動到
-    expect(ctx.store.data.accounts[1]!.sessionVersion).toBe(2);
-  });
-
-  it("兩個分頁同時改密碼：後到的因為 sessionVersion 已變而被擋（401），不會把先改的蓋掉", async () => {
-    const ctx = await makeSettingsApp();
-    const cookie = ctx.sessionCookie();
-    const body = (n: string) => ({ currentPassword: TEST_ADMIN_PASSWORD, newPassword: `${GOOD_PASSWORD}-${n}` });
-    const [a, b] = await Promise.all([
-      call(ctx.app, "POST", "/account/password", body("a"), { cookie, ...ip("203.0.113.50") }),
-      call(ctx.app, "POST", "/account/password", body("b"), { cookie, ...ip("203.0.113.51") }),
-    ]);
-    expect([a.status, b.status].sort()).toEqual([200, 401]);
-    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(2);
-  });
-
-  it(`和登入共用額度（每 IP 每分鐘 ${LOGIN_RATE_LIMIT_MAX} 次）：用偷來的 cookie 也不能猜目前的密碼猜很多次`, async () => {
-    const ctx = await makeSettingsApp();
-    for (let i = 0; i < LOGIN_RATE_LIMIT_MAX; i++) {
-      const res = await ctx.authed("POST", "/account/password", { currentPassword: `wrong-guess-${i}`, newPassword: GOOD_PASSWORD }, ip("203.0.113.40"));
-      expect(res.status).toBe(403);
+    const before = await readFile(join(ctx.dir, SETTINGS_FILE_NAME), "utf8");
+    const bodies = [
+      { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD },
+      { newPassword: GOOD_PASSWORD },
+      {},
+    ];
+    for (const path of PATHS) {
+      for (const cookie of [undefined, ctx.sessionCookie(), ctx.sessionCookie(accountId(2))]) {
+        for (const body of bodies) {
+          const res = await call(ctx.app, "POST", path, body, { ...(cookie ? { cookie } : {}), ...freshIp() });
+          expect(res.status, `POST ${path}`).toBe(404);
+          expect(setCookieOf(res), `POST ${path}`).toBeUndefined();
+        }
+      }
     }
-    const blocked = await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD }, ip("203.0.113.40"));
-    expect(blocked.status).toBe(429);
+    expect(await readFile(join(ctx.dir, SETTINGS_FILE_NAME), "utf8")).toBe(before); // 設定檔逐位元組沒變
+    expect(ctx.log.lines.filter((line) => line.includes("[accounts]"))).toEqual([]); // 也沒有任何審計 log
+  });
+
+  it("其他方法（GET、PUT、PATCH、DELETE）也是 404，不是 405——路由根本沒有註冊；內容很大也是 404（沒有 body 上限的處理器）", async () => {
+    const ctx = await makeSettingsApp();
+    for (const path of PATHS) {
+      for (const method of ["GET", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]) {
+        const res = await ctx.app.request(path, { method, headers: { cookie: ctx.sessionCookie(), ...freshIp() } });
+        expect(res.status, `${method} ${path}`).toBe(404);
+        expect(res.headers.get("allow"), `${method} ${path}`).toBeNull();
+      }
+    }
+    const big = await ctx.authed("POST", "/account/password", JSON.stringify({ currentPassword: "x".repeat(20 * 1024), newPassword: "y" }));
+    expect(big.status).toBe(404);
+  });
+
+  it("沒有人（含管理員）能用「目前的密碼」換新密碼：登入者帶著正確的目前密碼打過去，密碼、sessionVersion 都不變", async () => {
+    const ctx = await makeSettingsApp();
+    const hash = ctx.store.data.accounts[0]!.passwordHash;
+    const res = await ctx.authed("POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: GOOD_PASSWORD });
+    expect(res.status).toBe(404);
+    expect(ctx.store.data.accounts[0]!.passwordHash).toBe(hash);
     expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(1);
+    expect((await call(ctx.app, "POST", "/login", loginBody(), freshIp())).status).toBe(200); // 原本的密碼照常可登入
+    expect((await call(ctx.app, "POST", "/login", loginBody({ password: GOOD_PASSWORD }), freshIp())).status).toBe(401);
+  });
+
+  it("也不會被「請求內容裡帶新密碼」的其他端點偷渡：PATCH /api/accounts/:id 帶 password／passwordHash 欄位會被忽略", async () => {
+    const ctx = await makeSettingsApp({ extraAccounts: [second()] });
+    const hash = ctx.store.data.accounts[1]!.passwordHash;
+    const res = await ctx.authed("PATCH", `/api/accounts/${accountId(2)}`, { name: "改名", password: GOOD_PASSWORD, newPassword: GOOD_PASSWORD, passwordHash: "scrypt$x" });
+    expect(res.status).toBe(200);
+    expect(ctx.store.data.accounts[1]!.name).toBe("改名");
+    expect(ctx.store.data.accounts[1]!.passwordHash).toBe(hash);
+    expect(ctx.store.data.accounts[1]!.sessionVersion).toBe(1);
   });
 });
 
@@ -801,7 +752,7 @@ describe("GET /settings（頁面的狀態）", () => {
     expect(html).not.toContain(TEST_ADMIN_EMAIL); // 不洩漏其他帳號
   });
 
-  it("已登入的管理員：設定表單、帳號管理表格；頂端顯示登入者的姓名與角色與導覽（沒有變更密碼表單——那在 /account）", async () => {
+  it("已登入的管理員：設定表單、帳號管理表格；頂端顯示登入者的姓名與角色與導覽（沒有任何改密碼表單——密碼只由管理員在帳號管理設定）", async () => {
     const ctx = await makeSettingsApp({ extraAccounts: [makeAccount({ id: accountId(2), name: "第二位", email: "second@example.test" })] });
     const res = await ctx.app.request("/settings", { headers: { cookie: ctx.sessionCookie() } });
     expect(res.status).toBe(200);
@@ -912,7 +863,6 @@ describe("資料目錄不可用", () => {
     ["POST", "/settings/upgrade", { currentPassword: TEST_ADMIN_PASSWORD, name: "甲", email: "a@example.test" }],
     ["POST", "/login", loginBody()],
     ["POST", "/logout", {}],
-    ["POST", "/account/password", { currentPassword: "x", newPassword: GOOD_PASSWORD }],
     ["GET", "/api/settings", undefined],
     ["PUT", "/api/settings/line", { enabled: false }],
     ["POST", "/api/settings/line/test", {}],
@@ -964,8 +914,6 @@ describe("請求內容上限與不允許的方法", () => {
     expect(create.status).toBe(413);
     const patch = await ctx.authed("PATCH", `/api/accounts/${TEST_ADMIN_ID}`, JSON.stringify({ name: "x".repeat(20 * 1024) }));
     expect(patch.status).toBe(413);
-    const password = await ctx.authed("POST", "/account/password", JSON.stringify({ currentPassword: "x".repeat(20 * 1024), newPassword: "y" }));
-    expect(password.status).toBe(413);
     expect((await call(ctx.app, "POST", "/logout", JSON.stringify({ junk: "x".repeat(20 * 1024) }))).status).toBe(413);
     expect(ctx.store.data.accounts).toHaveLength(1);
   });
@@ -983,7 +931,6 @@ describe("請求內容上限與不允許的方法", () => {
       ["GET", "/settings/setup", "POST"],
       ["GET", "/settings/upgrade", "POST"],
       ["PUT", "/logout", "POST"],
-      ["GET", "/account/password", "POST"],
       ["POST", "/api/settings", "GET"],
       ["DELETE", "/api/settings", "GET"],
       ["GET", "/api/settings/line", "PUT"],
@@ -1013,7 +960,6 @@ describe("狀態變更端點都有統一的 CSRF 檢查（走訪 app.routes，�
     "POST /settings/upgrade",
     "POST /login",
     "POST /logout",
-    "POST /account/password",
     "PUT /api/settings/line",
     "POST /api/settings/line/test",
     "POST /api/accounts",
@@ -1026,7 +972,7 @@ describe("狀態變更端點都有統一的 CSRF 檢查（走訪 app.routes，�
     path === "/settings" || path.startsWith("/settings/") || path === "/api/settings" || path.startsWith("/api/settings/") || path === "/api/accounts" || path.startsWith("/api/accounts/") ||
     path === "/login" || path === "/logout" || path === "/account" || path.startsWith("/account/");
 
-  it("設定、登入與帳號相關的非 GET 路由就是這 12 條——新增端點時請用 mutate() 註冊並更新這張清單", async () => {
+  it("設定、登入與帳號相關的非 GET 路由就是這 11 條（沒有 /account/password：密碼只由管理員設定）——新增端點時請用 mutate() 註冊並更新這張清單", async () => {
     const ctx = await makeSettingsApp();
     // app.post(path, guard, handler) 會在 routes 裡留下兩筆（中介層與處理器），所以先去重
     const found = [...new Set(ctx.app.routes.filter((r) => isSettingsPath(r.path) && !["GET", "ALL"].includes(r.method)).map((r) => `${r.method} ${r.path}`))].sort();

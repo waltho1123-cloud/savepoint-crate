@@ -18,12 +18,15 @@ import {
   summarizeAccounts,
 } from "../src/accounts.js";
 import * as auth from "../src/auth.js";
-import { SESSION_COOKIE_NAME } from "../src/auth.js";
+import { SESSION_COOKIE_NAME, SESSION_TTL_MS } from "../src/auth.js";
+import { LOGIN_RATE_LIMIT_MAX, PASSWORD_GATE_MAX_ACTIVE, PASSWORD_GATE_MAX_QUEUE } from "../src/auth-kit.js";
+import { ServiceError } from "../src/common.js";
 import { newSettingsData } from "../src/settings-store.js";
 import {
   accountId,
   call,
   cleanupTempDirs,
+  cookieAttributes,
   cookiePair,
   makeAccount,
   makeSettingsApp,
@@ -635,7 +638,7 @@ describe("改動帳號資料的請求在鎖內重新確認操作者（請求處�
   });
 });
 
-describe("POST /api/accounts/:id/password（重設他人的密碼）", () => {
+describe("POST /api/accounts/:id/password（管理員重設別人的密碼）", () => {
   it("成功：200；對方的密碼換成新的、sessionVersion 加一（對方舊 cookie 立刻失效）、舊密碼不能登入、新密碼可以；其他管理員不受影響", async () => {
     const ctx = await makeSettingsApp({ extraAccounts: [second({ passwordHash: await auth.hashPassword("second-admin-password-1") }), third()] });
     const secondCookie = ctx.sessionCookie(SECOND);
@@ -662,16 +665,6 @@ describe("POST /api/accounts/:id/password（重設他人的密碼）", () => {
     expect(ctx.log.lines.some((l) => l.startsWith(`[accounts] ${TEST_ADMIN_EMAIL} 重設密碼 second@example.test（來源 `))).toBe(true);
     expect(ctx.log.lines.join("\n")).not.toContain(GOOD_PASSWORD);
     expect(await readFile(join(ctx.dir, "settings.json"), "utf8")).not.toContain(GOOD_PASSWORD);
-  });
-
-  it("不能用這支改自己的密碼（要用「我的帳號」的變更密碼，需要目前的密碼）→ 400，不改動", async () => {
-    const ctx = await makeSettingsApp();
-    const hash = ctx.store.data.accounts[0]!.passwordHash;
-    const res = await ctx.authed("POST", `/api/accounts/${TEST_ADMIN_ID}/password`, { newPassword: GOOD_PASSWORD });
-    expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ success: false, error: "要更改自己的密碼，請用「我的帳號」頁的變更密碼（需要輸入目前的密碼）" });
-    expect(ctx.store.data.accounts[0]!.passwordHash).toBe(hash);
-    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(1);
   });
 
   it("新密碼太短／太長／缺少／不是字串 → 400，不跑 scrypt、不改動", async () => {
@@ -701,6 +694,265 @@ describe("POST /api/accounts/:id/password（重設他人的密碼）", () => {
   it("沒登入 → 401", async () => {
     const ctx = await makeSettingsApp({ extraAccounts: [second()] });
     expect((await call(ctx.app, "POST", `/api/accounts/${SECOND}/password`, { newPassword: GOOD_PASSWORD })).status).toBe(401);
+  });
+});
+
+describe("POST /api/accounts/:id/password 對自己：管理員重設「自己」的密碼（個人不能自己改密碼，這是唯一的途徑）", () => {
+  const selfReset = (ctx: SettingsApp, body: unknown = { newPassword: GOOD_PASSWORD }, headers: Record<string, string> = {}) =>
+    ctx.authed("POST", `/api/accounts/${TEST_ADMIN_ID}/password`, body, headers);
+
+  it("成功（就算只有這一位管理員）：新密碼可登入、舊密碼不行；自己的 sessionVersion 加一、舊 cookie 失效、回應帶新 cookie 且有效（操作者不會被登出）；sessionSecret 不動", async () => {
+    const ctx = await makeSettingsApp();
+    const oldCookie = ctx.sessionCookie();
+    const secret = ctx.store.data.sessionSecret;
+    const hashBefore = ctx.store.data.accounts[0]!.passwordHash;
+    ctx.clock.now += 60_000;
+
+    const res = await selfReset(ctx);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+
+    const me = ctx.store.data.accounts[0]!;
+    expect(me.passwordHash).not.toBe(hashBefore);
+    expect(me.passwordHash).toMatch(/^scrypt\$16384\$8\$1\$/);
+    expect(me.sessionVersion).toBe(2);
+    expect(me.updatedAt).toBe(new Date(NOW_MS + 60_000).toISOString());
+    expect(me.role).toBe("admin");
+    expect(me.status).toBe("active");
+    expect(ctx.store.data.sessionSecret).toBe(secret);
+
+    // 新 cookie：綁新的 sessionVersion，屬性和登入發的一樣
+    const set = setCookieOf(res)!;
+    expect(set.startsWith(`${SESSION_COOKIE_NAME}=`)).toBe(true);
+    const attributes = cookieAttributes(set);
+    for (const expected of ["HttpOnly", "SameSite=Lax", "Path=/", `Max-Age=${SESSION_TTL_MS / 1000}`]) expect(attributes).toContain(expected); // 和登入發的 cookie 屬性一致（含 7 天）
+    expect(decodeURIComponent(set.split(";")[0]!.slice(SESSION_COOKIE_NAME.length + 1)).split(".").slice(1, 3)).toEqual([TEST_ADMIN_ID, "2"]);
+    expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: cookiePair(res) })).status).toBe(200); // 新 cookie 有效：仍保持登入
+    expect((await call(ctx.app, "GET", "/api/me", undefined, { cookie: cookiePair(res) })).status).toBe(200);
+    expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: oldCookie })).status).toBe(401); // 舊 cookie（其他裝置）失效
+    expect((await call(ctx.app, "POST", "/login", { email: TEST_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD }, freshIp())).status).toBe(401);
+    expect((await call(ctx.app, "POST", "/login", { email: TEST_ADMIN_EMAIL, password: GOOD_PASSWORD }, freshIp())).status).toBe(200);
+    expect(await readFile(join(ctx.dir, "settings.json"), "utf8")).not.toContain(GOOD_PASSWORD);
+  });
+
+  it("審計 log 分「重設密碼（自己）」與「重設密碼」（別人）；log 沒有密碼", async () => {
+    const ctx = await makeSettingsApp({ extraAccounts: [second()] });
+    expect((await selfReset(ctx)).status).toBe(200);
+    expect((await ctx.authed("POST", `/api/accounts/${SECOND}/password`, { newPassword: GOOD_PASSWORD })).status).toBe(200);
+    expect(ctx.log.lines).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 重設密碼（自己） ${TEST_ADMIN_EMAIL}（來源 unknown）`);
+    expect(ctx.log.lines).toContain(`[accounts] ${TEST_ADMIN_EMAIL} 重設密碼 second@example.test（來源 unknown）`);
+    expect(ctx.log.lines.filter((l) => l.includes("重設密碼"))).toHaveLength(2);
+    expect(ctx.log.lines.join("\n")).not.toContain(GOOD_PASSWORD);
+  });
+
+  it("重設別人的密碼不會發新 cookie（只有對自己重設才換操作者的 cookie）；只影響自己：其他管理員的登入與密碼都不變", async () => {
+    const ctx = await makeSettingsApp({ extraAccounts: [second(), third()] });
+    const otherCookie = ctx.sessionCookie(SECOND);
+    const otherHash = ctx.store.data.accounts[1]!.passwordHash;
+    expect(setCookieOf(await ctx.authed("POST", `/api/accounts/${THIRD}/password`, { newPassword: GOOD_PASSWORD }))).toBeUndefined();
+    const res = await selfReset(ctx);
+    expect(res.status).toBe(200);
+    expect(setCookieOf(res)).toBeDefined();
+    expect((await call(ctx.app, "GET", "/api/settings", undefined, { cookie: otherCookie })).status).toBe(200);
+    expect(ctx.store.data.accounts[1]!.passwordHash).toBe(otherHash);
+    expect(ctx.store.data.accounts[1]!.sessionVersion).toBe(1);
+  });
+
+  it("不需要「目前的密碼」（管理員的登入就是授權）；請求裡多帶的 currentPassword 或 role、status 之類的欄位一律忽略", async () => {
+    const ctx = await makeSettingsApp();
+    const res = await selfReset(ctx, { currentPassword: "not-my-password", newPassword: GOOD_PASSWORD, role: "user", status: "disabled", sessionVersion: 99, passwordHash: "scrypt$x" });
+    expect(res.status).toBe(200);
+    expect(ctx.store.data.accounts[0]).toMatchObject({ role: "admin", status: "active", sessionVersion: 2 });
+    expect(ctx.store.data.accounts[0]!.passwordHash).not.toBe("scrypt$x");
+    expect((await call(ctx.app, "POST", "/login", { email: TEST_ADMIN_EMAIL, password: GOOD_PASSWORD }, freshIp())).status).toBe(200);
+  });
+
+  it("新密碼太短／太長／缺少／不是字串 → 400，沒有新 cookie、不跑 scrypt、什麼都不變（目前的登入照常有效）", async () => {
+    const ctx = await makeSettingsApp();
+    const spy = vi.spyOn(auth, "hashPassword");
+    const hash = ctx.store.data.accounts[0]!.passwordHash;
+    for (const body of [{ newPassword: "short" }, { newPassword: "x".repeat(201) }, {}, { newPassword: 1234567890123 }, { newPassword: null }]) {
+      const res = await selfReset(ctx, body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect(setCookieOf(res)).toBeUndefined();
+    }
+    expect(spy).not.toHaveBeenCalled();
+    expect(ctx.store.data.accounts[0]!.passwordHash).toBe(hash);
+    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(1);
+    expect((await ctx.authed("GET", "/api/me")).status).toBe(200);
+  });
+
+  it("走 HTTPS 時新 cookie 也帶 Secure", async () => {
+    const ctx = await makeSettingsApp();
+    const res = await selfReset(ctx, { newPassword: GOOD_PASSWORD }, { "x-forwarded-proto": "https" });
+    expect(res.status).toBe(200);
+    expect(cookieAttributes(setCookieOf(res)!)).toContain("Secure");
+  });
+
+  it("沒登入 → 401（沒有新 cookie）；一般使用者打自己的 id → 403；停用的管理員 → 401", async () => {
+    const ctx = await makeSettingsApp({ extraAccounts: [second({ role: "user" }), third({ status: "disabled" })] });
+    const noLogin = await call(ctx.app, "POST", `/api/accounts/${TEST_ADMIN_ID}/password`, { newPassword: GOOD_PASSWORD });
+    expect(noLogin.status).toBe(401);
+    expect(setCookieOf(noLogin)).toBeUndefined();
+    const asUser = await ctx.authedAs(SECOND, "POST", `/api/accounts/${SECOND}/password`, { newPassword: GOOD_PASSWORD }, freshIp());
+    expect(asUser.status).toBe(403);
+    expect(setCookieOf(asUser)).toBeUndefined();
+    const asDisabled = await ctx.authedAs(THIRD, "POST", `/api/accounts/${THIRD}/password`, { newPassword: GOOD_PASSWORD }, freshIp());
+    expect(asDisabled.status).toBe(401);
+    expect(ctx.store.data.accounts.map((a) => a.sessionVersion)).toEqual([1, 1, 1]);
+  });
+
+  it("產生雜湊的期間自己被停用或降級 → 不寫入（401／403），沒有新 cookie", async () => {
+    for (const change of ["disabled", "user"] as const) {
+      const ctx = await makeSettingsApp({ extraAccounts: [second()] });
+      const hashBefore = ctx.store.data.accounts[1]!.passwordHash;
+      const real = auth.hashPassword;
+      vi.spyOn(auth, "hashPassword").mockImplementationOnce(async (password) => {
+        await ctx.store.update((draft) => {
+          const me = draft.accounts[1]!;
+          if (change === "disabled") me.status = "disabled";
+          else me.role = "user";
+        });
+        return real(password);
+      });
+      const res = await ctx.authedAs(SECOND, "POST", `/api/accounts/${SECOND}/password`, { newPassword: GOOD_PASSWORD }, freshIp());
+      expect(res.status, change).toBe(change === "disabled" ? 401 : 403);
+      expect(setCookieOf(res), change).toBeUndefined();
+      expect(ctx.store.data.accounts[1]!.passwordHash, change).toBe(hashBefore);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("產生雜湊的期間另一位管理員剛好重設了我的密碼（sessionVersion 變了）→ 401，不會用過期的資料蓋掉對方設定的密碼", async () => {
+    const ctx = await makeSettingsApp({ extraAccounts: [second()] });
+    const real = auth.hashPassword;
+    let hashed = 0;
+    vi.spyOn(auth, "hashPassword").mockImplementation(async (password) => {
+      if (hashed++ === 0) {
+        // 第一次（我自己這個請求）算雜湊的期間，另一位管理員把「我」的密碼重設了
+        const other = await ctx.authedAs(SECOND, "POST", `/api/accounts/${TEST_ADMIN_ID}/password`, { newPassword: "set-by-the-other-admin-1" }, freshIp());
+        expect(other.status).toBe(200);
+      }
+      return real(password);
+    });
+    const res = await selfReset(ctx, { newPassword: GOOD_PASSWORD });
+    expect(res.status).toBe(401);
+    expect(setCookieOf(res)).toBeUndefined();
+    expect((await call(ctx.app, "POST", "/login", { email: TEST_ADMIN_EMAIL, password: "set-by-the-other-admin-1" }, freshIp())).status).toBe(200); // 對方設定的密碼還在
+    expect((await call(ctx.app, "POST", "/login", { email: TEST_ADMIN_EMAIL, password: GOOD_PASSWORD }, freshIp())).status).toBe(401);
+  });
+
+  it("兩個分頁同時重設自己的密碼：恰好一個成功（帶新 cookie），後到的因為 sessionVersion 已變而 401，不會把先設的蓋掉", async () => {
+    const ctx = await makeSettingsApp();
+    const cookie = ctx.sessionCookie();
+    const body = (n: string) => ({ newPassword: `${GOOD_PASSWORD}-${n}` });
+    const [a, b] = await Promise.all([
+      call(ctx.app, "POST", `/api/accounts/${TEST_ADMIN_ID}/password`, body("a"), { cookie, ...freshIp() }),
+      call(ctx.app, "POST", `/api/accounts/${TEST_ADMIN_ID}/password`, body("b"), { cookie, ...freshIp() }),
+    ]);
+    expect([a.status, b.status].sort()).toEqual([200, 401]);
+    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(2);
+    const winner = a.status === 200 ? a : b;
+    expect((await call(ctx.app, "GET", "/api/me", undefined, { cookie: cookiePair(winner) })).status).toBe(200);
+  });
+});
+
+describe("重設密碼端點的其他保護（對自己與對別人都一樣）", () => {
+  const selfReset = (ctx: SettingsApp, id: string, body: unknown = { newPassword: GOOD_PASSWORD }, headers: Record<string, string> = {}) =>
+    ctx.authedAs(id, "POST", `/api/accounts/${id}/password`, body, headers);
+
+  it("新 cookie 是「操作者自己」的：第二位管理員重設自己的密碼，拿到的是第二位的 cookie（/api/me 回第二位），不是第一位的", async () => {
+    const ctx = await makeSettingsApp({ extraAccounts: [second()] });
+    const res = await selfReset(ctx, SECOND);
+    expect(res.status).toBe(200);
+    expect(decodeURIComponent(setCookieOf(res)!.split(";")[0]!.slice(SESSION_COOKIE_NAME.length + 1)).split(".").slice(1, 3)).toEqual([SECOND, "2"]);
+    const me = await call(ctx.app, "GET", "/api/me", undefined, { cookie: cookiePair(res) });
+    expect(me.status).toBe(200);
+    expect(((await me.json()) as { data: { id: string; email: string } }).data).toMatchObject({ id: SECOND, email: "second@example.test" });
+    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(1); // 第一位沒被動到
+    expect(ctx.store.data.accounts[1]!.sessionVersion).toBe(2);
+  });
+
+  it("寫檔失敗（update 回 500）：500、沒有新 cookie；記憶體裡的密碼與 sessionVersion 不變，舊 cookie 與舊密碼照常有效", async () => {
+    const ctx = await makeSettingsApp();
+    const hash = ctx.store.data.accounts[0]!.passwordHash;
+    vi.spyOn(ctx.store, "update").mockRejectedValueOnce(new ServiceError(500, "設定檔寫入失敗"));
+    const res = await selfReset(ctx, TEST_ADMIN_ID);
+    expect(res.status).toBe(500);
+    expect(setCookieOf(res)).toBeUndefined();
+    expect(ctx.store.data.accounts[0]!.passwordHash).toBe(hash);
+    expect(ctx.store.data.accounts[0]!.sessionVersion).toBe(1);
+    expect((await ctx.authed("GET", "/api/me")).status).toBe(200);
+    expect((await call(ctx.app, "POST", "/login", { email: TEST_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD }, freshIp())).status).toBe(200);
+    expect(ctx.log.lines.some((l) => l.includes("重設密碼"))).toBe(false); // 沒成功就沒有「重設密碼」的審計行
+  });
+
+  it(`scrypt 並行閘門：重設密碼也不能繞過（同時最多 ${PASSWORD_GATE_MAX_ACTIVE} 個在算、${PASSWORD_GATE_MAX_QUEUE} 個排隊，其餘 429 並帶 Retry-After、沒有 cookie）`, async () => {
+    const ctx = await makeSettingsApp({ extraAccounts: [second()] });
+    const total = 40;
+    const responses = await Promise.all(Array.from({ length: total }, (_, i) => ctx.authed("POST", `/api/accounts/${SECOND}/password`, { newPassword: `${GOOD_PASSWORD}-${i}` }, freshIp())));
+    const statuses = responses.map((r) => r.status);
+    expect(statuses.every((st) => st === 200 || st === 429)).toBe(true);
+    expect(statuses.filter((st) => st === 200).length).toBeGreaterThanOrEqual(PASSWORD_GATE_MAX_ACTIVE);
+    expect(statuses.filter((st) => st === 200).length).toBeLessThanOrEqual(PASSWORD_GATE_MAX_ACTIVE + PASSWORD_GATE_MAX_QUEUE);
+    expect(statuses.filter((st) => st === 429).length).toBeGreaterThanOrEqual(total - PASSWORD_GATE_MAX_ACTIVE - PASSWORD_GATE_MAX_QUEUE);
+    const limited = responses.find((r) => r.status === 429)!;
+    expect(await limited.json()).toEqual({ success: false, error: "目前驗證請求過多，請稍後再試" });
+    expect(limited.headers.get("retry-after")).toBe("1");
+    expect(setCookieOf(limited)).toBeUndefined();
+    expect((await ctx.authed("POST", `/api/accounts/${SECOND}/password`, { newPassword: GOOD_PASSWORD }, freshIp())).status).toBe(200); // 洪水過後恢復
+  });
+
+  it("重設密碼（對別人與對自己）不吃「登入／升級」的每 IP 額度，登入的失敗次數也不影響重設——兩者各用各的桶", async () => {
+    const ctx = await makeSettingsApp({ extraAccounts: [second()] });
+    // 同一個 IP 連續重設（別人、自己各幾次）之後，登入照常、沒被 429
+    const a = { "x-forwarded-for": "203.0.113.150" };
+    for (let i = 0; i < LOGIN_RATE_LIMIT_MAX - 2; i++) expect((await ctx.authed("POST", `/api/accounts/${SECOND}/password`, { newPassword: `${GOOD_PASSWORD}-o${i}` }, a)).status).toBe(200);
+    for (let i = 0; i < 2; i++) expect((await ctx.authed("POST", `/api/accounts/${TEST_ADMIN_ID}/password`, { newPassword: TEST_ADMIN_PASSWORD }, a)).status).toBe(200); // 設成原本的密碼：下面還要拿它登入
+    expect((await call(ctx.app, "POST", "/login", { email: TEST_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD }, a)).status).toBe(200);
+    // 反過來：同一個 IP 把登入額度用完（猜 10 次錯的），重設照常
+    const b = { "x-forwarded-for": "203.0.113.151" };
+    for (let i = 0; i < LOGIN_RATE_LIMIT_MAX; i++) expect((await call(ctx.app, "POST", "/login", { email: TEST_ADMIN_EMAIL, password: `wrong-guess-${i}` }, b)).status).toBe(401);
+    expect((await call(ctx.app, "POST", "/login", { email: TEST_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD }, b)).status).toBe(429); // 登入桶確實滿了
+    expect((await ctx.authed("POST", `/api/accounts/${SECOND}/password`, { newPassword: GOOD_PASSWORD }, b)).status).toBe(200);
+    expect((await ctx.authed("POST", `/api/accounts/${TEST_ADMIN_ID}/password`, { newPassword: TEST_ADMIN_PASSWORD }, b)).status).toBe(200);
+  });
+
+  it("兩位管理員同時各自重設自己並互相重設對方（6 回合、隨機送出順序）：只有 200／401；每次成功剛好讓目標 sessionVersion 加一；最後的密碼是最後成功寫入的那個；對自己重設成功的回應帶 cookie、對別人的沒有", async () => {
+    const ctx = await makeSettingsApp({ extraAccounts: [second({ passwordHash: await auth.hashPassword("second-admin-password-1") })] });
+    const who = { A: { id: TEST_ADMIN_ID, email: TEST_ADMIN_EMAIL, password: TEST_ADMIN_PASSWORD }, B: { id: SECOND, email: "second@example.test", password: "second-admin-password-1" } };
+    let seed = 20261006;
+    const random = (n: number) => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) % n);
+    const versions = () => ({ A: ctx.store.data.accounts.find((a) => a.id === who.A.id)!.sessionVersion, B: ctx.store.data.accounts.find((a) => a.id === who.B.id)!.sessionVersion });
+    for (let round = 1; round <= 6; round++) {
+      const before = versions();
+      const ops = (["A", "B"] as const).flatMap((actor) =>
+        (["A", "B"] as const).map((target) => ({ actor, target, password: `${actor}-${target}-${round}-pw-${GOOD_PASSWORD}` })),
+      );
+      for (let i = ops.length - 1; i > 0; i--) {
+        const j = random(i + 1);
+        [ops[i], ops[j]] = [ops[j]!, ops[i]!];
+      }
+      const results = await Promise.all(ops.map((op) => ctx.authedAs(who[op.actor].id, "POST", `/api/accounts/${who[op.target].id}/password`, { newPassword: op.password }, freshIp())));
+      expect(results.every((r) => r.status === 200 || r.status === 401), `第 ${round} 回合：${results.map((r) => r.status).join(",")}`).toBe(true);
+      const ok = ops.filter((_, i) => results[i]!.status === 200);
+      expect(ok.length, `第 ${round} 回合至少一個成功`).toBeGreaterThanOrEqual(1);
+      ops.forEach((op, i) => {
+        if (results[i]!.status === 200) expect(setCookieOf(results[i]!) !== undefined, `${op.actor}→${op.target}`).toBe(op.actor === op.target); // 只有對自己重設才換 cookie
+        else expect(setCookieOf(results[i]!)).toBeUndefined();
+      });
+      const after = versions();
+      for (const target of ["A", "B"] as const) {
+        const hits = ok.filter((op) => op.target === target);
+        expect(after[target] - before[target], `第 ${round} 回合 ${target} 的 sessionVersion`).toBe(hits.length);
+        const candidates = hits.length === 0 ? [who[target].password] : hits.map((op) => op.password);
+        const working: string[] = [];
+        for (const password of candidates) if ((await call(ctx.app, "POST", "/login", { email: who[target].email, password }, freshIp())).status === 200) working.push(password);
+        expect(working, `第 ${round} 回合 ${target} 能登入的候選密碼（最後寫入的那個）`).toHaveLength(1);
+        who[target].password = working[0]!;
+      }
+    }
+    expect(ctx.store.data.accounts.filter((a) => a.role === "admin" && a.status === "active")).toHaveLength(2); // 沒有任何人被停用或降級
   });
 });
 

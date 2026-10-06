@@ -19,7 +19,7 @@ import { DATA_DIR_UNAVAILABLE_MESSAGE, type Account, type SettingsStore } from "
  *   - mutate()：所有「改動狀態」的端點一律用它註冊（資料目錄可用 → application/json → X-Requested-With）
  */
 
-/** POST /login、/settings/upgrade、/account/password（都要驗密碼）共用的額度：每個 IP 每分鐘。 */
+/** POST /login、/settings/upgrade（都要驗密碼）共用的額度：每個 IP 每分鐘。 */
 export const LOGIN_RATE_LIMIT_MAX = 10;
 /**
  * scrypt（密碼雜湊／驗證）同時最多跑幾個、最多排幾個隊（超過回 429）。每個約 16 MiB 記憶體、數十毫秒 CPU，
@@ -28,7 +28,7 @@ export const LOGIN_RATE_LIMIT_MAX = 10;
  */
 export const PASSWORD_GATE_MAX_ACTIVE = 2;
 export const PASSWORD_GATE_MAX_QUEUE = 16;
-/** /login、/logout、/settings/*、/account/*、/api/settings/*、/api/accounts* 的 JSON 內容上限（全都是很小的表單）。 */
+/** /login、/logout、/settings/*、/api/settings/*、/api/accounts* 的 JSON 內容上限（全都是很小的表單）。 */
 export const SETTINGS_BODY_MAX_BYTES = 16 * 1024;
 
 /** 登入失敗一律回這個訊息：不透露是帳號不存在、已停用，還是密碼不對。 */
@@ -88,7 +88,7 @@ export interface AuthKit {
   requireAdmin(c: Context): Readonly<Account>;
   issueSession(c: Context, account: Pick<Account, "id" | "sessionVersion">): void;
   clearSession(c: Context): void;
-  /** POST /login、/settings/upgrade、/account/password 共用的逐 IP 額度。 */
+  /** POST /login、/settings/upgrade 共用的逐 IP 額度。 */
   loginLimiter: FixedWindowLimiter;
   /** 計一次額度；超過回 429 的 Response（呼叫端直接 return），沒超過回 null。 */
   hit(limiter: FixedWindowLimiter, c: Context): Response | null;
@@ -167,7 +167,7 @@ export function createAuthKit(app: Hono, deps: AuthKitDeps): AuthKit {
 
   // 小表單端點的 body 上限（/api/* 另有全站的 15 MB 上限，兩個都會套用，取比較小的）
   const tooLarge = (c: Context) => c.json({ success: false, error: "請求內容過大" }, 413);
-  for (const pattern of ["/login", "/logout", "/settings/*", "/account/*", "/api/settings/*", "/api/accounts", "/api/accounts/*"]) {
+  for (const pattern of ["/login", "/logout", "/settings/*", "/api/settings/*", "/api/accounts", "/api/accounts/*"]) {
     app.use(pattern, bodyLimit({ maxSize: SETTINGS_BODY_MAX_BYTES, onError: tooLarge }));
   }
 

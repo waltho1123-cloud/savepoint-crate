@@ -136,11 +136,11 @@ describe("升級前的狀態（舊版單一管理密碼，正式站現在的樣�
     expect(file.futureTopLevelField).toEqual({ nested: [1, 2, 3] });
   });
 
-  it("舊版時代沒有任何登入端點可用：login 409（請先升級）、setup 409、改密碼 401", async () => {
+  it("舊版時代沒有任何登入端點可用：login 409（請先升級）、setup 409；沒有「改自己的密碼」的端點（404）", async () => {
     const ctx = await makeLegacyApp();
     expect((await call(ctx.app, "POST", "/login", { email: "a@example.test", password: TEST_ADMIN_PASSWORD }, freshIp())).status).toBe(409);
     expect((await call(ctx.app, "POST", "/settings/setup", { setupCode: "ABCD-EFGH", name: "甲", email: "a@example.test", password: "a-brand-new-password-42" }, freshIp())).status).toBe(409);
-    expect((await call(ctx.app, "POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: "a-brand-new-password-42" }, freshIp())).status).toBe(401);
+    expect((await call(ctx.app, "POST", "/account/password", { currentPassword: TEST_ADMIN_PASSWORD, newPassword: "a-brand-new-password-42" }, freshIp())).status).toBe(404);
     expect(await ctx.readFileJson()).toMatchObject({ version: 1, admin: { passwordHash: TEST_ADMIN_HASH } });
   });
 });

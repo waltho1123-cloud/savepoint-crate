@@ -12,7 +12,8 @@ afterEach(cleanupTempDirs);
 
 // 全站登入，真的啟動 src/server.ts 走完整流程：
 //   v2（管理員帳號，沒有角色）的舊檔啟動 → 管理員登入 → 建一位一般使用者 → 一般使用者登入 → 用 /api/ocr（OpenAI 是替身）→
-//   進 /settings 被 403 → 關箱通知帶操作者姓名 → 重新啟動後一切還在、檔案已是版本 3。
+//   進 /settings 被 403 → 關箱通知帶操作者姓名 → 密碼只由管理員設定（自助改密碼 404、管理員重設同事與自己的密碼）→
+//   重新啟動後一切還在、檔案已是版本 3。
 // 子行程裡的 fetch 被換成只允許打 api.line.me 與 api.openai.com 的替身（tests/fixtures/line-stub-preload.mjs），不會真的打外網。
 
 const TOKEN = "login-e2e-line-token-0123456789";
@@ -21,7 +22,8 @@ const GROUP = "C0123456789abcdef0123456789abcdef";
 const OPENAI_KEY = "login-e2e-openai-key-xyz";
 const ADMIN_PASSWORD = "e2e-admin-password-1234";
 const STAFF_PASSWORD = "e2e-staff-password-5678";
-const STAFF_NEW_PASSWORD = "e2e-staff-NEW-password-9012";
+const STAFF_NEW_PASSWORD = "e2e-staff-NEW-password-9012"; // 管理員幫同事重設的密碼
+const ADMIN_NEW_PASSWORD = "e2e-admin-NEW-password-3456"; // 管理員重設自己的密碼
 const JSON_HEADERS = { "content-type": "application/json", "x-requested-with": "XMLHttpRequest" };
 
 async function api(base: string, method: string, path: string, body?: unknown, cookie?: string) {
@@ -35,7 +37,7 @@ async function api(base: string, method: string, path: string, body?: unknown, c
 }
 
 describe("全站登入：真實行程的完整流程", () => {
-  it("v2 舊檔啟動 → 管理員登入 → 建一位一般使用者 → 一般使用者登入並用 OCR → 進設定頁被 403 → 關箱通知帶操作者 → 重新啟動後一切還在", async () => {
+  it("v2 舊檔啟動 → 管理員登入 → 建一位一般使用者 → 一般使用者登入並用 OCR → 進設定頁被 403 → 關箱通知帶操作者 → 密碼只由管理員設定 → 重新啟動後一切還在", async () => {
     const dataDir = await makeTempDir();
     const stubLog = join(await makeTempDir(), "stub.log");
     const env = { OPENAI_API_KEY: OPENAI_KEY, GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: "x", DATA_DIR: dataDir, LINE_STUB_LOG: stubLog };
@@ -167,14 +169,42 @@ describe("全站登入：真實行程的完整流程", () => {
       await api(first.base, "POST", "/api/box-closed", { boxId: "BOX-002", items: [], total: 0, successCount: 0, failedCount: 0 }, bossCookie);
       expect(readStubLog(stubLog).filter((c) => c.url.endsWith("/message/push"))[1]!.body.messages[0].text).toContain("操作：王老闆");
 
-      // ---------------------------------------------------------------- 一般使用者改自己的密碼：舊 cookie 失效、新 cookie 可用、舊密碼不能登入
-      const change = await api(first.base, "POST", "/account/password", { currentPassword: STAFF_PASSWORD, newPassword: STAFF_NEW_PASSWORD }, staffCookie);
-      expect(change.status).toBe(200);
-      const newStaffCookie = change.headers.getSetCookie()[0]!.split(";")[0]!;
+      // ---------------------------------------------------------------- 密碼只由管理員設定：沒有自助改密碼；一般使用者不能呼叫重設密碼
+      for (const cookie of [staffCookie, bossCookie]) {
+        const selfService = await api(first.base, "POST", "/account/password", { currentPassword: STAFF_PASSWORD, newPassword: STAFF_NEW_PASSWORD }, cookie);
+        expect(selfService.status).toBe(404);
+        expect(selfService.headers.getSetCookie()).toEqual([]);
+      }
+      expect((await api(first.base, "POST", "/settings/password", { currentPassword: STAFF_PASSWORD, newPassword: STAFF_NEW_PASSWORD }, staffCookie)).status).toBe(404);
+      const staffTriesSelf = await api(first.base, "POST", `/api/accounts/${staffId}/password`, { newPassword: STAFF_NEW_PASSWORD }, staffCookie);
+      expect(staffTriesSelf.status).toBe(403);
+      expect(staffTriesSelf.json).toEqual({ success: false, error: "需要管理員權限" });
+      expect((await api(first.base, "GET", "/api/me", undefined, staffCookie)).status).toBe(200); // 什麼都沒變，原本的登入照常有效
+      const accountPage = await (await fetch(`${first.base}/account`, { headers: { cookie: staffCookie } })).text();
+      expect(accountPage).toContain("密碼由管理員統一設定，需要變更請洽管理員");
+      expect(accountPage).not.toMatch(/<form|<input/);
+
+      // 管理員幫同事重設密碼：同事舊 cookie 失效、舊密碼不能登入、新密碼可以；管理員自己的登入不變、沒有新 cookie
+      const resetStaff = await api(first.base, "POST", `/api/accounts/${staffId}/password`, { newPassword: STAFF_NEW_PASSWORD }, bossCookie);
+      expect(resetStaff.status).toBe(200);
+      expect(resetStaff.headers.getSetCookie()).toEqual([]);
       expect((await api(first.base, "GET", "/api/me", undefined, staffCookie)).status).toBe(401);
-      expect((await api(first.base, "GET", "/api/me", undefined, newStaffCookie)).status).toBe(200);
       expect((await api(first.base, "POST", "/login", { email: "staff@example.test", password: STAFF_PASSWORD })).status).toBe(401);
-      staffCookie = newStaffCookie;
+      staffCookie = await loginOverHttp(first.base, "staff@example.test", STAFF_NEW_PASSWORD);
+      expect((await api(first.base, "GET", "/api/me", undefined, staffCookie)).status).toBe(200);
+      expect((await api(first.base, "GET", "/api/me", undefined, bossCookie)).status).toBe(200);
+
+      // 管理員重設「自己」的密碼：這個瀏覽器拿到新 cookie（不會被登出），舊 cookie（其他裝置）失效，舊密碼不能登入
+      const oldBossCookie = bossCookie;
+      const resetSelf = await api(first.base, "POST", `/api/accounts/${"1".repeat(32)}/password`, { newPassword: ADMIN_NEW_PASSWORD }, bossCookie);
+      expect(resetSelf.status).toBe(200);
+      bossCookie = resetSelf.headers.getSetCookie()[0]!.split(";")[0]!;
+      expect(bossCookie).not.toBe(oldBossCookie);
+      expect((await api(first.base, "GET", "/api/me", undefined, oldBossCookie)).status).toBe(401);
+      expect((await api(first.base, "GET", "/api/me", undefined, bossCookie)).json.data.role).toBe("admin");
+      expect((await fetch(`${first.base}/settings`, { headers: { cookie: bossCookie } })).status).toBe(200); // 管理員的新 cookie 仍進得了設定頁
+      expect((await api(first.base, "POST", "/login", { email: "boss@example.test", password: ADMIN_PASSWORD })).status).toBe(401);
+      expect((await api(first.base, "POST", "/login", { email: "boss@example.test", password: ADMIN_NEW_PASSWORD })).status).toBe(200);
 
       // ---------------------------------------------------------------- 管理員停用一般使用者：立刻不能用；刪不掉自己
       expect((await api(first.base, "POST", `/api/accounts/${staffId}/status`, { status: "disabled" }, bossCookie)).status).toBe(200);
@@ -187,12 +217,13 @@ describe("全站登入：真實行程的完整流程", () => {
       expect((await api(first.base, "PATCH", `/api/accounts/${"1".repeat(32)}`, { role: "user" }, bossCookie)).status).toBe(409);
 
       // ---------------------------------------------------------------- 輸出沒有密碼、token、金鑰；審計 log 有各項操作與角色
-      for (const secret of [ADMIN_PASSWORD, STAFF_PASSWORD, STAFF_NEW_PASSWORD, "wrong-password-xx", TOKEN, SECRET, OPENAI_KEY]) expect(first.output()).not.toContain(secret);
+      for (const secret of [ADMIN_PASSWORD, ADMIN_NEW_PASSWORD, STAFF_PASSWORD, STAFF_NEW_PASSWORD, "wrong-password-xx", TOKEN, SECRET, OPENAI_KEY]) expect(first.output()).not.toContain(secret);
       for (const expected of [
         /\[accounts\] boss@example\.test 登入成功（來源 127\.0\.0\.1）/,
         /\[accounts\] boss@example\.test 新增帳號 staff@example\.test（角色 user）（來源 127\.0\.0\.1）/,
         /\[accounts\] staff@example\.test 登入成功（來源 127\.0\.0\.1）/,
-        /\[accounts\] staff@example\.test 變更自己的密碼 staff@example\.test（來源 127\.0\.0\.1）/,
+        /\[accounts\] boss@example\.test 重設密碼 staff@example\.test（來源 127\.0\.0\.1）/,
+        /\[accounts\] boss@example\.test 重設密碼（自己） boss@example\.test（來源 127\.0\.0\.1）/,
         /\[accounts\] boss@example\.test 停用帳號 staff@example\.test（來源 127\.0\.0\.1）/,
         /\[accounts\] boss@example\.test 啟用帳號 staff@example\.test（來源 127\.0\.0\.1）/,
         /\[accounts\] boss@example\.test 登入失敗（來源 127\.0\.0\.1）/,

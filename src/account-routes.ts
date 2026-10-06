@@ -27,12 +27,14 @@ import type { Account, AccountRole } from "./settings-store.js";
  *   GET    /api/accounts                  → 所有帳號（不含密碼雜湊）
  *   POST   /api/accounts                  → 新增 { name, email, password, role? }（role 預設 user）
  *   PATCH  /api/accounts/:id              → 修改 { name?, email?, role? }
- *   POST   /api/accounts/:id/password     → 重設「他人」的密碼 { newPassword }（該帳號所有登入失效）
+ *   POST   /api/accounts/:id/password     → 重設密碼 { newPassword }：可以對任何帳號，包括自己（密碼只由管理員設定，
+ *                                           沒有「改自己的密碼」的端點）；該帳號所有登入失效，對自己重設時目前這個瀏覽器換新 cookie
  *   POST   /api/accounts/:id/status       → 停用／啟用 { status: "active" | "disabled" }
  *   DELETE /api/accounts/:id              → 刪除
  *
  * 規則：不能停用、刪除自己；不能把自己改成一般使用者；不能停用、刪除、降級最後一位啟用中的管理員；
- * Email（不分大小寫）不可重複（409）。重設密碼、停用、啟用、改角色都讓對方的 sessionVersion 加一（舊的登入立刻失效）。
+ * Email（不分大小寫）不可重複（409）。重設密碼、停用、啟用、改角色都讓對方的 sessionVersion 加一（舊的登入立刻失效）；
+ * 管理員重設「自己」的密碼同樣讓自己所有的登入失效，但回應會帶新的 cookie，目前這個瀏覽器不會被登出。
  * 所有規則都在 SettingsStore.update 的鎖內重新檢查（含「發出請求的人現在還是有效的管理員」），
  * 所以兩位管理員同時互相停用、同時新增同一個 Email 這類競態不會留下壞狀態。
  */
@@ -40,7 +42,6 @@ import type { Account, AccountRole } from "./settings-store.js";
 const ID_RE = /^[0-9a-f]{32}$/;
 const EMAIL_TAKEN_MESSAGE = "這個 Email 已經是其他帳號的登入帳號";
 const NOT_FOUND_MESSAGE = "找不到這個帳號";
-const SELF_PASSWORD_MESSAGE = "要更改自己的密碼，請用「我的帳號」頁的變更密碼（需要輸入目前的密碼）";
 const SELF_DEMOTE_MESSAGE = "不能把自己改成一般使用者";
 const CAP_MESSAGE = `帳號數量已達上限（${ACCOUNT_MAX_COUNT} 個）`;
 
@@ -157,13 +158,14 @@ export function registerAccountRoutes(app: Hono, kit: AuthKit): void {
   mutate("post", "/api/accounts/:id/password", async (c) => {
     const actor = kit.requireAdmin(c);
     const id = targetIdOf(c);
-    if (id === actor.id) throw new ServiceError(400, SELF_PASSWORD_MESSAGE);
+    const self = id === actor.id; // 管理員重設自己的密碼：允許（個人不能自己改密碼，管理員設定是唯一的途徑）
     const newPassword = readString(await readJsonObject(c), "newPassword");
     const problem = validateNewPassword(newPassword);
     if (problem) throw new ServiceError(400, problem);
     if (!settings.data.accounts.some((account) => account.id === id)) throw new ServiceError(404, NOT_FOUND_MESSAGE); // 先擋不存在的，省一次 scrypt
     const passwordHash = await kit.gated(() => hashPassword(newPassword));
     let targetEmail = "";
+    let sessionVersion = 0;
     await settings.update((draft) => {
       requireAdminInDraft(draft, actor);
       const target = findTarget(draft, id);
@@ -171,8 +173,11 @@ export function registerAccountRoutes(app: Hono, kit: AuthKit): void {
       target.sessionVersion += 1; // 這個帳號所有已發出的登入 cookie 一起失效（其他帳號不受影響）
       target.updatedAt = iso();
       targetEmail = target.email;
+      sessionVersion = target.sessionVersion;
     });
-    audit(c, actor.email, "重設密碼", targetEmail);
+    // 對自己重設：自己所有的登入（包含目前這個瀏覽器舊的 cookie）都失效了，用新的 sessionVersion 重新發給目前這個瀏覽器，操作者不會被登出
+    if (self) kit.issueSession(c, { id: actor.id, sessionVersion });
+    audit(c, actor.email, self ? "重設密碼（自己）" : "重設密碼", targetEmail);
     return c.json({ success: true });
   });
 

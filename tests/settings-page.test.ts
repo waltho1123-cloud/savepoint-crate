@@ -289,20 +289,37 @@ describe("各頁面的表單欄位", () => {
     expect(html).toContain('href="/account"');
     expect(html).not.toContain('href="/settings"');
     expect(html).toContain('id="logout"');
+    expect(html).toContain("可以使用裝箱程式；需要調整 LINE 通知、帳號或密碼的話，請洽管理員。"); // 密碼也是找管理員
+    expect(html).not.toContain("變更自己的密碼");
   });
 
-  it("我的帳號頁：姓名、Email、角色；變更密碼表單；導覽（管理員才有「設定」連結，沒有「我的帳號」連結——就在這頁）", () => {
+  it("我的帳號頁：姓名、Email、角色（唯讀）與「密碼由管理員統一設定，需要變更請洽管理員」；沒有任何表單；導覽（管理員才有「設定」連結，沒有「我的帳號」連結——就在這頁）", () => {
     const user = renderAccountPage(ctxOf(), { name: "小明", email: "ming@example.test", role: "user" });
     expect(user).toContain('<strong id="me-name">小明</strong>');
     expect(user).toContain('<strong id="me-email" class="mono">ming@example.test</strong>');
     expect(user).toContain('<strong id="me-role">一般使用者</strong>');
-    for (const id of ["password-form", "current-password", "new-password", "new-password2", "password-msg", "logout"]) expect(user).toContain(`id="${id}"`);
+    expect(user).toContain('<p class="note" id="password-policy">密碼由管理員統一設定，需要變更請洽管理員。</p>');
+    expect(user).toContain("要修改姓名、Email 或角色，請洽管理員");
+    expect(user).not.toMatch(/<form|<input|<textarea|<select/);
+    for (const id of ["password-form", "current-password", "new-password", "new-password2", "password-msg"]) expect(user).not.toContain(`id="${id}"`);
+    expect(user).not.toContain("變更我的密碼");
+    expect(user).toContain('id="logout"');
     expect(user).not.toContain('href="/settings"');
     expect(user).not.toContain('href="/account"');
     expect(user).toContain('href="/"');
     const admin = renderAccountPage(ctxOf(), { name: "老闆", email: "boss@example.test", role: "admin" });
     expect(admin).toContain('<strong id="me-role">管理員</strong>');
     expect(admin).toContain('href="/settings"');
+    expect(admin).toContain("密碼由管理員統一設定，需要變更請洽管理員");
+    expect(admin).not.toMatch(/<form|<input|<textarea|<select/);
+  });
+
+  it("我的帳號頁的姓名與 Email 一律跳脫（含 script 標籤與引號）", () => {
+    const html = renderAccountPage(ctxOf(), { name: '<img src=x onerror=alert(1)>"\'', email: '"><svg onload=1>@example.test', role: "user" });
+    expect(html).not.toContain("<img src=x");
+    expect(html).not.toContain("<svg");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;&quot;&#39;");
+    expect((html.match(/<script/g) ?? []).length).toBe(1);
   });
 });
 
@@ -347,12 +364,14 @@ describe("設定頁的「帳號管理」區塊", () => {
     expect(other).toContain(">啟用</button>"); // 停用中的帳號，按鈕是「啟用」
   });
 
-  it("自己那一列標示「（你）」；重設密碼、停用、刪除三個按鈕是停用的（只能編輯）；別人的列四個按鈕都能按", () => {
+  it("自己那一列標示「（你）」；停用、刪除兩個按鈕是停用的；編輯與「重設密碼」可以按（管理員重設自己的密碼，是唯一改自己密碼的途徑）；別人的列四個按鈕都能按", () => {
     const html = renderSettingsPage(ctxOf(), view(), accounts());
     const me = rowFor(html, "admin@example.test");
     expect(me).toContain("（你）");
-    for (const action of ["reset", "toggle", "delete"]) expect(me).toMatch(new RegExp(`data-admin-action="${action}"[^>]*disabled`));
-    expect(me).not.toMatch(/data-admin-action="edit"[^>]*disabled/);
+    for (const action of ["toggle", "delete"]) expect(me).toMatch(new RegExp(`data-admin-action="${action}"[^>]*disabled`));
+    for (const action of ["edit", "reset"]) expect(me).not.toMatch(new RegExp(`data-admin-action="${action}"[^>]*disabled`));
+    expect(me).toMatch(/data-admin-action="reset"[^>]*title="重設你自己的密碼：這個瀏覽器維持登入，其他裝置上的登入會失效"/);
+    expect(me).toMatch(/data-admin-action="reset"[^>]*data-me="1"/);
     const other = rowFor(html, "second@example.test");
     expect(other).not.toContain("（你）");
     expect(other).not.toContain("disabled");
@@ -384,7 +403,7 @@ describe("設定頁的「帳號管理」區塊", () => {
     expect((html.match(/<script/g) ?? []).length).toBe(1);
   });
 
-  it("頂端導覽：登入者的姓名與角色（跳脫）、回裝箱程式、我的帳號、登出；沒有變更密碼表單（在 /account）", () => {
+  it("頂端導覽：登入者的姓名與角色（跳脫）、回裝箱程式、我的帳號、登出；設定頁沒有任何改密碼表單（密碼只由管理員在「帳號管理」設定）", () => {
     const html = renderSettingsPage(ctxOf(), view({ me: { id: ME_ID, name: "我自己<b>", email: "me@example.test", role: "admin" } }), accounts());
     expect(html).toContain('<span class="who">👤 我自己&lt;b&gt;（管理員）</span>');
     expect(html).not.toContain("我自己<b>");
@@ -430,10 +449,28 @@ describe("設定頁的「帳號管理」區塊", () => {
     expect(script).toContain("var wanted = $('login-form').getAttribute('data-next') || '/';"); // 登入後回到被導向前要去的位置
   });
 
-  it("頁面的 script 打的是新的端點：/login、/logout、/account/password、/api/accounts*（沒有舊的 /settings/login、/settings/password、/api/admins）", () => {
+  it("頁面的 script：重設密碼的編輯面板記住是不是自己；對自己重設的成功訊息說「這個瀏覽器維持登入」，對別人說「對方所有裝置上的登入都已失效」", () => {
     const script = SCRIPT_RE.exec(renderSettingsPage(ctxOf(), view(), accounts()))![2]!;
-    for (const url of ["'/login'", "'/logout'", "'/account/password'", "'/api/accounts'", "'/api/accounts/' + id + '/status'", "'/api/accounts/' + targetId + '/password'"]) expect(script, url).toContain(url);
-    for (const old of ["/settings/login", "/settings/logout", "/settings/password", "/api/admins"]) expect(script, old).not.toContain(old);
+    expect(script).toContain("targetIsMe = !!isMe;"); // 打開面板時記住
+    expect(script).toContain("targetIsMe = false;"); // 關閉面板時清掉
+    expect(script).toContain("'重設密碼：' + email + (isMe ? '（你自己）' : '')");
+    expect(script).toContain("targetIsMe ? '你的密碼已重設；你在其他裝置上的登入都已失效（這個瀏覽器維持登入）' : '密碼已重設；對方所有裝置上的登入都已失效'");
+    expect(script).toContain("request('POST', '/api/accounts/' + targetId + '/password', { newPassword: pw })"); // 自己或別人都打同一支
+  });
+
+  it("帳號管理的說明：密碼只由管理員設定（個人不能自己改），管理員可以重設任何人的、包括自己的（不再說一般使用者可以變更自己的密碼）", () => {
+    const html = renderSettingsPage(ctxOf(), view(), accounts());
+    expect(html).toContain("<strong>密碼只由管理員設定</strong>：個人不能自己改密碼，需要變更時由管理員在這裡「重設密碼」（包括管理員自己的）");
+    expect(html).toContain("重設自己的密碼時，這個瀏覽器維持登入");
+    expect(html).not.toContain("與變更自己的密碼");
+    expect(html).not.toContain("變更我的密碼");
+  });
+
+  it("頁面的 script 打的是這些端點：/login、/logout、/api/accounts*（沒有任何改自己密碼的端點：/account/password、/settings/password，也沒有舊的 /settings/login、/api/admins）", () => {
+    const script = SCRIPT_RE.exec(renderSettingsPage(ctxOf(), view(), accounts()))![2]!;
+    for (const url of ["'/login'", "'/logout'", "'/api/accounts'", "'/api/accounts/' + id + '/status'", "'/api/accounts/' + targetId + '/password'"]) expect(script, url).toContain(url);
+    for (const old of ["/settings/login", "/settings/logout", "/settings/password", "/account/password", "/api/admins"]) expect(script, old).not.toContain(old);
+    for (const gone of ["password-form", "$('current-password')", "$('new-password", "password-msg"]) expect(script, gone).not.toContain(gone); // 改密碼表單的處理已整段移除
     expect(script).toContain("location.href = (r.data && typeof r.data.next === 'string' && r.data.next) || '/'"); // 登入成功後回到 next
   });
 });

@@ -6,7 +6,7 @@ import { DATA_DIR_UNAVAILABLE_MESSAGE, type Account } from "./settings-store.js"
 /**
  * 伺服器端組字串的 HTML 頁面（不用任何前端框架），共用同一份樣式與同一段 script：
  *   /login → 登入頁（Email＋密碼；還沒有任何帳號時改顯示「請管理員先到設定頁」）；
- *   /account → 我的帳號（姓名、Email、角色、變更我的密碼；任一角色）；
+ *   /account → 我的帳號（姓名、Email、角色，唯讀；任一角色；密碼由管理員統一設定，沒有自己改密碼的表單）；
  *   /settings → 設定頁（管理員）：unavailable＝沒有資料目錄（要掛 Volume）；setup＝全新安裝，用設定碼建立第一位管理員；
  *     upgrade＝還有舊版的單一管理密碼，要升級成管理員帳號；forbidden＝登入的是一般使用者；
  *     settings＝LINE 設定、帳號管理。
@@ -255,13 +255,15 @@ const SCRIPT = `
   var editor = $('admin-editor');
   var mode = null;
   var targetId = null;
+  var targetIsMe = false;
   function setRow(id, visible) { var el = $(id); if (el) el.hidden = !visible; }
   function openEditor(nextMode, id, name, email, role, isMe) {
     mode = nextMode;
     targetId = id;
+    targetIsMe = !!isMe;
     var withProfile = nextMode === 'add' || nextMode === 'edit';
     var withPassword = nextMode === 'add' || nextMode === 'reset';
-    $('ae-title').textContent = nextMode === 'add' ? '新增帳號' : (nextMode === 'edit' ? '編輯帳號' : '重設密碼：' + email);
+    $('ae-title').textContent = nextMode === 'add' ? '新增帳號' : (nextMode === 'edit' ? '編輯帳號' : '重設密碼：' + email + (isMe ? '（你自己）' : ''));
     setRow('ae-row-name', withProfile);
     setRow('ae-row-email', withProfile);
     setRow('ae-row-role', withProfile);
@@ -279,7 +281,7 @@ const SCRIPT = `
     var first = withProfile ? $('ae-name') : $('ae-password');
     if (first) first.focus();
   }
-  function closeEditor() { if (editor) editor.hidden = true; mode = null; targetId = null; }
+  function closeEditor() { if (editor) editor.hidden = true; mode = null; targetId = null; targetIsMe = false; }
   function accountResult(r, btn) {
     if (sessionLost(r)) return;
     if (r.ok) { location.reload(); return; }
@@ -334,31 +336,17 @@ const SCRIPT = `
     req.then(function (r) {
       if (sessionLost(r)) return;
       if (r.ok) {
-        if (mode === 'reset') { say('ae-msg', '密碼已重設；對方所有裝置上的登入都已失效', true); setTimeout(function () { location.reload(); }, 900); return; }
+        if (mode === 'reset') {
+          say('ae-msg', targetIsMe ? '你的密碼已重設；你在其他裝置上的登入都已失效（這個瀏覽器維持登入）' : '密碼已重設；對方所有裝置上的登入都已失效', true);
+          setTimeout(function () { location.reload(); }, 900);
+          return;
+        }
         location.reload();
         return;
       }
       say('ae-msg', failText(r), false);
       btn.disabled = false;
     }, function () { offline('ae-msg', btn); });
-  });
-
-  onSubmit('password-form', function (btn) {
-    var next = $('new-password').value;
-    if (next !== $('new-password2').value) { say('password-msg', '兩次輸入的新密碼不一致', false); return; }
-    btn.disabled = true;
-    request('POST', '/account/password', { currentPassword: $('current-password').value, newPassword: next }).then(function (r) {
-      btn.disabled = false;
-      if (sessionLost(r)) return;
-      if (r.ok) {
-        $('current-password').value = '';
-        $('new-password').value = '';
-        $('new-password2').value = '';
-        say('password-msg', '密碼已更新；你在其他裝置上的登入已全部失效（這個瀏覽器維持登入）', true);
-        return;
-      }
-      say('password-msg', failText(r), false);
-    }, function () { offline('password-msg', btn); });
   });
 
   var logoutBtn = $('logout');
@@ -516,14 +504,14 @@ export function renderForbiddenPage(ctx: PageContext, me: Pick<Account, "name" |
     `${renderNav(me, "forbidden")}
 <section class="card">
 <h2>需要管理員權限</h2>
-<p class="muted">設定頁只有管理員可以使用。你目前登入的帳號是「${escapeHtml(me.name)}」（${escapeHtml(roleLabel(me.role))}），可以使用裝箱程式與變更自己的密碼；需要調整 LINE 通知或帳號的話，請洽管理員。</p>
+<p class="muted">設定頁只有管理員可以使用。你目前登入的帳號是「${escapeHtml(me.name)}」（${escapeHtml(roleLabel(me.role))}），可以使用裝箱程式；需要調整 LINE 通知、帳號或密碼的話，請洽管理員。</p>
 <div class="row"><a class="btn primary" href="/">回裝箱程式</a></div>
 </section>`,
     { title: `需要管理員權限 - ${APP_NAME}`, heading: "需要管理員權限", sub: APP_NAME },
   );
 }
 
-/** /account：任一角色都可以看自己的資料、變更自己的密碼。 */
+/** /account：任一角色都可以看自己的資料（唯讀）。密碼由管理員統一設定，這一頁沒有任何表單。 */
 export function renderAccountPage(ctx: PageContext, me: Pick<Account, "name" | "email" | "role">): string {
   return layout(
     ctx,
@@ -531,19 +519,7 @@ export function renderAccountPage(ctx: PageContext, me: Pick<Account, "name" | "
 <section class="card">
 <h2>我的帳號</h2>
 <p class="muted">姓名：<strong id="me-name">${escapeHtml(me.name)}</strong><br>Email：<strong id="me-email" class="mono">${escapeHtml(me.email)}</strong><br>角色：<strong id="me-role">${escapeHtml(roleLabel(me.role))}</strong><br>要修改姓名、Email 或角色，請洽管理員。</p>
-<form id="password-form" autocomplete="off">
-<label for="current-password">目前的密碼</label>
-<input type="password" id="current-password" autocomplete="current-password" maxlength="200" required>
-<label for="new-password">新密碼（至少 10 個字元）</label>
-<input type="password" id="new-password" autocomplete="new-password" minlength="10" maxlength="200" required>
-<label for="new-password2">再輸入一次新密碼</label>
-<input type="password" id="new-password2" autocomplete="new-password" minlength="10" maxlength="200" required>
-<div class="row">
-<button type="submit" class="btn primary">變更我的密碼</button>
-</div>
-<p class="muted">變更密碼後，你在其他裝置上的登入會全部失效（其他人不受影響）。</p>
-<p id="password-msg" class="msg" role="status" hidden></p>
-</form>
+<p class="note" id="password-policy">密碼由管理員統一設定，需要變更請洽管理員。</p>
 </section>`,
     { title: `我的帳號 - ${APP_NAME}`, heading: "我的帳號", sub: APP_NAME },
   );
@@ -664,8 +640,10 @@ function renderAccountRow(account: AccountPublic, meId: string): string {
   const active = account.status === "active";
   const data = `data-id="${escapeHtml(account.id)}" data-name="${escapeHtml(account.name)}" data-email="${escapeHtml(account.email)}" data-role="${account.role}" data-me="${isMe ? "1" : "0"}"`;
   const lastLogin = account.lastLoginAt ? formatSeenAt(account.lastLoginAt) : "—";
-  // 對自己：只能編輯姓名／Email（角色不能自己降級）；重設密碼請用「我的帳號」、不能停用或刪除自己（伺服器端也會擋）
+  // 對自己：可以編輯姓名／Email（角色不能自己降級）、重設自己的密碼（個人不能自己改密碼，管理員設定是唯一的途徑；
+  // 這個瀏覽器維持登入、其他裝置會被登出）；不能停用或刪除自己（伺服器端也會擋）
   const selfHint = ' disabled title="不能對自己的帳號這麼做"';
+  const selfResetHint = ' title="重設你自己的密碼：這個瀏覽器維持登入，其他裝置上的登入會失效"';
   return `<tr>
 <td>${escapeHtml(account.name)}${isMe ? ' <span class="me">（你）</span>' : ""}</td>
 <td class="mono">${escapeHtml(account.email)}</td>
@@ -674,7 +652,7 @@ function renderAccountRow(account: AccountPublic, meId: string): string {
 <td>${escapeHtml(lastLogin)}</td>
 <td class="actions">
 <button type="button" class="btn small" data-admin-action="edit" ${data}>編輯</button>
-<button type="button" class="btn small" data-admin-action="reset" ${data}${isMe ? selfHint : ""}>重設密碼</button>
+<button type="button" class="btn small" data-admin-action="reset" ${data}${isMe ? selfResetHint : ""}>重設密碼</button>
 <button type="button" class="btn small" data-admin-action="toggle" data-status="${active ? "active" : "disabled"}" ${data}${isMe ? selfHint : ""}>${active ? "停用" : "啟用"}</button>
 <button type="button" class="btn small danger" data-admin-action="delete" ${data}${isMe ? selfHint : ""}>刪除</button>
 </td>
@@ -685,7 +663,7 @@ function renderAccountsCard(view: SettingsView, accounts: ReadonlyArray<AccountP
   const rows = accounts.map((account) => renderAccountRow(account, view.me.id)).join("\n");
   return `<section class="card">
 <h2>帳號管理</h2>
-<p class="muted">所有人都要用自己的 Email 與密碼登入才能使用裝箱程式。<strong>管理員</strong>可以進設定頁、管理所有帳號；<strong>一般使用者</strong>只能使用裝箱程式與變更自己的密碼。停用、重設密碼或改角色會立刻讓對方所有裝置上的登入失效；不能停用、刪除自己，也不能把自己改成一般使用者，並且不能停用、刪除或降級最後一位啟用中的管理員。</p>
+<p class="muted">所有人都要用自己的 Email 與密碼登入才能使用裝箱程式。<strong>管理員</strong>可以進設定頁、管理所有帳號；<strong>一般使用者</strong>只能使用裝箱程式。<strong>密碼只由管理員設定</strong>：個人不能自己改密碼，需要變更時由管理員在這裡「重設密碼」（包括管理員自己的）。停用、重設密碼或改角色會立刻讓對方所有裝置上的登入失效（重設自己的密碼時，這個瀏覽器維持登入）；不能停用、刪除自己，也不能把自己改成一般使用者，並且不能停用、刪除或降級最後一位啟用中的管理員。</p>
 <div class="tablewrap">
 <table id="admin-table">
 <thead><tr><th>姓名</th><th>Email</th><th>角色</th><th>狀態</th><th>最後登入</th><th>操作</th></tr></thead>

@@ -66,7 +66,7 @@ export interface AppDeps {
  *   POST /api/save       → 取代 n8n webhook ipas-save-product（同上）
  *   POST /api/box-closed → 關箱後推播到 LINE 群組（同上；訊息帶操作者姓名；LINE 沒設定時靜默略過）
  *   POST /api/line/webhook → LINE webhook：在群組裡回覆該群組的 ID、記錄最近收到的群組（需要 channel secret；公開，靠簽章驗證）
- *   /login、/logout、/api/me、/account*  → 登入、登出、目前登入者、我的帳號（見 login-routes.ts）
+ *   /login、/logout、/api/me、/account  → 登入、登出、目前登入者、我的帳號（唯讀；沒有自己改密碼的端點，見 login-routes.ts）
  *   /settings、/api/settings*、/api/accounts*、POST /settings/*  → 設定頁、設定 API 與帳號管理（只有管理員；見 settings-routes.ts、account-routes.ts）
  *
  * LINE 的 token、群組 ID、secret 先看設定頁存的設定檔（settings），沒有才退回環境變數（見 line-settings.ts）。

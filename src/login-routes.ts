@@ -1,7 +1,7 @@
 import type { Hono } from "hono";
 
-import { emailForLog, normalizeEmail, requireActorInDraft } from "./accounts.js";
-import { DUMMY_PASSWORD_HASH, hashPassword, PASSWORD_MAX_LENGTH, validateNewPassword, verifyPassword } from "./auth.js";
+import { emailForLog, normalizeEmail } from "./accounts.js";
+import { DUMMY_PASSWORD_HASH, PASSWORD_MAX_LENGTH, verifyPassword } from "./auth.js";
 import { LOGIN_FAILED_MESSAGE, safeNextPath, type AuthKit } from "./auth-kit.js";
 import { ServiceError } from "./common.js";
 import { readJsonObject, readString } from "./http.js";
@@ -14,9 +14,9 @@ import { renderAccountPage, renderLoginPage, renderNoAccountsPage, renderUnavail
  *   POST /login            → Email＋密碼登入，發 sp_session cookie，回 { success, next }（next 只接受同源的相對路徑）
  *   POST /logout           → 登出（清 cookie；伺服器不存 session，所以只清這個瀏覽器）
  *   GET  /api/me           → 目前登入者 { id, name, email, role }
- *   GET  /account          → 我的帳號頁：姓名／Email／角色、變更我的密碼
- *   POST /account/password → 更改「自己」的密碼（任一角色；自己所有的登入全部失效，並重新登入目前這個瀏覽器）
+ *   GET  /account          → 我的帳號頁：姓名／Email／角色（唯讀）；密碼由管理員統一設定，個人不能自己改（沒有「改自己的密碼」端點）
  *
+ * 密碼只有管理員能設定：POST /api/accounts/:id/password（account-routes.ts；管理員可以對任何帳號，包括自己）。
  * 狀態變更的端點一律用 kit.mutate() 註冊（資料目錄可用 → application/json → X-Requested-With）。
  */
 export function registerLoginRoutes(app: Hono, kit: AuthKit): void {
@@ -103,39 +103,8 @@ export function registerLoginRoutes(app: Hono, kit: AuthKit): void {
     return kit.html(c, 200, (ctx) => renderAccountPage(ctx, me));
   });
 
-  kit.mutate("post", "/account/password", async (c) => {
-    const actor = kit.requireActor(c);
-    const limited = kit.hit(kit.loginLimiter, c);
-    if (limited) return limited;
-    const body = await readJsonObject(c);
-    const currentPassword = readString(body, "currentPassword");
-    const newPassword = readString(body, "newPassword");
-    const currentOk = currentPassword.length <= PASSWORD_MAX_LENGTH && (await kit.gated(() => verifyPassword(currentPassword, actor.passwordHash)));
-    if (!currentOk) {
-      kit.audit(c, actor.email, "變更自己的密碼失敗：目前的密碼不正確", actor.email, { failed: true });
-      throw new ServiceError(403, "目前的密碼不正確");
-    }
-    const problem = validateNewPassword(newPassword);
-    if (problem) throw new ServiceError(400, problem);
-    if (newPassword === currentPassword) throw new ServiceError(400, "新密碼不能和目前的密碼相同");
-    const passwordHash = await kit.gated(() => hashPassword(newPassword));
-    let sessionVersion = actor.sessionVersion;
-    await settings.update((draft) => {
-      const me = requireActorInDraft(draft, actor);
-      if (me.passwordHash !== actor.passwordHash) throw new ServiceError(409, "密碼剛剛被更改過了，請重新整理後再試");
-      me.passwordHash = passwordHash;
-      me.sessionVersion += 1; // 這個帳號所有舊的登入 cookie 一起失效（其他帳號不受影響）
-      me.updatedAt = new Date(now()).toISOString();
-      sessionVersion = me.sessionVersion;
-    });
-    kit.issueSession(c, { id: actor.id, sessionVersion }); // 用新的 sessionVersion 重新發給目前這個瀏覽器
-    kit.audit(c, actor.email, "變更自己的密碼", actor.email);
-    return c.json({ success: true });
-  });
-
   kit.allow("/login", "GET, POST");
   kit.allow("/logout", "POST");
   kit.allow("/api/me", "GET");
   kit.allow("/account", "GET");
-  kit.allow("/account/password", "POST");
 }

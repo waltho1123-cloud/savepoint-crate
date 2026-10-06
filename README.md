@@ -1,6 +1,6 @@
 # savepoint-crate — IPAS 庫存盤點裝箱系統
 
-倉庫人員用手機開網頁、**用自己的帳號（Email＋密碼）登入**後，建立箱號 → 對著商品條碼標籤拍照 → 系統用 OpenAI Vision 辨識（條碼、品名、性別、顏色、尺寸）→ 人工確認或修改 → **關箱時**逐筆寫進 Google 試算表「商品主檔」，並（選配）推播一則關箱通知到 LINE 群組（訊息帶操作者的姓名）。**全站要登入**：帳號有兩種角色——管理員（可進 `/settings` 設定頁：設定 LINE 通知、建立與管理所有人的帳號與角色）與一般使用者（只能使用裝箱程式與變更自己的密碼），見「設定頁與 Volume」。
+倉庫人員用手機開網頁、**用自己的帳號（Email＋密碼）登入**後，建立箱號 → 對著商品條碼標籤拍照 → 系統用 OpenAI Vision 辨識（條碼、品名、性別、顏色、尺寸）→ 人工確認或修改 → **關箱時**逐筆寫進 Google 試算表「商品主檔」，並（選配）推播一則關箱通知到 LINE 群組（訊息帶操作者的姓名）。**全站要登入**：帳號有兩種角色——管理員（可進 `/settings` 設定頁：設定 LINE 通知、建立與管理所有人的帳號與角色）與一般使用者（只能使用裝箱程式）。**密碼統一由管理員設定，個人不能自己改密碼**（沒有「改自己的密碼」的功能），見「設定頁與 Volume」。
 
 ## 架構
 
@@ -30,24 +30,24 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 | `POST /api/line/webhook` | 公開（靠簽章驗證，不用登入）。LINE 平台的 webhook（生效的設定裡有 channel secret 才啟用，否則 503；secret 來自設定頁或 `LINE_CHANNEL_SECRET`，見「設定頁與 Volume」）。驗證 `X-Line-Signature`（對原始 body 做 HMAC-SHA256，不符回 401），驗證通過一律回 200。群組裡的 `join` 事件或文字訊息「群組ID」／「群組 ID」，會用 `replyToken` 回覆該群組的 ID；`join` 與群組裡的所有訊息事件還會把該群組記到設定檔的「最近收到的群組」（同一群組去重、最新在前、最多 10 筆；同一個群組的訊息事件 10 分鐘內只處理一次——查名稱與寫檔都不重複，節流表在記憶體內、服務重啟後重新開始），讓設定頁一鍵帶入群組 ID；其他事件忽略。 |
 | `GET /login`、`POST /login`、`POST /logout` | 登入頁（Email＋密碼）／登入 `{ email, password, next? }` → `{ success: true, next }`（`next` 只接受同源的相對路徑：以 `/` 開頭、不是 `//`、不含反斜線與控制字元，其他一律當成 `/`）／登出（清 cookie）。已登入者開 `/login` 會被導向 `/`；還沒有任何帳號時 `/login` 顯示「請管理員先到設定頁」。 |
 | `GET /api/me` | 目前登入者 `{ "success": true, "data": { "id", "name", "email", "role" } }`（任一角色；沒登入 401）。主頁頂端的使用者列用它。 |
-| `GET /account`、`POST /account/password` | 我的帳號頁（姓名、Email、角色、變更我的密碼；任一角色；沒登入 302 導向 `/login?next=/account`）／更改**自己**的密碼 `{ currentPassword, newPassword }`（目前的密碼不對 403；成功後這個瀏覽器自動換新的登入、其他裝置的登入失效）。 |
+| `GET /account` | 我的帳號頁（唯讀：姓名、Email、角色，加一行「密碼由管理員統一設定，需要變更請洽管理員」，沒有任何表單；任一角色；沒登入 302 導向 `/login?next=/account`）。**沒有任何「自己改密碼」的端點**：`POST /account/password`（以及更早的 `POST /settings/password`）不存在，回 404；密碼只由管理員用 `POST /api/accounts/:id/password` 設定（見下）。 |
 | `GET /settings` | 設定頁（HTML；**只有管理員**）：沒登入 302 導向 `/login?next=/settings`、登入的是一般使用者 403（「需要管理員權限」頁）、資料目錄不可用 503。還沒有任何帳號時（全新安裝、或舊版單一密碼待升級）改顯示建立第一位管理員／升級的表單（這兩個流程各有自己的秘密擋著：設定碼、目前的密碼）。已登入的管理員：LINE 設定、帳號管理。見「設定頁與 Volume」。 |
-| `POST /settings/setup`、`/settings/upgrade` | 建立第一位管理員（設定碼＋姓名＋Email＋密碼；角色一定是 admin）／把舊版單一密碼升級成管理員帳號（目前的密碼＋姓名＋Email；角色 admin）。**所有狀態變更端點**（含 `/login`、`/logout`、`/account/password` 與下面的 `/api/*`）一律只收 `Content-Type: application/json`，且必須帶標頭 `X-Requested-With: XMLHttpRequest`（CSRF 防護）。 |
+| `POST /settings/setup`、`/settings/upgrade` | 建立第一位管理員（設定碼＋姓名＋Email＋密碼；角色一定是 admin）／把舊版單一密碼升級成管理員帳號（目前的密碼＋姓名＋Email；角色 admin）。**所有狀態變更端點**（含 `/login`、`/logout` 與下面的 `/api/*`）一律只收 `Content-Type: application/json`，且必須帶標頭 `X-Requested-With: XMLHttpRequest`（CSRF 防護）。 |
 | `GET /api/settings`、`PUT /api/settings/line`、`POST /api/settings/line/test` | **只有管理員**（沒登入 401、一般使用者 403 `{success:false,error:"需要管理員權限"}`）：讀目前設定（token／secret 只回「已設定」與末 4 碼；另有 `me`＝目前登入的帳號 `{id,name,email,role}`）／儲存 LINE 設定／推播測試訊息到已儲存的群組。 |
-| `GET /api/accounts`、`POST /api/accounts`、`PATCH /api/accounts/:id`、`POST /api/accounts/:id/password`、`POST /api/accounts/:id/status`、`DELETE /api/accounts/:id` | 帳號管理（**只有管理員**）：列出（不含密碼雜湊，含角色）／新增 `{name,email,password,role?}`（`role` 是 `admin` 或 `user`，沒給就是 `user`）／修改 `{name?,email?,role?}`／重設**他人**密碼 `{newPassword}`／停用或啟用 `{status:"active"\|"disabled"}`／刪除。規則見「設定頁與 Volume → 帳號與角色」。 |
+| `GET /api/accounts`、`POST /api/accounts`、`PATCH /api/accounts/:id`、`POST /api/accounts/:id/password`、`POST /api/accounts/:id/status`、`DELETE /api/accounts/:id` | 帳號管理（**只有管理員**）：列出（不含密碼雜湊，含角色）／新增 `{name,email,password,role?}`（`role` 是 `admin` 或 `user`，沒給就是 `user`）／修改 `{name?,email?,role?}`／重設密碼 `{newPassword}`（對任何帳號，**包括管理員自己**；密碼只由管理員設定，對自己重設時這個瀏覽器自動換新的登入、其他裝置的登入失效）／停用或啟用 `{status:"active"\|"disabled"}`／刪除。規則見「設定頁與 Volume → 帳號與角色」。 |
 
 失敗一律回 `{ "success": false, "error": "…" }`（繁中訊息，不含金鑰與上游原始回應），狀態碼如下：
 
 | 狀態碼 | 情況 |
 |---|---|
-| 400 | JSON 格式錯誤、缺少 `image`、`image` 不是合法 data URL、`/api/save` 欄位型別不對或整筆都是空的、`/api/box-closed` 輸入不合規則（`boxId` 空白或超過 100 字、`items` 不是陣列或超過 500 筆、文字欄位超過 200 字、`qty` 不是 1～9999 的整數、數量欄位不是非負整數）；設定頁、登入與 `/api/accounts*` 的輸入不合規則（姓名不是 1～50 字、Email 格式不對、密碼不是 10～200 字、`role` 不是 `admin`／`user`、`status` 不是 `active`／`disabled`、`PATCH` 沒有任何要改的欄位、用「重設他人密碼」端點改自己的密碼、還沒有任何帳號就想登入） |
+| 400 | JSON 格式錯誤、缺少 `image`、`image` 不是合法 data URL、`/api/save` 欄位型別不對或整筆都是空的、`/api/box-closed` 輸入不合規則（`boxId` 空白或超過 100 字、`items` 不是陣列或超過 500 筆、文字欄位超過 200 字、`qty` 不是 1～9999 的整數、數量欄位不是非負整數）；設定頁、登入與 `/api/accounts*` 的輸入不合規則（姓名不是 1～50 字、Email 格式不對、密碼不是 10～200 字、`role` 不是 `admin`／`user`、`status` 不是 `active`／`disabled`、`PATCH` 沒有任何要改的欄位、還沒有任何帳號就想登入） |
 | 401 | `/api/line/webhook` 的 `X-Line-Signature` 缺少或不符；**OCR、存檔、關箱通知、`/api/me`、設定 API、帳號 API 沒登入**（或 cookie 過期、被竄改、帳號已被停用／刪除、重設過密碼或改過角色）；登入失敗（帳號不存在、帳號停用、密碼不對都是同一句「帳號或密碼不正確」）；升級時目前的密碼不對 |
-| 403 | 登入的是一般使用者卻存取設定頁、設定 API、帳號 API（「需要管理員權限」）；首次設定碼不正確；更改自己的密碼時「目前的密碼」不正確；狀態變更請求（含 OCR、存檔、關箱通知）缺少 `X-Requested-With` 標頭 |
-| 404 | `/api/accounts/:id*`：找不到這個帳號（id 不存在或格式不對） |
+| 403 | 登入的是一般使用者卻存取設定頁、設定 API、帳號 API（「需要管理員權限」）；首次設定碼不正確；狀態變更請求（含 OCR、存檔、關箱通知）缺少 `X-Requested-With` 標頭 |
+| 404 | `/api/accounts/:id*`：找不到這個帳號（id 不存在或格式不對）；沒有這個路徑（包括已經不存在的自助改密碼 `POST /account/password`） |
 | 409 | `/settings/setup`：已經有帳號（或還有舊版單一密碼等著升級）；`/settings/upgrade`：沒有待升級的舊版密碼；`/login`：還沒升級；`/api/accounts*`：Email 重複、不能停用或刪除自己、不能把自己改成一般使用者、不能停用、刪除或降級最後一位啟用中的管理員、帳號數量已達上限（200 個） |
 | 415 | 設定頁的狀態變更請求不是 `Content-Type: application/json` |
-| 413 | 請求內容超過 15 MB（登入、`/settings/*`、`/account/*`、`/api/settings/*`、`/api/accounts*` 的上限是 16 KB） |
-| 429 | 同一個 IP 一分鐘內超過額度：`/api/ocr` 60 次、`/api/save` 600 次、`/api/box-closed` 60 次、`/api/line/webhook` 120 次，`/api/settings*`、`/api/accounts*` 與 `/api/me` 共用 60 次，五個額度各自計算（其他 `/api/*` 路徑算進 OCR 的額度）；登入頁另有更嚴的限制：建立第一位管理員 5 次、登入／升級／更改自己的密碼共用 10 次、測試訊息 6 次；沒登入的 OCR／存檔／關箱通知請求在限流之前就被 401 擋下，其他沒登入的 `/api/*` 請求（`/api/me`、設定與帳號 API 的探測、不存在的路徑）算在另一組「匿名」額度，兩者都不會吃掉同一個出口 IP 上已登入同事的額度；另外 scrypt（密碼雜湊／驗證）同時最多跑 2 個、排隊 16 個，超過直接回 429「目前驗證請求過多，請稍後再試」；兩種 429 都帶 `Retry-After`（秒） |
+| 413 | 請求內容超過 15 MB（登入、登出、`/settings/*`、`/api/settings/*`、`/api/accounts*` 的上限是 16 KB） |
+| 429 | 同一個 IP 一分鐘內超過額度：`/api/ocr` 60 次、`/api/save` 600 次、`/api/box-closed` 60 次、`/api/line/webhook` 120 次，`/api/settings*`、`/api/accounts*` 與 `/api/me` 共用 60 次，五個額度各自計算（其他 `/api/*` 路徑算進 OCR 的額度）；登入頁另有更嚴的限制：建立第一位管理員 5 次、登入／升級共用 10 次、測試訊息 6 次；沒登入的 OCR／存檔／關箱通知請求在限流之前就被 401 擋下，其他沒登入的 `/api/*` 請求（`/api/me`、設定與帳號 API 的探測、不存在的路徑）算在另一組「匿名」額度，兩者都不會吃掉同一個出口 IP 上已登入同事的額度；另外 scrypt（密碼雜湊／驗證）同時最多跑 2 個、排隊 16 個，超過直接回 429「目前驗證請求過多，請稍後再試」；兩種 429 都帶 `Retry-After`（秒） |
 | 500 | 試算表／憑證設定問題：表頭缺必要欄位（訊息會列出缺哪欄）、服務帳號沒有權限或憑證無效、找不到試算表或分頁 |
 | 502 | OpenAI 或 Google 暫時失敗（OCR 已自動重試一次）、OpenAI 回傳內容無法解析 |
 | 503 | 伺服器尚未設定 `OPENAI_API_KEY`（OCR）或 Google 憑證（存檔）；或同時排隊等待寫入的存檔超過 50 筆；或 `/api/line/webhook` 沒有 channel secret（webhook 未啟用）；或資料目錄不可用（沒有地方存帳號，沒有人登入得了）時的登入頁、設定頁、OCR、存檔、關箱通知與各 API（訊息「請在 Zeabur 掛載 Volume 到 /app/data」；`/healthz` 與 LINE webhook 不受影響） |
@@ -116,8 +116,10 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
 
 | 角色 | 能做什麼 |
 |---|---|
-| **管理員**（`admin`） | 使用裝箱程式、查看與變更自己的帳號密碼；**另外**可以進設定頁（LINE 設定）、新增／編輯／停用／刪除所有帳號、改角色、重設別人的密碼。 |
-| **一般使用者**（`user`） | 使用裝箱程式、查看自己的帳號資料、變更自己的密碼。進設定頁或呼叫設定／帳號 API 一律 403「需要管理員權限」。 |
+| **管理員**（`admin`） | 使用裝箱程式、查看自己的帳號資料；**另外**可以進設定頁（LINE 設定）、新增／編輯／停用／刪除所有帳號、改角色、**設定所有人的密碼（包括自己的）**。 |
+| **一般使用者**（`user`） | 使用裝箱程式、查看自己的帳號資料。進設定頁或呼叫設定／帳號 API 一律 403「需要管理員權限」。**不能自己改密碼**，要變更請洽管理員。 |
+
+**密碼只由管理員設定**：沒有任何人（包括管理員）能憑「目前的密碼」自己改密碼——系統沒有「改自己的密碼」的端點，`/account` 頁只顯示「密碼由管理員統一設定，需要變更請洽管理員」。管理員在設定頁的「帳號管理」按「重設密碼」設定任何帳號的密碼，**包括自己的**（重設自己的密碼不需要輸入目前的密碼，管理員的登入就是授權；這個瀏覽器自動換新的登入、不會被登出，其他裝置的登入失效）。
 
 各路徑的權限（帳號必須是啟用中；停用的帳號一律當成沒登入）：
 
@@ -125,8 +127,10 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
 |---|---|---|---|
 | `GET /`、`/index.html`（裝箱程式） | 302 → `/login?next=/` | 可 | 可 |
 | `POST /api/ocr`、`/api/save`、`/api/box-closed` | 401 | 可（要帶 `X-Requested-With`） | 可 |
-| `GET /api/me`、`GET /account`、`POST /account/password` | 401／302 → `/login?next=/account` | 可 | 可 |
+| `GET /api/me`、`GET /account`（唯讀） | 401／302 → `/login?next=/account` | 可 | 可 |
 | `GET /settings`、`/api/settings*`、`/api/accounts*` | 302 → `/login?next=/settings`／401 | **403** | 可 |
+| `POST /api/accounts/:id/password`（設定密碼：唯一的途徑） | 401 | **403**（連自己的也不行） | 可（任何帳號，包括自己） |
+| `POST /account/password`（自助改密碼：已移除） | 404 | 404 | 404 |
 | `GET /login`、`POST /login`、`POST /logout` | 可（`/login` 已登入會導向 `/`） | 可 | 可 |
 | `GET /healthz`、`POST /api/line/webhook` | 公開 | 公開 | 公開 |
 
@@ -138,10 +142,10 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
    - 已經在用舊版**單一管理密碼**、還沒升級的部署（`/healthz` 顯示 `legacyAdminPending: true`、`adminCount: 0`）：升級完成之前**所有人（包括管理員）都登不進去**，登入頁會提示「請管理員先到設定頁」。管理員開 `/settings`，用目前正在使用的管理密碼升級成管理員帳號（見下面「從舊版的單一管理密碼升級」，LINE 設定原封不動）。
    - 已經有**管理員帳號**的部署（上一版的檔案格式，管理員沒有角色欄位）：所有舊管理員自動成為「管理員」角色，照原本的 Email 與密碼登入，登入第一次寫檔時檔案自動升成版本 3。
    - 全新安裝：照下面「全新安裝」用設定碼建立第一位管理員。
-2. **管理員到設定頁的「帳號管理」替每位同事建立帳號**（姓名、Email、密碼、角色；預設是一般使用者），再把網址、Email 與初始密碼告訴大家。同事登入後可以到「我的帳號」自己改密碼。
-3. 同事忘記密碼：管理員在「帳號管理」按「重設密碼」。管理員忘記：另一位管理員重設；所有管理員都登不進去：用下面「忘記所有密碼時的復原方式」。
+2. **管理員到設定頁的「帳號管理」替每位同事建立帳號**（姓名、Email、密碼、角色；預設是一般使用者），再把網址、Email 與密碼告訴大家。**密碼統一由管理員設定，同事不能自己改**：他們的「我的帳號」頁只有姓名、Email、角色與一行說明「密碼由管理員統一設定，需要變更請洽管理員」。
+3. 同事要換密碼或忘記密碼：管理員在「帳號管理」按「重設密碼」（對方所有裝置上的登入會失效）。管理員自己要換密碼：登入後在表格自己那一列按「重設密碼」（這個瀏覽器維持登入，其他裝置會被登出）。管理員忘記密碼、登不進去：另一位管理員幫忙重設；所有管理員都登不進去：用下面「忘記所有密碼時的復原方式」。
 4. 瀏覽器裡的箱子資料（`localStorage`）不受影響；登入過期時頁面會導向登入頁，登入後回到原本的頁面，箱子資料還在。按「完成此箱」時會先確認登入還有效：已經過期的話**什麼都不送、箱子保持開啟**（不會鎖起來、也不會漏同步），登入後再按一次即可；若剛好是同步到一半才過期（機率很低，因為關箱前才剛確認過），箱子同樣保持開啟，但已經寫進試算表的那幾筆會在重新同步時再寫一次（試算表會出現重複列，需要人工刪除）。
-5. 登入、升級、更改自己的密碼共用「每個 IP 每分鐘 10 次」的限流（成功也算，沒有帳號鎖定）：同一個辦公室（同一個出口 IP）上線第一天若超過 10 個人在同一分鐘內登入，後面的人會看到「請求過於頻繁，請稍後再試」，等一分鐘再試即可；登入有效 7 天，平常不會同時登入。
+5. 登入與升級共用「每個 IP 每分鐘 10 次」的限流（成功也算，沒有帳號鎖定）：同一個辦公室（同一個出口 IP）上線第一天若超過 10 個人在同一分鐘內登入，後面的人會看到「請求過於頻繁，請稍後再試」，等一分鐘再試即可；登入有效 7 天，平常不會同時登入。
 
 #### 全新安裝：用設定碼建立第一位管理員
 
@@ -170,12 +174,13 @@ Zeabur CLI 無法掛載 Volume，只能在 Dashboard 操作：
 
 - **登入**：Email（不分大小寫、前後空白不影響）＋密碼。成功後發 7 天有效的 session cookie（`sp_session`），cookie 綁定**帳號**與該帳號的 `sessionVersion`。登入失敗一律回同一句「帳號或密碼不正確」，不論是帳號不存在、帳號已停用或密碼不對；查無帳號與停用的帳號也會用固定的假雜湊跑一次 scrypt，回應時間不洩漏帳號存不存在。登入成功會更新「最後登入」時間；這個時間寫不進去（例如 Volume 滿了或變成唯讀）只會記一行警告，不會讓登入失敗。**登入後回到哪裡**由 `next` 決定：被導向登入頁時帶著原本要去的路徑（例如 `/login?next=/settings`），只接受同源的相對路徑，其他一律回 `/`。
 - **主頁頂端的使用者列**：登入後主頁最上面有一條窄列，顯示「👤 姓名（角色）」、「我的帳號」、（管理員才有）「設定」與「登出」。登出只清這個瀏覽器的 cookie。主頁的 OCR、存檔、關箱通知請求回 401（登入過期）時，頁面自動導向登入頁，登入後回到主頁；箱子資料（`localStorage`）不受影響。「完成此箱」會先用 `GET /api/me` 確認登入還有效，過期就不送出任何東西、箱子保持開啟（登入後再按一次）。
-- **我的帳號**（`/account`，任一角色）：顯示自己的姓名、Email、角色，可以變更自己的密碼（要輸入目前的密碼）。要改姓名、Email 或角色，請洽管理員。
-- **帳號管理**（設定頁，管理員）表格：姓名、Email、角色、狀態、最後登入；按鈕：**新增帳號**（姓名、Email、角色、密碼）、**編輯**（姓名、Email、角色）、**重設密碼**（重設別人的密碼）、**停用／啟用**、**刪除**。停用與刪除會先跳出確認。
+- **我的帳號**（`/account`，任一角色，唯讀）：顯示自己的姓名、Email、角色，以及一行說明「密碼由管理員統一設定，需要變更請洽管理員」；沒有任何表單，沒有自己改密碼的功能。要改姓名、Email、角色或密碼，請洽管理員。
+- **帳號管理**（設定頁，管理員）表格：姓名、Email、角色、狀態、最後登入；按鈕：**新增帳號**（姓名、Email、角色、密碼）、**編輯**（姓名、Email、角色）、**重設密碼**（任何帳號，包括自己的；這是設定密碼的唯一途徑）、**停用／啟用**、**刪除**。停用與刪除會先跳出確認；自己那一列只有「停用」與「刪除」不能按。
   - 規則（伺服器端強制，頁面只是把按鈕停用）：**不能停用或刪除自己**；**不能把自己改成一般使用者**；不能停用、刪除或降級**最後一位啟用中的管理員**；Email（不分大小寫）不可重複，重複回 409；姓名 1～50 字（不可含換行、控制字元、雙向控制字元與零寬字元，而且至少要有一個看得見的字）、Email 格式檢查（一般的 RFC 寬鬆版、只收 ASCII，長度 ≤ 254、本地部分 ≤ 64）、密碼 10～200 字；帳號總數上限 200 個。
-  - 停用、啟用、重設密碼、**改角色**、更改自己的密碼都會讓**該帳號**既有的登入立刻失效（`sessionVersion` 加一；停用後再啟用也不會讓舊 cookie 復活；改角色後對方要重新登入才拿到新的權限）；刪除帳號則是帳號不存在了。其他帳號的登入不受影響。更改**自己**的密碼時，目前這個瀏覽器會拿到新的 cookie 繼續登入，其他裝置要重新登入。
+  - 停用、啟用、重設密碼、**改角色**都會讓**該帳號**既有的登入立刻失效（`sessionVersion` 加一；停用後再啟用也不會讓舊 cookie 復活；改角色後對方要重新登入才拿到新的權限）；刪除帳號則是帳號不存在了。其他帳號的登入不受影響。管理員重設**自己**的密碼時，自己所有的登入同樣失效，但回應會帶新的 cookie，目前這個瀏覽器繼續登入、其他裝置要重新登入；重設別人的密碼不會動操作者的 cookie。
+  - 重設密碼（對自己或別人）都只要新密碼（10～200 字），不需要「目前的密碼」。兩個分頁同時重設**自己**的密碼時，只有先到的那個成功，後到的因為 `sessionVersion` 已變而 401，不會把先設的蓋掉；另一位管理員在你重設自己的密碼的同時也重設了你的密碼時，兩邊都可能成功，**最後寫入的密碼有效**，而且你剛換到的 cookie 會立刻失效（`sessionVersion` 又被加了一次），要用最後設定的密碼重新登入；同時重設**同一位別人**的密碼也是後到的覆蓋先到的（兩個都成功，最後設的有效）。
   - 所有規則都在寫檔的鎖內重新檢查，包括「發出請求的人現在還是啟用中的管理員」：兩位管理員同時互相停用、互相降級（或刪除）對方，只有先到的那個成功，不會變成沒有任何管理員能登入；被停用或降級的人不能再改設定。
-- **審計 log**：每個帳號操作留一行 `[accounts] <操作者 email> <動作> <對象 email>（來源 <IP>）`，例如 `[accounts] a@example.com 新增帳號 b@example.com（角色 user）（來源 203.0.113.9）`、`[accounts] a@example.com 修改帳號 b@example.com（角色 user → admin）（來源 …）`；登入成功與失敗記 Email 與來源 IP（Email 格式不對的失敗登入只記固定佔位字串）。**絕不記密碼。**
+- **審計 log**：每個帳號操作留一行 `[accounts] <操作者 email> <動作> <對象 email>（來源 <IP>）`，例如 `[accounts] a@example.com 新增帳號 b@example.com（角色 user）（來源 203.0.113.9）`、`[accounts] a@example.com 修改帳號 b@example.com（角色 user → admin）（來源 …）`、`[accounts] a@example.com 重設密碼 b@example.com（來源 …）`、`[accounts] a@example.com 重設密碼（自己） a@example.com（來源 …）`；登入成功與失敗記 Email 與來源 IP（Email 格式不對的失敗登入只記固定佔位字串）。**絕不記密碼。**
 
 #### 忘記所有密碼時的復原方式（要改 Volume 裡的設定檔，有風險）
 
@@ -381,10 +386,10 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 - **全站要登入**（見「設定頁與 Volume」）：主頁、`/api/ocr`、`/api/save`、`/api/box-closed` 都要有效的登入 session（任一角色），並帶 `X-Requested-With: XMLHttpRequest`（CSRF 防護）；沒登入的請求在限流**之前**就被 401 擋下，不會吃掉同一個出口 IP 上其他人的限流額度（其他沒登入的 `/api/*` 請求——`/api/me`、設定與帳號 API 的探測、不存在的路徑——算在另一組匿名額度，同樣不會擠壓已登入的人）。仍然公開的只有 `/healthz`（不含任何金鑰與設定值）、`/api/line/webhook`（靠簽章驗證）與登入頁。已做的防護：登入、每 IP 每分鐘限流（OCR 60 次、存檔 600 次、關箱通知 60 次、LINE webhook 120 次、設定／帳號／目前登入者 API 60 次，各自計算；記憶體內，服務重啟即重置；IP 取 `X-Forwarded-For` 由右往左第一個公開位址）、15 MB body 上限、存檔欄位驗證與公式字元處理、錯誤訊息不帶金鑰。登入帳號是「同事」層級的存取控制，不是細緻的權限系統：任何一位登入的人都能呼叫這三支 API（內容由呼叫端決定）。
 - **登入與設定頁的安全設計**（細節見「設定頁與 Volume」）：
   - 密碼用 scrypt（N=16384、r=8、p=1、16 位元組隨機 salt）雜湊，格式 `scrypt$N$r$p$salt$hash`，以 `timingSafeEqual` 比對；10～200 個字元。每個帳號各有自己的雜湊。
-  - 登入後發 `sp_session` cookie：值是 `<到期時間>.<帳號 id>.<sessionVersion>.<亂數>.<HMAC-SHA256 簽章>`（金鑰是設定檔裡隨機產生的 `sessionSecret`，平常不會換），`HttpOnly`、`SameSite=Lax`、`Path=/`、7 天，走 HTTPS（`X-Forwarded-Proto: https`）時加 `Secure`。驗證時除了簽章與到期，還要對照目前的帳號資料：帳號必須存在、啟用中、`sessionVersion` 相符（角色是每次請求從目前的帳號資料讀的，不簽在 cookie 裡）。**登出只清除這個瀏覽器的 cookie**（伺服器不存 session）；要讓某個帳號所有裝置立刻失效，用重設密碼、更改密碼、停用或改角色（`sessionVersion` 加一）。
+  - 登入後發 `sp_session` cookie：值是 `<到期時間>.<帳號 id>.<sessionVersion>.<亂數>.<HMAC-SHA256 簽章>`（金鑰是設定檔裡隨機產生的 `sessionSecret`，平常不會換），`HttpOnly`、`SameSite=Lax`、`Path=/`、7 天，走 HTTPS（`X-Forwarded-Proto: https`）時加 `Secure`。驗證時除了簽章與到期，還要對照目前的帳號資料：帳號必須存在、啟用中、`sessionVersion` 相符（角色是每次請求從目前的帳號資料讀的，不簽在 cookie 裡）。**登出只清除這個瀏覽器的 cookie**（伺服器不存 session）；要讓某個帳號所有裝置立刻失效，用重設密碼、停用或改角色（`sessionVersion` 加一）。
   - 登入時間不洩漏帳號：查無帳號、帳號停用、Email 格式不對都拿固定的假雜湊（`DUMMY_PASSWORD_HASH`，參數與正式雜湊相同）跑一次 scrypt，一律回同一句「帳號或密碼不正確」。
   - 所有狀態變更的端點只收 `Content-Type: application/json` 且必須帶 `X-Requested-With: XMLHttpRequest`（瀏覽器的跨站表單送不出這種請求），再加上 `SameSite=Lax`，作為 CSRF 防護。
-  - 暴力破解防護：建立第一位管理員 5 次／分、登入／升級／更改自己的密碼共用 10 次／分（皆每 IP，IP 的判斷見上面第 3、4 項部署檢查；換 Email 重試也不會多出額度）；設定碼累計 20 次錯誤就整組作廢換新。scrypt 同時最多跑 2 個、排隊 16 個（超過回 429），所以公開端點被灌請求也不會把 libuv 執行緒池占滿、拖慢 OCR 與存檔。**沒有「帳號鎖定」或全域失敗額度**（避免被人故意鎖死管理者），所以請用夠長、不好猜的密碼。改成 Email 登入之後，針對已知 Email 猜密碼是主要風險，而限流只依來源 IP：服務一定要走有附加 `X-Forwarded-For` 的反向代理（Zeabur 的代理會做），如果直接把服務暴露在公網，攻擊者可以偽造這個標頭來繞過逐 IP 限流（見「部署」的檢查 3、4）。登入成功／失敗、設定碼錯誤、升級失敗、改密碼失敗與每個帳號操作都會在 log 留一行（`[accounts] <操作者> <動作> <對象>（來源 IP）`，不含任何密碼；被限流擋下的請求不再寫 log）。
+  - 暴力破解防護：建立第一位管理員 5 次／分、登入與升級共用 10 次／分（皆每 IP，IP 的判斷見上面第 3、4 項部署檢查；換 Email 重試也不會多出額度）；設定碼累計 20 次錯誤就整組作廢換新。scrypt 同時最多跑 2 個、排隊 16 個（超過回 429），所以公開端點被灌請求也不會把 libuv 執行緒池占滿、拖慢 OCR 與存檔。**沒有「帳號鎖定」或全域失敗額度**（避免被人故意鎖死管理者），所以請用夠長、不好猜的密碼。改成 Email 登入之後，針對已知 Email 猜密碼是主要風險，而限流只依來源 IP：服務一定要走有附加 `X-Forwarded-For` 的反向代理（Zeabur 的代理會做），如果直接把服務暴露在公網，攻擊者可以偽造這個標頭來繞過逐 IP 限流（見「部署」的檢查 3、4）。登入成功／失敗、設定碼錯誤、升級失敗與每個帳號操作（含重設密碼）都會在 log 留一行（`[accounts] <操作者> <動作> <對象>（來源 IP）`，不含任何密碼；被限流擋下的請求不再寫 log）。
   - 所有狀態變更的登入、設定與帳號端點統一用 `mutate()` 註冊（資料目錄可用 → `application/json` → `X-Requested-With`），並帶 `X-Content-Type-Options: nosniff` 與 `Cache-Control: no-store`；測試會走訪 `app.routes` 確認沒有漏掉的端點。
   - 登入頁、帳號頁與設定頁 HTML 帶 CSP（`default-src 'none'`，script 只允許帶每次請求隨機 nonce 的那一段，`form-action 'none'`，`frame-ancestors 'none'`）、`X-Frame-Options: DENY`、`Cache-Control: no-store`、`noindex`；所有動態內容（姓名、Email、`next`、群組名稱、網址…）都經過 HTML 跳脫。
   - token 與 secret **明文**存在 Volume 的 `settings.json`（`0600`），讀取 API 與頁面只給「已設定」與末 4 碼、永遠不回傳完整內容，log 也不印。能進服務終端機或讀 Volume 的人就能讀到它——與環境變數的暴露面相同。
@@ -416,9 +421,9 @@ src/line-settings.ts    生效的 LINE 設定（設定頁的設定檔優先、�
 src/settings-store.ts   設定檔儲存（DATA_DIR/settings.json）：載入、原子寫入（0600）、損毀備份、Volume 偵測
 src/auth.ts             密碼（scrypt）、登入 session cookie（HMAC 簽章，綁帳號與 sessionVersion）、首次設定碼、登入用的假雜湊
 src/auth-kit.ts         全站共用的登入工具：session 簽發／驗證、角色檢查（requireAdmin）、CSRF 標頭、逐 IP 登入限流、scrypt 並行閘門、審計 log、mutate()、next 白名單（safeNextPath）
-src/login-routes.ts     登入頁與登入／登出、/api/me、我的帳號頁與改自己的密碼（任一角色）
+src/login-routes.ts     登入頁與登入／登出、/api/me、我的帳號頁（唯讀，任一角色；沒有自己改密碼的端點）
 src/settings-routes.ts  設定頁與設定 API 的路由（只有管理員；/settings、/settings/setup、/settings/upgrade、/api/settings*）：建立第一位管理員、升級舊版密碼、LINE 設定
-src/account-routes.ts   帳號管理 API（/api/accounts*，只有管理員）：新增、修改（含角色）、重設他人密碼、停用／啟用、刪除，規則都在寫檔的鎖內檢查
+src/account-routes.ts   帳號管理 API（/api/accounts*，只有管理員）：新增、修改（含角色）、重設密碼（包括自己的；密碼只由管理員設定）、停用／啟用、刪除，規則都在寫檔的鎖內檢查
 src/accounts.ts         帳號的小工具：姓名、Email、角色的驗證／正規化、對外檢視（不含雜湊）、統計、最後一位管理員保護、鎖內重新確認操作者
 src/settings-page.ts    登入頁、帳號頁、設定頁、403 頁的 HTML（伺服器端組字串、CSP nonce、不用前端框架）
 src/http.ts             共用的 HTTP 小工具（客戶端 IP、讀 JSON、HTTPS 判斷、對外網址）

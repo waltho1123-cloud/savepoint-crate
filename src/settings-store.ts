@@ -45,7 +45,7 @@ export interface AdminSettings {
 }
 
 export type AccountStatus = "active" | "disabled";
-/** 角色：admin＝可以進設定頁與管理帳號；user＝只能使用裝箱程式與管理自己的密碼。 */
+/** 角色：admin＝可以進設定頁與管理帳號（含設定所有人的密碼）；user＝只能使用裝箱程式。密碼只由管理員設定，個人不能自己改。 */
 export type AccountRole = "admin" | "user";
 
 /** 登入帳號。 */
@@ -59,7 +59,7 @@ export interface Account {
   /** `scrypt$N$r$p$salt$hash`（見 auth.ts）。 */
   passwordHash: string;
   status: AccountStatus;
-  /** 從 1 起算；重設密碼、改密碼、停用／啟用都會加一，該帳號所有已發出的登入 cookie 就一起失效。 */
+  /** 從 1 起算；重設密碼（管理員設定的，含管理員重設自己的）、改角色、停用／啟用都會加一，該帳號所有已發出的登入 cookie 就一起失效。 */
   sessionVersion: number;
   createdAt: string;
   updatedAt: string;
