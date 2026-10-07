@@ -5,6 +5,7 @@ import { DUMMY_PASSWORD_HASH, PASSWORD_MAX_LENGTH, verifyPassword } from "./auth
 import { LOGIN_FAILED_MESSAGE, safeNextPath, type AuthKit } from "./auth-kit.js";
 import { ServiceError } from "./common.js";
 import { readJsonObject, readString } from "./http.js";
+import type { SheetsView } from "./line-settings.js";
 import { renderAccountPage, renderLoginPage, renderNoAccountsPage, renderUnavailablePage } from "./settings-page.js";
 
 /**
@@ -19,7 +20,13 @@ import { renderAccountPage, renderLoginPage, renderNoAccountsPage, renderUnavail
  * 密碼只有管理員能設定：POST /api/accounts/:id/password（account-routes.ts；管理員可以對任何帳號，包括自己）。
  * 狀態變更的端點一律用 kit.mutate() 註冊（資料目錄可用 → application/json → X-Requested-With）。
  */
-export function registerLoginRoutes(app: Hono, kit: AuthKit): void {
+export interface LoginRouteOptions {
+  /** 我的帳號頁顯示的「商品主檔（Google 試算表）」連結資料（`describeSheets(env)`，啟動時算一次）。 */
+  sheets: SheetsView;
+}
+
+export function registerLoginRoutes(app: Hono, kit: AuthKit, options: LoginRouteOptions): void {
+  const { sheets } = options;
   const { settings, now, log } = kit;
 
   // ---------------------------------------------------------------- 登入頁
@@ -100,7 +107,7 @@ export function registerLoginRoutes(app: Hono, kit: AuthKit): void {
     if (!settings.writable) return kit.html(c, 503, renderUnavailablePage);
     const me = kit.sessionAccount(c);
     if (!me) return kit.redirectToLogin(c, "/account");
-    return kit.html(c, 200, (ctx) => renderAccountPage(ctx, me));
+    return kit.html(c, 200, (ctx) => renderAccountPage(ctx, me, sheets));
   });
 
   kit.allow("/login", "GET, POST");

@@ -1,6 +1,7 @@
 import { summarizeAccounts } from "./accounts.js";
 import type { FetchLike, Logger } from "./common.js";
 import type { AppEnv } from "./env.js";
+import { parseServiceAccountCredentials } from "./google-auth.js";
 import { fetchGroupName, type LineGroupEvent } from "./line.js";
 import {
   CAPTURED_GROUPS_MAX,
@@ -74,6 +75,40 @@ export function maskCredential(value: string): MaskedCredential {
   return { configured: value !== "", last4: value.length >= 12 ? value.slice(-4) : null };
 }
 
+/** 設定頁「商品主檔（Google 試算表）」卡片用的資料：只有識別資訊，不含憑證內容。 */
+export interface SheetsView {
+  /** 目標試算表 ID（環境變數 GOOGLE_SHEET_ID，沒設就是程式預設值）。 */
+  spreadsheetId: string;
+  /** 寫入的分頁名稱（GOOGLE_SHEET_NAME）。 */
+  sheetName: string;
+  /** 試算表網址；ID 格式不合（只允許英數字、- 與 _）時為 null，頁面就不顯示連結。 */
+  spreadsheetUrl: string | null;
+  /** 寫入用服務帳號的 client_email（要加為試算表的編輯者）；憑證沒設或解析失敗時 null。 */
+  serviceAccountEmail: string | null;
+  /** 憑證可解析＝存檔功能可用（與 /healthz 的 sheetsConfigured 同一個判斷）。 */
+  configured: boolean;
+}
+
+/** Google 試算表 ID 的格式：Drive 檔案 ID 只會有英數字、- 與 _（長度留寬）。不合格的 ID 不產生連結，避免把任意字串放進 href。 */
+export const SPREADSHEET_ID_PATTERN = /^[A-Za-z0-9_-]{1,200}$/;
+
+/** 由試算表 ID 組出網址；格式不合回 null。 */
+export function spreadsheetUrlOf(spreadsheetId: string): string | null {
+  return SPREADSHEET_ID_PATTERN.test(spreadsheetId) ? `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit` : null;
+}
+
+/** 從環境變數整理出試算表的識別資訊（只有 ID、分頁、網址、服務帳號 Email；絕不含 private_key 或憑證原文）。 */
+export function describeSheets(env: AppEnv): SheetsView {
+  const credentials = parseServiceAccountCredentials(env.GOOGLE_SERVICE_ACCOUNT_CREDENTIALS);
+  return {
+    spreadsheetId: env.GOOGLE_SHEET_ID,
+    sheetName: env.GOOGLE_SHEET_NAME,
+    spreadsheetUrl: spreadsheetUrlOf(env.GOOGLE_SHEET_ID),
+    serviceAccountEmail: credentials?.client_email ?? null,
+    configured: credentials !== null,
+  };
+}
+
 export interface SettingsView {
   dataDirWritable: boolean;
   /** 資料目錄是否在獨立掛載的 Volume 上；null＝判斷不出來。 */
@@ -102,6 +137,8 @@ export interface SettingsView {
   };
   /** 環境變數備援有沒有值（只有有／沒有，不含內容）。 */
   env: { tokenConfigured: boolean; groupIdConfigured: boolean; secretConfigured: boolean };
+  /** 關箱時寫入的 Google 試算表（設定頁顯示連結用）。 */
+  sheets: SheetsView;
   captured: CapturedGroup[];
 }
 
@@ -131,6 +168,7 @@ export function buildSettingsView(env: AppEnv, store: SettingsStore, me: Pick<Ac
       groupIdConfigured: env.LINE_GROUP_ID !== "",
       secretConfigured: env.LINE_CHANNEL_SECRET !== "",
     },
+    sheets: describeSheets(env),
     captured: data.lineCaptured.map((group) => ({
       groupId: group.groupId,
       groupName: group.groupName,

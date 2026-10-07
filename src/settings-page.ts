@@ -1,5 +1,5 @@
 import { roleLabel, type AccountPublic } from "./accounts.js";
-import type { SettingsView } from "./line-settings.js";
+import type { SettingsView, SheetsView } from "./line-settings.js";
 import { formatTaipeiTime } from "./line.js";
 import { DATA_DIR_UNAVAILABLE_MESSAGE, type Account } from "./settings-store.js";
 
@@ -534,7 +534,8 @@ export function renderForbiddenPage(ctx: PageContext, me: Pick<Account, "name" |
 }
 
 /** /account：任一角色都可以看自己的資料（唯讀）。密碼由管理員統一設定，這一頁沒有任何表單。 */
-export function renderAccountPage(ctx: PageContext, me: Pick<Account, "name" | "email" | "role">): string {
+/** 我的帳號頁（任一角色）：帳號資訊（唯讀、沒有表單）＋「商品主檔（Google 試算表）」的連結，讓每位使用者都找得到關箱後資料寫到哪裡。 */
+export function renderAccountPage(ctx: PageContext, me: Pick<Account, "name" | "email" | "role">, sheets: SheetsView): string {
   return layout(
     ctx,
     `${renderNav(me, "account")}
@@ -542,9 +543,27 @@ export function renderAccountPage(ctx: PageContext, me: Pick<Account, "name" | "
 <h2>我的帳號</h2>
 <p class="muted">姓名：<strong id="me-name">${escapeHtml(me.name)}</strong><br>Email：<strong id="me-email" class="mono">${escapeHtml(me.email)}</strong><br>角色：<strong id="me-role">${escapeHtml(roleLabel(me.role))}</strong><br>要修改姓名、Email 或角色，請洽管理員。</p>
 <p class="note" id="password-policy">密碼由管理員統一設定，需要變更請洽管理員。</p>
-</section>`,
+</section>
+${renderAccountSheetsCard(sheets)}`,
     { title: `我的帳號 - ${APP_NAME}`, heading: "我的帳號", sub: APP_NAME },
   );
+}
+
+/** 「開啟 Google 試算表」按鈕；ID 格式不合（沒有網址）時改顯示 fallback 警告。 */
+function renderSheetsLink(sheets: SheetsView, fallback: string): string {
+  return sheets.spreadsheetUrl
+    ? `<p><a class="btn primary" href="${escapeHtml(sheets.spreadsheetUrl)}" target="_blank" rel="noopener noreferrer">開啟 Google 試算表</a></p>`
+    : `<p class="note warn">${fallback}</p>`;
+}
+
+/** 我的帳號頁用的精簡版：只有連結、分頁與 ID（不顯示服務帳號與環境變數說明，那些是管理員才用得到的）。 */
+function renderAccountSheetsCard(sheets: SheetsView): string {
+  return `<section class="card">
+<h2>商品主檔（Google 試算表）</h2>
+<p class="muted">關箱時會逐筆寫進這份試算表的「${escapeHtml(sheets.sheetName)}」分頁。打不開或看不到內容時，請向管理員索取這份試算表的檢視權限。</p>
+${renderSheetsLink(sheets, "試算表連結目前無法產生，請洽管理員。")}
+<p class="muted">試算表 ID：<span class="mono">${escapeHtml(sheets.spreadsheetId)}</span></p>
+</section>`;
 }
 
 function chip(kind: "ok" | "bad" | "warn" | "", text: string): string {
@@ -586,6 +605,27 @@ function renderStatus(view: SettingsView): string {
 <h2>狀態</h2>
 <ul class="chips">${chips.join("")}</ul>
 ${mountWarning}
+</section>`;
+}
+
+/** 商品主檔（Google 試算表）：顯示目前生效的試算表連結、分頁與寫入用的服務帳號，讓管理員找得到那份表。只有識別資訊，沒有憑證。 */
+function renderSheetsCard(view: SettingsView): string {
+  const sheets = view.sheets;
+  const link = renderSheetsLink(
+    sheets,
+    `試算表 ID 格式不正確（只能有英數字、<span class="mono">-</span> 與 <span class="mono">_</span>），無法產生連結；請檢查環境變數 <span class="mono">GOOGLE_SHEET_ID</span>。`,
+  );
+  const account = sheets.serviceAccountEmail
+    ? `<p class="muted">寫入帳號：<span class="mono">${escapeHtml(sheets.serviceAccountEmail)}</span>（必須是這份試算表的「編輯者」）</p>`
+    : `<p class="note warn">尚未設定 Google 服務帳號憑證（環境變數 <span class="mono">GOOGLE_SERVICE_ACCOUNT_CREDENTIALS</span>）：關箱時無法寫入試算表。</p>`;
+  return `<section class="card">
+<h2>商品主檔（Google 試算表）</h2>
+<p class="muted">關箱時會逐筆寫進這份試算表的「${escapeHtml(sheets.sheetName)}」分頁。</p>
+${link}
+<p class="muted">試算表 ID：<span class="mono">${escapeHtml(sheets.spreadsheetId)}</span></p>
+<p class="muted">分頁名稱：<span class="mono">${escapeHtml(sheets.sheetName)}</span></p>
+${account}
+<p class="muted">要改用別的試算表，請在 Zeabur 修改環境變數 <span class="mono">GOOGLE_SHEET_ID</span>／<span class="mono">GOOGLE_SHEET_NAME</span> 後重新部署。</p>
 </section>`;
 }
 
@@ -733,6 +773,6 @@ ${rows}
 export function renderSettingsPage(ctx: PageContext, view: SettingsView, accounts: ReadonlyArray<AccountPublic>): string {
   return layout(
     ctx,
-    [renderNav(view.me, "settings"), renderStatus(view), renderLineCard(view), renderWebhookCard(ctx), renderCapturedCard(view), renderAccountsCard(view, accounts)].join("\n"),
+    [renderNav(view.me, "settings"), renderStatus(view), renderSheetsCard(view), renderLineCard(view), renderWebhookCard(ctx), renderCapturedCard(view), renderAccountsCard(view, accounts)].join("\n"),
   );
 }

@@ -1,16 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { loadEnv } from "../src/env.js";
+import { DEFAULT_GOOGLE_SHEET_ID, DEFAULT_GOOGLE_SHEET_NAME, loadEnv } from "../src/env.js";
 import {
   buildSettingsView,
   CAPTURE_REFRESH_MS,
   CAPTURE_THROTTLE_MAX_ENTRIES,
   captureLineGroup,
+  describeSheets,
   maskCredential,
   resolveLineConfig,
+  spreadsheetUrlOf,
 } from "../src/line-settings.js";
 import { newSettingsData, SettingsStore, type SettingsData } from "../src/settings-store.js";
-import { createCapturingLogger, createFetchMock, TEST_GROUP_ID, TEST_LINE_SECRET, TEST_LINE_TOKEN } from "./helpers.js";
+import { createCapturingLogger, createFetchMock, makeCredentials, TEST_GROUP_ID, TEST_LINE_SECRET, TEST_LINE_TOKEN } from "./helpers.js";
 import { accountId, cleanupTempDirs, lineHandler, makeAccount, makeTempDir, NOW_MS } from "./settings-helpers.js";
 
 afterEach(cleanupTempDirs);
@@ -99,6 +101,47 @@ describe("maskCredential", () => {
   });
 });
 
+describe("describeSheets／spreadsheetUrlOf（設定頁的「商品主檔（Google 試算表）」卡片）", () => {
+  it("沒設環境變數：用程式預設的試算表 ID 與分頁，網址由 ID 組成；憑證沒設定就沒有服務帳號 Email、configured=false", () => {
+    expect(describeSheets(loadEnv({}))).toEqual({
+      spreadsheetId: DEFAULT_GOOGLE_SHEET_ID,
+      sheetName: DEFAULT_GOOGLE_SHEET_NAME,
+      spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${DEFAULT_GOOGLE_SHEET_ID}/edit`,
+      serviceAccountEmail: null,
+      configured: false,
+    });
+  });
+
+  it("GOOGLE_SHEET_ID／GOOGLE_SHEET_NAME 有設就用設定的值", () => {
+    const view = describeSheets(loadEnv({ GOOGLE_SHEET_ID: "abc_DEF-123", GOOGLE_SHEET_NAME: "盤點 2026" }));
+    expect(view).toMatchObject({ spreadsheetId: "abc_DEF-123", sheetName: "盤點 2026", spreadsheetUrl: "https://docs.google.com/spreadsheets/d/abc_DEF-123/edit" });
+  });
+
+  it("ID 只允許英數字、- 與 _（1～200 字）：其他字元（空白、斜線、引號、javascript: 等）不產生連結，回 null", () => {
+    expect(spreadsheetUrlOf("a".repeat(200))).toBe(`https://docs.google.com/spreadsheets/d/${"a".repeat(200)}/edit`);
+    for (const bad of ["", "a b", "abc/../etc", 'x"onmouseover="1', "javascript:alert(1)", "中文", "a".repeat(201), "id?x=1", "id#frag"]) {
+      expect(spreadsheetUrlOf(bad), JSON.stringify(bad)).toBeNull();
+    }
+    expect(describeSheets(loadEnv({ GOOGLE_SHEET_ID: "bad/id" }))).toMatchObject({ spreadsheetId: "bad/id", spreadsheetUrl: null });
+  });
+
+  it("憑證可解析：只拿 client_email、configured=true；序列化後不含 private_key、project_id 或憑證原文", () => {
+    const creds = makeCredentials("writer@my-project.iam.gserviceaccount.com");
+    const view = describeSheets(loadEnv({ GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: creds.base64 }));
+    expect(view).toMatchObject({ serviceAccountEmail: "writer@my-project.iam.gserviceaccount.com", configured: true });
+    const text = JSON.stringify(view);
+    expect(text).not.toContain("PRIVATE KEY");
+    expect(text).not.toContain("proj-id-should-not-leak");
+    expect(text).not.toContain(creds.base64);
+    expect(Object.keys(view).sort()).toEqual(["configured", "serviceAccountEmail", "sheetName", "spreadsheetId", "spreadsheetUrl"]);
+  });
+
+  it("憑證解析不了（不是 JSON、缺 client_email）：serviceAccountEmail null、configured=false，不丟例外", () => {
+    expect(describeSheets(loadEnv({ GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: "not-json" }))).toMatchObject({ serviceAccountEmail: null, configured: false });
+    expect(describeSheets(loadEnv({ GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: JSON.stringify({ private_key: "k" }) }))).toMatchObject({ serviceAccountEmail: null, configured: false });
+  });
+});
+
 describe("buildSettingsView", () => {
   const ME = { id: "0123456789abcdef0123456789abcdef", name: "測試管理員", email: "admin@example.test", role: "admin" as const };
 
@@ -113,6 +156,12 @@ describe("buildSettingsView", () => {
       captured: [],
       effective: { source: null, lineConfigured: false, lineWebhookConfigured: false },
     });
+  });
+
+  it("sheets 就是 describeSheets(env) 的結果（設定頁與 /api/settings 都拿得到試算表連結）", () => {
+    const env = loadEnv({ GOOGLE_SHEET_ID: "sheet-ID_1", GOOGLE_SHEET_NAME: "主檔" });
+    expect(buildSettingsView(env, SettingsStore.unavailable(), ME).sheets).toEqual(describeSheets(env));
+    expect(buildSettingsView(env, SettingsStore.unavailable(), ME).sheets.spreadsheetUrl).toBe("https://docs.google.com/spreadsheets/d/sheet-ID_1/edit");
   });
 
   it("me 只有 id、姓名、Email（不含密碼雜湊等其他欄位，即使傳進來的物件帶著它們）", () => {

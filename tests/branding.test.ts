@@ -117,6 +117,7 @@ const view = {
   line: { enabled: true, channelAccessToken: { configured: false, last4: "" }, channelSecret: { configured: false, last4: "" }, groupId: "", groupName: "" },
   effective: { source: null, lineConfigured: false, lineWebhookConfigured: false },
   captured: [],
+  sheets: { spreadsheetId: "1abc", sheetName: "商品主檔", spreadsheetUrl: "https://docs.google.com/spreadsheets/d/1abc/edit", serviceAccountEmail: "sa@example.test", configured: true },
   dataDirWritable: true,
   dataDirMounted: true,
   me: { id: "1".repeat(32), name: "王老闆", email: "boss@example.test", role: "admin" },
@@ -133,7 +134,7 @@ const PAGES: Array<[string, string]> = [
   ["升級頁", renderUpgradePage(ctx)],
   ["503 頁", renderUnavailablePage(ctx)],
   ["403 頁", renderForbiddenPage(ctx, me)],
-  ["我的帳號頁", renderAccountPage(ctx, me)],
+  ["我的帳號頁", renderAccountPage(ctx, me, view.sheets)],
   ["設定頁", renderSettingsPage(ctx, view, [])],
 ];
 

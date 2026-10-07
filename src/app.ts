@@ -10,7 +10,7 @@ import { consoleLogger, describeError, ServiceError, sleep, type FetchLike, type
 import type { AppEnv } from "./env.js";
 import { GoogleTokenProvider, parseServiceAccountCredentials } from "./google-auth.js";
 import { clientIpOf, isHttpsRequest, readJsonObject } from "./http.js";
-import { captureLineGroup, resolveLineConfig } from "./line-settings.js";
+import { captureLineGroup, describeSheets, resolveLineConfig } from "./line-settings.js";
 import { handleLineWebhookBody, notifyBoxClosed, parseBoxClosedInput, verifyLineSignature } from "./line.js";
 import { registerLoginRoutes } from "./login-routes.js";
 import { parseImageInput, recognizeLabel } from "./ocr.js";
@@ -268,7 +268,7 @@ export function createApp(deps: AppDeps): Hono {
 
   // 靜態資源（WIWI 配色 token 與 Logo）：不需要登入（登入頁就要用），只從啟動時讀好的資源表回應
   registerAssetRoutes(app, deps.assets);
-  registerLoginRoutes(app, kit);
+  registerLoginRoutes(app, kit, { sheets: describeSheets(env) });
   registerSettingsRoutes(app, kit, { env, setupGuard, fetchImpl });
 
   for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/line/webhook"]) {

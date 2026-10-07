@@ -52,6 +52,13 @@ function view(overrides: Partial<SettingsView> = {}): SettingsView {
     },
     effective: { source: "settings", lineConfigured: true, lineWebhookConfigured: true },
     env: { tokenConfigured: false, groupIdConfigured: false, secretConfigured: false },
+    sheets: {
+      spreadsheetId: "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A",
+      sheetName: "商品主檔",
+      spreadsheetUrl: "https://docs.google.com/spreadsheets/d/1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A/edit",
+      serviceAccountEmail: "sheet-writer@example-project.iam.gserviceaccount.com",
+      configured: true,
+    },
     captured: [{ groupId: "Cfedcba9876543210fedcba9876543210", groupName: "另一個群組", eventType: "join", lastSeenAt: "2026-10-05T07:20:00.000Z" }],
     ...overrides,
   };
@@ -77,6 +84,84 @@ describe("escapeHtml", () => {
   });
 });
 
+describe("我的帳號頁的「商品主檔（Google 試算表）」卡片：任一角色都看得到同一個連結", () => {
+  const SHEET_URL = "https://docs.google.com/spreadsheets/d/1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A/edit";
+
+  it("一般使用者與管理員的我的帳號頁都有「開啟 Google 試算表」連結、分頁名稱與 ID；不顯示服務帳號 Email，也仍然沒有任何表單", () => {
+    for (const role of ["user", "admin"] as const) {
+      const html = renderAccountPage(ctxOf(), { name: "小明", email: "ming@example.test", role }, view().sheets);
+      expect(html, role).toContain("<h2>商品主檔（Google 試算表）</h2>");
+      expect(html, role).toContain(`<a class="btn primary" href="${SHEET_URL}" target="_blank" rel="noopener noreferrer">開啟 Google 試算表</a>`);
+      expect(html, role).toContain("「商品主檔」分頁");
+      expect(html, role).toContain(`<span class="mono">1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A</span>`);
+      expect(html, role).not.toContain("sheet-writer@example-project.iam.gserviceaccount.com");
+      expect(html, role).not.toContain("GOOGLE_SHEET_ID");
+      expect(html, role).not.toContain("<form");
+      expect(html.indexOf("<h2>我的帳號</h2>"), role).toBeLessThan(html.indexOf("<h2>商品主檔（Google 試算表）</h2>"));
+    }
+  });
+
+  it("試算表 ID 格式不合：不出 docs.google.com 連結，改顯示「請洽管理員」", () => {
+    const html = renderAccountPage(ctxOf(), { name: "小明", email: "ming@example.test", role: "user" }, { ...view().sheets, spreadsheetId: "bad id", spreadsheetUrl: null });
+    expect(html).not.toContain("docs.google.com");
+    expect(html).toContain("試算表連結目前無法產生，請洽管理員。");
+  });
+
+  it("分頁名稱、ID 與網址都經過 escapeHtml", () => {
+    const html = renderAccountPage(ctxOf(), { name: "小明", email: "ming@example.test", role: "user" }, { ...view().sheets, spreadsheetId: 'id"><b>', sheetName: "<i>主檔</i>", spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/x"onclick="1/edit' });
+    expect(html).not.toContain("<i>主檔</i>");
+    expect(html).toContain("&lt;i&gt;主檔&lt;/i&gt;");
+    expect(html).not.toContain('id"><b>');
+    expect(html).not.toContain('x"onclick="1');
+    expect(html).toContain("x&quot;onclick=&quot;1");
+  });
+});
+
+describe("商品主檔（Google 試算表）卡片：讓管理員找得到關箱時寫入的那份表", () => {
+  it("顯示「開啟 Google 試算表」連結（新分頁、noopener）、試算表 ID、分頁名稱與寫入用的服務帳號；卡片排在狀態之後、LINE 設定之前", () => {
+    const html = renderSettingsPage(ctxOf(), view(), accounts());
+    expect(html).toContain(`<a class="btn primary" href="https://docs.google.com/spreadsheets/d/1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A/edit" target="_blank" rel="noopener noreferrer">開啟 Google 試算表</a>`);
+    expect(html).toContain("<h2>商品主檔（Google 試算表）</h2>");
+    expect(html).toContain(`<span class="mono">1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A</span>`);
+    expect(html).toContain("「商品主檔」分頁");
+    expect(html).toContain(`<span class="mono">sheet-writer@example-project.iam.gserviceaccount.com</span>`);
+    expect(html).not.toContain("尚未設定 Google 服務帳號憑證");
+    expect(html).not.toContain("無法產生連結");
+    expect(html.indexOf("<h2>狀態</h2>")).toBeLessThan(html.indexOf("<h2>商品主檔（Google 試算表）</h2>"));
+    expect(html.indexOf("<h2>商品主檔（Google 試算表）</h2>")).toBeLessThan(html.indexOf("<h2>LINE 群組通知</h2>"));
+  });
+
+  it("試算表 ID 格式不合（spreadsheetUrl 為 null）：不出任何 docs.google.com 連結，改顯示警告，ID 仍以跳脫後的文字顯示", () => {
+    const html = renderSettingsPage(ctxOf(), view({ sheets: { ...view().sheets, spreadsheetId: 'bad id<"x"', spreadsheetUrl: null } }), accounts());
+    expect(html).not.toContain("docs.google.com");
+    expect(html).toContain("無法產生連結");
+    expect(html).toContain("bad id&lt;&quot;x&quot;");
+    expect(html).not.toContain('bad id<"x"');
+  });
+
+  it("憑證沒設定（serviceAccountEmail 為 null）：顯示警告、不顯示寫入帳號；連結照常", () => {
+    const html = renderSettingsPage(ctxOf(), view({ sheets: { ...view().sheets, serviceAccountEmail: null, configured: false } }), accounts());
+    expect(html).toContain("尚未設定 Google 服務帳號憑證");
+    expect(html).not.toContain("寫入帳號：");
+    expect(html).toContain(`href="https://docs.google.com/spreadsheets/d/1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A/edit"`);
+  });
+
+  it("分頁名稱、ID、服務帳號 Email 與網址都經過 escapeHtml（不會把 HTML 或屬性注入頁面）", () => {
+    const html = renderSettingsPage(
+      ctxOf(),
+      view({ sheets: { spreadsheetId: 'id"><script>', sheetName: "<b>主檔</b>", spreadsheetUrl: 'https://docs.google.com/spreadsheets/d/x"onmouseover="1/edit', serviceAccountEmail: "<i>sa</i>@x", configured: true } }),
+      accounts(),
+    );
+    expect(html).not.toContain("<b>主檔</b>");
+    expect(html).toContain("&lt;b&gt;主檔&lt;/b&gt;");
+    expect(html).not.toContain('id"><script>');
+    expect(html).toContain("id&quot;&gt;&lt;script&gt;");
+    expect(html).not.toContain('x"onmouseover="1');
+    expect(html).toContain("x&quot;onmouseover=&quot;1");
+    expect(html).not.toContain("<i>sa</i>");
+  });
+});
+
 describe("頁面內的 script 是固定字串：不含任何伺服器端插入的值", () => {
   const SENTINEL_A = "SENTINEL-A-<>\"'&`-0001";
   const SENTINEL_B = "SENTINEL-B-<>\"'&`-0002";
@@ -91,6 +176,7 @@ describe("頁面內的 script 是固定字串：不含任何伺服器端插入�
         updatedAt: tag,
       },
       captured: [{ groupId: `${tag}-cid`, groupName: `${tag}-cname`, eventType: `${tag}-event`, lastSeenAt: tag }],
+      sheets: { spreadsheetId: `${tag}-sid`, sheetName: `${tag}-sheet`, spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${tag}/edit`, serviceAccountEmail: `${tag}-sa`, configured: true },
     });
 
   const evilAdmins = (tag: string): AccountPublic[] => [
@@ -105,7 +191,7 @@ describe("頁面內的 script 是固定字串：不含任何伺服器端插入�
     renderLoginPage(ctxOf({ origin: tag, nonce: "n1" }), `/${tag}`),
     renderNoAccountsPage(ctxOf({ origin: tag, nonce: "n1" }), true),
     renderForbiddenPage(ctxOf({ origin: tag, nonce: "n1" }), { name: `${tag}-user-name`, role: "user" }),
-    renderAccountPage(ctxOf({ origin: tag, nonce: "n1" }), { name: `${tag}-me-name`, email: `${tag}-me-email`, role: "user" }),
+    renderAccountPage(ctxOf({ origin: tag, nonce: "n1" }), { name: `${tag}-me-name`, email: `${tag}-me-email`, role: "user" }, { spreadsheetId: `${tag}-sid`, sheetName: `${tag}-sheet`, spreadsheetUrl: `https://docs.google.com/spreadsheets/d/${tag}/edit`, serviceAccountEmail: `${tag}-sa`, configured: true }),
     renderSettingsPage(ctxOf({ origin: tag, nonce: "n1" }), { ...evilView(tag), me: { id: ME_ID, name: `${tag}-me-name`, email: `${tag}-me-email`, role: "admin" } }, evilAdmins(tag)),
   ];
 
@@ -196,7 +282,7 @@ describe("頁面共通", () => {
       (insecure: boolean) => renderLoginPage(ctxOf({ insecure })),
       (insecure: boolean) => renderNoAccountsPage(ctxOf({ insecure }), false),
       (insecure: boolean) => renderForbiddenPage(ctxOf({ insecure }), { name: "甲", role: "user" }),
-      (insecure: boolean) => renderAccountPage(ctxOf({ insecure }), { name: "甲", email: "a@example.test", role: "user" }),
+      (insecure: boolean) => renderAccountPage(ctxOf({ insecure }), { name: "甲", email: "a@example.test", role: "user" }, view().sheets),
       (insecure: boolean) => renderSettingsPage(ctxOf({ insecure }), view(), accounts()),
     ]) {
       expect(render(true)).toContain('id="insecure-notice"');
@@ -299,7 +385,7 @@ describe("各頁面的表單欄位", () => {
   });
 
   it("我的帳號頁：姓名、Email、角色（唯讀）與「密碼由管理員統一設定，需要變更請洽管理員」；沒有任何表單；導覽（管理員才有「設定」連結，沒有「我的帳號」連結——就在這頁）", () => {
-    const user = renderAccountPage(ctxOf(), { name: "小明", email: "ming@example.test", role: "user" });
+    const user = renderAccountPage(ctxOf(), { name: "小明", email: "ming@example.test", role: "user" }, view().sheets);
     expect(user).toContain('<strong id="me-name">小明</strong>');
     expect(user).toContain('<strong id="me-email" class="mono">ming@example.test</strong>');
     expect(user).toContain('<strong id="me-role">一般使用者</strong>');
@@ -312,7 +398,7 @@ describe("各頁面的表單欄位", () => {
     expect(user).not.toContain('href="/settings"');
     expect(user).not.toContain('href="/account"');
     expect(user).toContain('href="/"');
-    const admin = renderAccountPage(ctxOf(), { name: "老闆", email: "boss@example.test", role: "admin" });
+    const admin = renderAccountPage(ctxOf(), { name: "老闆", email: "boss@example.test", role: "admin" }, view().sheets);
     expect(admin).toContain('<strong id="me-role">管理員</strong>');
     expect(admin).toContain('href="/settings"');
     expect(admin).toContain("密碼由管理員統一設定，需要變更請洽管理員");
@@ -320,7 +406,7 @@ describe("各頁面的表單欄位", () => {
   });
 
   it("我的帳號頁的姓名與 Email 一律跳脫（含 script 標籤與引號）", () => {
-    const html = renderAccountPage(ctxOf(), { name: '<img src=x onerror=alert(1)>"\'', email: '"><svg onload=1>@example.test', role: "user" });
+    const html = renderAccountPage(ctxOf(), { name: '<img src=x onerror=alert(1)>"\'', email: '"><svg onload=1>@example.test', role: "user" }, view().sheets);
     expect(html).not.toContain("<img src=x");
     expect(html).not.toContain("<svg");
     expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;&quot;&#39;");

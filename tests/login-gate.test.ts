@@ -283,6 +283,20 @@ describe("GET /account（我的帳號）", () => {
 
   const NOTE = "密碼由管理員統一設定，需要變更請洽管理員";
 
+  it("任一角色都看到「商品主檔（Google 試算表）」連結（指向環境變數／預設的試算表 ID）；不顯示服務帳號 Email，也沒有表單", async () => {
+    const ctx = await makeApp();
+    for (const id of [USER, TEST_ADMIN_ID]) {
+      const res = await page(ctx, "/account", id);
+      expect(res.status, id).toBe(200);
+      const html = await res.text();
+      expect(html, id).toContain("<h2>商品主檔（Google 試算表）</h2>");
+      expect(html, id).toContain('<a class="btn primary" href="https://docs.google.com/spreadsheets/d/1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A/edit" target="_blank" rel="noopener noreferrer">開啟 Google 試算表</a>');
+      expect(html, id).toContain("「商品主檔」分頁");
+      expect(html, id).not.toContain("iam.gserviceaccount.com");
+      expect(html, id).not.toMatch(/<form|<input|<textarea|<select/);
+    }
+  });
+
   it("一般使用者：看到自己的姓名、Email、角色與「密碼由管理員統一設定」的說明；沒有任何表單或輸入欄位、沒有「設定」連結、沒有其他人的資料", async () => {
     const ctx = await makeApp();
     const res = await page(ctx, "/account", USER);
