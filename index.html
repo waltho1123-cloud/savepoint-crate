@@ -301,6 +301,8 @@ body {
   font-size: 2.2rem;
   margin-bottom: 10px;
 }
+.scanner-placeholder .hint-blocked { font-weight: 600; }
+.manual-input-row input:disabled { opacity: .5; cursor: not-allowed; }
 
 /* ===== Scan list ===== */
 .scan-list { list-style: none; }
@@ -683,13 +685,13 @@ body {
       </div>
     </div>
 
-    <!-- Camera OCR -->
-    <div class="card" id="scanner-card" style="display:none">
+    <!-- Camera OCR：一直顯示；沒有開放中的箱號時停用控制項並提示「請先新增箱號」（見 renderCurrentBox／setScannerEnabled） -->
+    <div class="card" id="scanner-card">
       <div class="card-title">📷 拍照辨識</div>
       <div class="scanner-area" id="scanner-area">
         <div class="scanner-placeholder" id="scanner-placeholder">
           <div class="icon">📷</div>
-          <div>點擊下方按鈕開啟相機</div>
+          <div id="scanner-hint">點擊下方按鈕開啟相機</div>
         </div>
         <video id="camera-video" autoplay playsinline style="display:none"></video>
       </div>
@@ -1245,6 +1247,11 @@ document.getElementById('btn-close-box').addEventListener('click', () => {
 
 // Scanner (Camera)
 document.getElementById('btn-start-scan').addEventListener('click', async () => {
+  const box = BoxManager.getCurrentBox();
+  if (!box || box.status === 'closed') {
+    showToast('請先建立或選擇一個開放中的箱號', 'error');
+    return;
+  }
   const videoEl = document.getElementById('camera-video');
   try {
     document.getElementById('scanner-placeholder').style.display = 'none';
@@ -1640,12 +1647,15 @@ function renderCurrentBox() {
   const itemListCard = document.getElementById('item-list-card');
   const box = BoxManager.getCurrentBox();
 
+  // 掃描卡片一直顯示；沒有開放中的箱號時停用控制項、把提示換成「請先新增箱號」（各控制項自己也再擋一次）
+  scannerCard.style.display = '';
+
   if (!box) {
     banner.style.display = 'none';
-    scannerCard.style.display = 'none';
     itemListCard.style.display = 'none';
     CameraEngine.stop(document.getElementById('camera-video'));
     resetScannerUI();
+    setScannerEnabled(false, '請先新增箱號');
     return;
   }
 
@@ -1655,17 +1665,27 @@ function renderCurrentBox() {
   if (box.status === 'open') {
     statusEl.textContent = '開放中';
     statusEl.className = 'box-status status-open';
-    scannerCard.style.display = '';
     document.getElementById('btn-close-box').style.display = '';
+    setScannerEnabled(true, '點擊下方按鈕開啟相機');
   } else {
     statusEl.textContent = '已完成';
     statusEl.className = 'box-status status-closed';
-    scannerCard.style.display = 'none';
     document.getElementById('btn-close-box').style.display = 'none';
     CameraEngine.stop(document.getElementById('camera-video'));
     resetScannerUI();
+    setScannerEnabled(false, '此箱已完成，請新增箱號或切換到開放中的箱號');
   }
   itemListCard.style.display = '';
+}
+
+/** 掃描卡片的可用狀態：enabled=false 時停用「開啟相機」與手動輸入，並把相機區的提示文字換成 hint。 */
+function setScannerEnabled(enabled, hint) {
+  const hintEl = document.getElementById('scanner-hint');
+  hintEl.textContent = hint;
+  hintEl.classList.toggle('hint-blocked', !enabled);
+  document.getElementById('btn-start-scan').disabled = !enabled;
+  document.getElementById('btn-add-manual').disabled = !enabled;
+  document.getElementById('input-manual-barcode').disabled = !enabled;
 }
 
 function resetScannerUI() {
