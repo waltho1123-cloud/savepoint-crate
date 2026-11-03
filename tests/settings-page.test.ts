@@ -519,7 +519,7 @@ describe("設定頁的「帳號管理」區塊", () => {
   it("503 頁（資料目錄不可用）：說明登入、裝箱程式、設定頁都暫時無法使用，只有 /healthz 與 LINE webhook 不受影響（不再說 OCR、存檔不受影響）", () => {
     const html = renderUnavailablePage(ctxOf());
     expect(html).toContain("<h2>目前無法使用</h2>");
-    expect(html).toContain("請在 Zeabur 掛載 Volume 到 /app/data");
+    expect(html).toContain("請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data");
     expect(html).toContain("登入、裝箱程式（OCR 辨識、存檔到商品主檔、關箱通知）與設定頁目前都無法使用");
     expect(html).toContain('<span class="mono">/healthz</span> 與 LINE webhook 不受影響');
     expect(html).not.toContain("都不受影響"); // 舊的說法：OCR、存檔、LINE 通知都不受影響

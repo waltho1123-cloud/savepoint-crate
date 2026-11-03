@@ -433,7 +433,7 @@ export function renderUnavailablePage(ctx: PageContext): string {
     `<section class="card">
 <h2>目前無法使用</h2>
 <p class="msg err">${escapeHtml(DATA_DIR_UNAVAILABLE_MESSAGE)}</p>
-<p class="muted">帳號與設定需要一個「重新部署後仍會保留」的資料目錄；沒有它就沒有地方存帳號，所以登入、裝箱程式（OCR 辨識、存檔到商品主檔、關箱通知）與設定頁目前都無法使用。請管理員在 Zeabur Dashboard 開啟這個服務 → 「硬碟（Volume）」→ 新增，掛載路徑填 <span class="mono">/app/data</span>；儲存後服務會重新啟動，再重新整理這一頁。</p>
+<p class="muted">帳號與設定需要一個「重新部署後仍會保留」的資料目錄；沒有它就沒有地方存帳號，所以登入、裝箱程式（OCR 辨識、存檔到商品主檔、關箱通知）與設定頁目前都無法使用。請管理員在 Coolify 開啟這個應用 → 「持久化儲存（Persistent Storage）」→ 新增 Volume，掛載路徑填 <span class="mono">/app/data</span>；儲存後重新部署（Redeploy），再重新整理這一頁。</p>
 <p class="muted">服務本身仍在運作：<span class="mono">/healthz</span> 與 LINE webhook 不受影響。</p>
 </section>`,
   );
@@ -444,7 +444,7 @@ export function renderSetupPage(ctx: PageContext): string {
     ctx,
     `<section class="card">
 <h2>第一次使用：建立第一位管理員</h2>
-<p class="muted">請輸入服務啟動時寫在記錄（Zeabur：服務 → 記錄）裡的設定碼——找「[settings] 尚未設定管理密碼」那一行。設定碼只存在記憶體，每次服務重新啟動都會產生新的一組。</p>
+<p class="muted">請輸入服務啟動時寫在記錄（Coolify：應用 → Logs）裡的設定碼——找「[settings] 尚未設定管理密碼」那一行。設定碼只存在記憶體，每次服務重新啟動都會產生新的一組。</p>
 <form id="setup-form" autocomplete="off">
 <label for="setup-code">設定碼</label>
 <input type="text" id="setup-code" placeholder="XXXX-XXXX" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="20" required>
@@ -599,7 +599,7 @@ function renderStatus(view: SettingsView): string {
   chips.push(chip("", `帳號：${view.accountCount} 個（管理員 ${view.adminCount} 位）`));
   const mountWarning =
     view.dataDirWritable && view.dataDirMounted === false
-      ? `<p class="note warn">這個資料目錄看起來不是掛載的 Volume，服務重新部署後設定會消失。請在 Zeabur 掛載 Volume 到 <span class="mono">/app/data</span>。</p>`
+      ? `<p class="note warn">這個資料目錄看起來不是掛載的 Volume，服務重新部署後設定會消失。請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 <span class="mono">/app/data</span>。</p>`
       : "";
   return `<section class="card">
 <h2>狀態</h2>
@@ -625,7 +625,7 @@ ${link}
 <p class="muted">試算表 ID：<span class="mono">${escapeHtml(sheets.spreadsheetId)}</span></p>
 <p class="muted">分頁名稱：<span class="mono">${escapeHtml(sheets.sheetName)}</span></p>
 ${account}
-<p class="muted">要改用別的試算表，請在 Zeabur 修改環境變數 <span class="mono">GOOGLE_SHEET_ID</span>／<span class="mono">GOOGLE_SHEET_NAME</span> 後重新部署。</p>
+<p class="muted">要改用別的試算表，請在 Coolify 的環境變數（Environment Variables）修改 <span class="mono">GOOGLE_SHEET_ID</span>／<span class="mono">GOOGLE_SHEET_NAME</span> 後重新部署。</p>
 </section>`;
 }
 

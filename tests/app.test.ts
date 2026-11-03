@@ -665,7 +665,7 @@ describe("登入閘門：OCR、存檔、關箱通知一定要登入（任一角�
     for (const [path, body] of PROTECTED) {
       const res = await post(app, path, body);
       expect(res.status, path).toBe(503);
-      expect(await res.json()).toEqual({ success: false, error: "請在 Zeabur 掛載 Volume 到 /app/data" });
+      expect(await res.json()).toEqual({ success: false, error: "請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data" });
     }
   });
 });

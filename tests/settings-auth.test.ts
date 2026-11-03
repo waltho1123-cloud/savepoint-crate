@@ -856,7 +856,7 @@ describe("資料目錄不可用", () => {
     expect(res.status).toBe(503);
     expect(res.headers.get("content-security-policy")).toContain("default-src 'none'");
     const html = await res.text();
-    expect(html).toContain("請在 Zeabur 掛載 Volume 到 /app/data");
+    expect(html).toContain("請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data");
     for (const id of ["setup-form", "login-form", "upgrade-form"]) expect(html).not.toContain(`id="${id}"`);
   });
 
@@ -874,11 +874,11 @@ describe("資料目錄不可用", () => {
     ["POST", `/api/accounts/${TEST_ADMIN_ID}/password`, { newPassword: GOOD_PASSWORD }],
     ["POST", `/api/accounts/${TEST_ADMIN_ID}/status`, { status: "disabled" }],
     ["DELETE", `/api/accounts/${TEST_ADMIN_ID}`, undefined],
-  ] as Array<[string, string, unknown]>)("%s %s → 503「請在 Zeabur 掛載 Volume 到 /app/data」", async (method, path, body) => {
+  ] as Array<[string, string, unknown]>)("%s %s → 503「請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data」", async (method, path, body) => {
     const ctx = await makeSettingsApp({ store: "unavailable" });
     const res = await call(ctx.app, method, path, body);
     expect(res.status).toBe(503);
-    expect(await res.json()).toEqual({ success: false, error: "請在 Zeabur 掛載 Volume 到 /app/data" });
+    expect(await res.json()).toEqual({ success: false, error: "請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data" });
     expect(ctx.calls).toHaveLength(0);
   });
 
@@ -892,11 +892,11 @@ describe("資料目錄不可用", () => {
     expectRedirectToLogin(await ctx.app.request("/"), "/");
     const login = await ctx.app.request("/login");
     expect(login.status).toBe(503);
-    expect(await login.text()).toContain("請在 Zeabur 掛載 Volume 到 /app/data");
+    expect(await login.text()).toContain("請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data");
     for (const path of ["/api/ocr", "/api/save", "/api/box-closed"]) {
       const res = await call(ctx.app, "POST", path, { boxId: "B1", items: [], total: 0, successCount: 0, failedCount: 0 });
       expect(res.status, path).toBe(503);
-      expect(await res.json()).toEqual({ success: false, error: "請在 Zeabur 掛載 Volume 到 /app/data" });
+      expect(await res.json()).toEqual({ success: false, error: "請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data" });
     }
     expect(ctx.calls).toHaveLength(0);
   });
