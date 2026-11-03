@@ -674,8 +674,8 @@ describe("SettingsStore：資料目錄不可用", () => {
     await expect(store.update(() => undefined)).rejects.toMatchObject({ status: 503, message: DATA_DIR_UNAVAILABLE_MESSAGE });
   });
 
-  it("訊息固定是「請在 Zeabur 掛載 Volume 到 /app/data」", () => {
-    expect(DATA_DIR_UNAVAILABLE_MESSAGE).toBe("請在 Zeabur 掛載 Volume 到 /app/data");
+  it("訊息固定是「請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data」", () => {
+    expect(DATA_DIR_UNAVAILABLE_MESSAGE).toBe("請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data");
   });
 
   it("資料目錄的上層是一般檔案（建不了目錄）：不可用，log 有 error 與掛載 Volume 的提示，不丟例外", async () => {
@@ -687,7 +687,7 @@ describe("SettingsStore：資料目錄不可用", () => {
     expect(store.writable).toBe(false);
     const text = log.lines.join("\n");
     expect(text).toContain("不可用");
-    expect(text).toContain("請在 Zeabur 掛載 Volume 到 /app/data");
+    expect(text).toContain("請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data");
     // 全站登入之後沒有地方存帳號：整個網站停用（不是只有設定頁），只有 /healthz 與 LINE webhook 照常
     expect(text).toContain("整個網站停用");
     expect(text).toContain("登入頁、裝箱主頁、OCR、存檔、關箱通知、設定頁都回 503");

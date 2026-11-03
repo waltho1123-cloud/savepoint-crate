@@ -166,7 +166,7 @@ describe("GET /login", () => {
     const ctx = await makeSettingsApp({ store: "unavailable" });
     const res = await ctx.app.request("/login");
     expect(res.status).toBe(503);
-    expect(await res.text()).toContain("請在 Zeabur 掛載 Volume 到 /app/data");
+    expect(await res.text()).toContain("請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data");
   });
 
   it("其他方法：405 並註明 Allow（GET, POST）", async () => {

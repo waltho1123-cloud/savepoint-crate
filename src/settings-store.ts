@@ -23,7 +23,7 @@ import { describeError, ServiceError, type Logger } from "./common.js";
  */
 
 /** 資料目錄不可用時，設定相關端點回的訊息（Zeabur 上要掛 Volume 的位置固定是 /app/data）。 */
-export const DATA_DIR_UNAVAILABLE_MESSAGE = "請在 Zeabur 掛載 Volume 到 /app/data";
+export const DATA_DIR_UNAVAILABLE_MESSAGE = "請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data";
 
 export const SETTINGS_FILE_NAME = "settings.json";
 /** 目前的檔案格式版本（帳號含角色）。 */

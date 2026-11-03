@@ -340,13 +340,13 @@ describe("設定頁在真實行程裡的其他情況", () => {
       { preload: lineStubPreload },
     );
     try {
-      expect(server.output()).toContain("請在 Zeabur 掛載 Volume 到 /app/data");
+      expect(server.output()).toContain("請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data");
       const health = (await (await fetch(`${server.base}/healthz`)).json()) as Record<string, unknown>;
       expect(health).toMatchObject({ dataDirWritable: false, adminConfigured: false, adminCount: 0, accountCount: 0, legacyAdminPending: false, lineConfigured: true, lineSource: "env" });
 
       const page = await fetch(`${server.base}/settings`);
       expect(page.status).toBe(503);
-      expect(await page.text()).toContain("請在 Zeabur 掛載 Volume 到 /app/data");
+      expect(await page.text()).toContain("請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data");
       expect((await api(server.base, "GET", "/api/settings")).status).toBe(503);
       expect((await api(server.base, "GET", "/api/accounts")).status).toBe(503);
       expect((await api(server.base, "POST", "/settings/setup", { setupCode: "ABCD-EFGH", name: "甲", email: "a@example.test", password: PASSWORD })).status).toBe(503);
@@ -355,7 +355,7 @@ describe("設定頁在真實行程裡的其他情況", () => {
       // 全站登入：沒有地方存帳號就沒有人登入得了，整個網站（含關箱通知）回 503 與掛載 Volume 的說明；/healthz 仍然公開
       const notify = await api(server.base, "POST", "/api/box-closed", { boxId: "B1", items: [], total: 0, successCount: 0, failedCount: 0 });
       expect(notify.status).toBe(503);
-      expect(notify.json).toEqual({ success: false, error: "請在 Zeabur 掛載 Volume 到 /app/data" });
+      expect(notify.json).toEqual({ success: false, error: "請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data" });
       expect((await fetch(`${server.base}/`, { redirect: "manual" })).status).toBe(302);
       expect((await fetch(`${server.base}/login`)).status).toBe(503);
       expect(readStubLog(stubLog).filter((c) => c.url.endsWith("/message/push"))).toHaveLength(0);
