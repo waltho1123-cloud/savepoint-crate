@@ -52,7 +52,7 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 | 429 | 同一個 IP 一分鐘內超過額度：`/api/ocr` 60 次、`/api/save` 600 次、`/api/box-closed` 60 次、`/api/line/webhook` 120 次，`/api/settings*`、`/api/accounts*` 與 `/api/me` 共用 60 次，五個額度各自計算（其他 `/api/*` 路徑算進 OCR 的額度）；登入頁另有更嚴的限制：建立第一位管理員 5 次、登入／升級共用 10 次、測試訊息 6 次；沒登入的 OCR／存檔／關箱通知請求在限流之前就被 401 擋下，其他沒登入的 `/api/*` 請求（`/api/me`、設定與帳號 API 的探測、不存在的路徑）算在另一組「匿名」額度，兩者都不會吃掉同一個出口 IP 上已登入同事的額度；另外 scrypt（密碼雜湊／驗證）同時最多跑 2 個、排隊 16 個，超過直接回 429「目前驗證請求過多，請稍後再試」；兩種 429 都帶 `Retry-After`（秒） |
 | 500 | 試算表／憑證設定問題：表頭缺必要欄位（訊息會列出缺哪欄）、服務帳號沒有權限或憑證無效、找不到試算表或分頁 |
 | 502 | OpenAI 或 Google 暫時失敗（OCR 已自動重試一次）、OpenAI 回傳內容無法解析 |
-| 503 | 伺服器尚未設定 `OPENAI_API_KEY`（OCR）或 Google 憑證（存檔）；或同時排隊等待寫入的存檔超過 50 筆；或 `/api/line/webhook` 沒有 channel secret（webhook 未啟用）；或資料目錄不可用（沒有地方存帳號，沒有人登入得了）時的登入頁、設定頁、OCR、存檔、關箱通知與各 API（訊息「請在 Zeabur 掛載 Volume 到 /app/data」是程式內寫死的舊字樣，意思是把持久儲存掛到 `/app/data`；`/healthz` 與 LINE webhook 不受影響） |
+| 503 | 伺服器尚未設定 `OPENAI_API_KEY`（OCR）或 Google 憑證（存檔）；或同時排隊等待寫入的存檔超過 50 筆；或 `/api/line/webhook` 沒有 channel secret（webhook 未啟用）；或資料目錄不可用（沒有地方存帳號，沒有人登入得了）時的登入頁、設定頁、OCR、存檔、關箱通知與各 API（訊息是「請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data」；`/healthz` 與 LINE webhook 不受影響） |
 
 ## 環境變數
 
@@ -95,11 +95,11 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 
 **全站要登入**：每個人用自己的帳號（Email＋密碼）登入，才能使用裝箱程式（主頁、辨識、存檔、關箱通知）。帳號與 LINE 設定都存在資料目錄 `DATA_DIR`（容器裡是 `/app/data`）的 `settings.json`，所以**一定要在 Coolify 把持久儲存（Volume）掛到 `/app/data`**（見下面「在 Coolify 掛載 Volume」）。`/settings` 是管理員用的設定頁：設定 LINE 群組通知（Channel access token、Channel secret、群組 ID、開關）、一鍵從「最近收到的群組」帶入群組 ID、發測試訊息，也可以建立與管理所有人的帳號與角色——**不必改環境變數、不必重新部署**，存檔立刻生效。
 
-**沒有 Volume（資料目錄不存在或寫不進去）時沒有地方存帳號，所以沒有人登入得了：登入頁、設定頁、OCR、存檔、關箱通知全部回 503「請在 Zeabur 掛載 Volume 到 /app/data」**（這句是程式內寫死的舊字樣，意思是把持久儲存掛到 `/app/data`；`/healthz` 與 LINE webhook 仍然可用，`/healthz` 的 `dataDirWritable` 會告訴你原因）。以前沒有 Volume 時 OCR 與存檔仍可使用，全站登入之後不是了——上線前請先確認 Volume 掛好。
+**沒有 Volume（資料目錄不存在或寫不進去）時沒有地方存帳號，所以沒有人登入得了：登入頁、設定頁、OCR、存檔、關箱通知全部回 503「請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data」**（`/healthz` 與 LINE webhook 仍然可用，`/healthz` 的 `dataDirWritable` 會告訴你原因）。以前沒有 Volume 時 OCR 與存檔仍可使用，全站登入之後不是了——上線前請先確認 Volume 掛好。
 
 ### 在 Coolify 掛載 Volume
 
-在 Coolify 主控台操作（要用管理者帳號登入）。設定頁與錯誤訊息裡仍有舊平台（Zeabur）的操作字樣（程式內寫死），在 Coolify 上請改照本節與下面「部署」的做法：
+在 Coolify 主控台操作（要用管理者帳號登入）。設定頁與錯誤訊息裡的操作說明用的也是 Coolify 的用語（持久化儲存、環境變數、Logs），步驟如下：
 
 1. Coolify → 應用 `savepoint-crate` →「持久儲存（Persistent Storage）」→ 新增 Volume（正式站的儲存名稱是 `savepoint-crate-data`）。
 2. 掛載路徑填 `/app/data`，儲存後重新部署（Redeploy）讓它生效。
@@ -344,7 +344,7 @@ pnpm build && pnpm start    # 編譯到 dist/ 後以 node dist/server.js 啟動
 ```bash
 PORT=8099 OPENAI_API_KEY=x GOOGLE_SERVICE_ACCOUNT_CREDENTIALS=x node dist/server.js
 curl -s localhost:8099/healthz
-curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{}'   # 503 或 401：全站要登入（沒有資料目錄時 503「請在 Zeabur 掛載 Volume 到 /app/data」〔程式內寫死的舊字樣〕，有資料目錄但沒登入時 401「請先登入」）
+curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{}'   # 503 或 401：全站要登入（沒有資料目錄時 503「請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data」，有資料目錄但沒登入時 401「請先登入」）
 ```
 
 ## 部署（Vultr＋Coolify，2026-10-18 起）
