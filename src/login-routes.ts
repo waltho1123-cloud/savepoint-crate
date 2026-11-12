@@ -94,12 +94,17 @@ export function registerLoginRoutes(app: Hono, kit: AuthKit, options: LoginRoute
 
   // ---------------------------------------------------------------- 從 WIWI Hub 單一登入
   // 不放在 /api/ 底下（避開該前綴的逐 IP 限流）；SSO 路徑不經密碼登入的失敗鎖定，也不套逐 IP 額度。
-  // 票證與 email 不寫進 log。導向一律用相對路徑（反向代理後 request 的 host 是容器內部位址）。
+  // 票證不寫進 log（成功時的審計行比照密碼登入記本地帳號 email）。導向一律用相對路徑（反向代理後 request 的 host 是容器內部位址）。
   app.get("/sso/callback", async (c) => {
     c.header("Cache-Control", "no-store");
     const secret = (process.env.HUB_JWT_SECRET ?? "").trim(); // 每次請求現讀；絕不退回使用本系統自己的 session 密鑰
     if (secret === "") return c.json({ success: false, error: "Not Found" }, 404);
-    const fail = (code: "invalid" | "no_account") => c.redirect(`/login?sso=${code}`, 302);
+    // 走進接票流程就結束舊登入：失敗時一併清掉既有的 sp_session，避免「失敗卻以前一個人的身分繼續用」，
+    // 也讓 GET /login 不會因為「已登入」把人彈回系統內而看不到 ?sso= 提示（404 路徑在上面已先回，沒有任何 Set-Cookie）。
+    const fail = (code: "invalid" | "no_account") => {
+      kit.clearSession(c);
+      return c.redirect(`/login?sso=${code}`, 302);
+    };
     const tokens = c.req.queries("sso_token");
     if (!tokens || tokens.length !== 1) return fail("invalid");
     const email = verifyHubToken(tokens[0], secret, now());

@@ -31,6 +31,10 @@ function parseJsonObject(bytes: Buffer): Record<string, unknown> | null {
   return value as Record<string, unknown>;
 }
 
+// 原始 email 字串（trim 之前）只要含格式字元（Cf，例如 U+200B、U+202E、BOM U+FEFF）或孤立代理對就視為無效，
+// 不讓 trim 把邊緣的 BOM 之類吃掉再放行；控制字元（Cc）由後面的 ASCII 白名單格式檢查擋下（\t\n\r 在邊緣會被 trim，其餘 Cc 一律不合法）。
+const FORMAT_OR_SURROGATE_RE = /\p{Cf}|\p{Cs}/u;
+
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
@@ -60,6 +64,7 @@ function verify(token: unknown, secret: string, nowMs: number): string | null {
   if (iat !== undefined) {
     if (!isFiniteNumber(iat) || iat > nowSeconds + CLOCK_SKEW_SECONDS || exp - iat > MAX_LIFETIME_SECONDS) return null;
   }
+  if (typeof claims.email !== "string" || FORMAT_OR_SURROGATE_RE.test(claims.email)) return null;
   return normalizeEmail(claims.email);
 }
 

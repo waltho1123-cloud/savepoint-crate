@@ -8,6 +8,7 @@ import { SettingsStore } from "../src/settings-store.js";
 import {
   accountId,
   cleanupTempDirs,
+  cookieAttributes,
   cookiePair,
   makeAccount,
   makeSettingsApp,
@@ -48,6 +49,10 @@ function rawPayloadToken(payload: Buffer | string): string {
   const headerPart = b64(JSON.stringify({ alg: "HS256" }));
   const payloadPart = b64(payload);
   return `${headerPart}.${payloadPart}.${sign(headerPart, payloadPart)}`;
+}
+/** 失敗回應不得發出有效的 session：最多只有「清除 sp_session」（空值）的 Set-Cookie。 */
+function expectNoSessionIssued(res: Response): void {
+  for (const c of res.headers.getSetCookie()) expect(c.startsWith(`${SESSION_COOKIE_NAME}=;`) && c.includes("Max-Age=0"), c).toBe(true);
 }
 const verify = (token: unknown, nowMs = NOW_MS) => verifyHubToken(token, SECRET, nowMs);
 
@@ -156,6 +161,95 @@ describe("verifyHubToken（規格 2–5）", () => {
     }
   });
 
+  it("R3：email 含 Cc（含 C1 的 U+0085、U+009B）、Cf（U+200B、U+202E）或孤立代理對一律無效；前後的控制／格式字元也不能靠 trim 蒙混", () => {
+    const bad = ["\u0085", "\u009b", "\u200b", "\u202e", "\ud800", "\udc00", "\u0000", "\u007f", "\ufeff", "\u2060"];
+    for (const ch of bad) {
+      for (const email of [`us${ch}er@example.test`, `${ch}user@example.test`, `user${ch}@example.test`, `user@exa${ch}mple.test`, `user@example.test${ch}`]) {
+        expect(verify(makeToken({ email })), JSON.stringify(email)).toBeNull();
+      }
+    }
+  });
+
+  it("email 總長度邊界：254 通過、255 拒絕（本地部分與網域各段都在各自上限內，只有總長度不同）", () => {
+    const label = "b".repeat(63);
+    const local = "a".repeat(64);
+    const e254 = `${local}@${label}.${label}.${"c".repeat(61)}`;
+    expect(e254.length).toBe(254);
+    expect(verify(makeToken({ email: e254 }))).toBe(e254);
+    const e255 = `${e254}c`;
+    expect(e255.length).toBe(255);
+    expect(verify(makeToken({ email: e255 }))).toBeNull();
+  });
+
+  it("R5：深層巢狀 JSON 在長度上限內也只回 null／email，不丟例外（header 段與 payload 段各一；payload 用正確簽章才進得到解析）", () => {
+    const depth = 1400;
+    const deep = `${"[".repeat(depth)}${"]".repeat(depth)}`;
+    // payload 段：整個 payload 是深層陣列（簽章正確 → 進到 JSON 解析 → 不是物件 → null）
+    const deepPayload = rawPayloadToken(deep);
+    expect(deepPayload.length).toBeLessThanOrEqual(HUB_TOKEN_MAX_LENGTH);
+    expect(() => verify(deepPayload)).not.toThrow();
+    expect(verify(deepPayload)).toBeNull();
+    // 物件裡面巢狀很深、其餘 claims 合法：解析得過，採用 email（巢狀欄位被忽略）
+    const claimsWithDeep = `{"a":${deep},"iss":"wiwi-hub","aud":"savepoint-crate","exp":${NOW_S + 60},"email":"${USER_EMAIL}"}`;
+    const nested = rawPayloadToken(claimsWithDeep);
+    expect(nested.length).toBeLessThanOrEqual(HUB_TOKEN_MAX_LENGTH);
+    expect(verify(nested)).toBe(USER_EMAIL);
+    // header 段：整個 header 是深層陣列／物件（簽章對 header.payload 字串算，所以簽章也正確）
+    for (const headerJson of [deep, `{"alg":"HS256","x":${deep}}`.replace('"alg":"HS256",', '"alg":"none",')]) {
+      const h = b64(headerJson);
+      const p = b64(JSON.stringify({ iss: "wiwi-hub", aud: "savepoint-crate", exp: NOW_S + 60, email: USER_EMAIL }));
+      const token = `${h}.${p}.${sign(h, p)}`;
+      expect(token.length).toBeLessThanOrEqual(HUB_TOKEN_MAX_LENGTH);
+      expect(() => verify(token)).not.toThrow();
+      expect(verify(token)).toBeNull();
+    }
+  });
+
+  it("R5：長度上限邊界——其他條件全部合法，剛好 4096 通過、超過上限被拒", () => {
+    /** 組一張簽章正確、claims 合法、總長剛好是 target 的票（用 payload 的填充欄位與 header 的空白微調）。 */
+    function tokenOfLength(target: number): string {
+      for (let headerSpaces = 0; headerSpaces < 3; headerSpaces += 1) {
+        const h = b64(`{"alg":"HS256"${" ".repeat(headerSpaces)}}`);
+        for (let pad = 0; pad < 4000; pad += 1) {
+          const p = b64(JSON.stringify({ iss: "wiwi-hub", aud: "savepoint-crate", exp: NOW_S + 60, email: USER_EMAIL, pad: "x".repeat(pad) }));
+          const length = h.length + p.length + 43 + 2;
+          if (length > target) break;
+          if (length === target) return `${h}.${p}.${sign(h, p)}`;
+        }
+      }
+      throw new Error(`組不出長度 ${target} 的票`);
+    }
+    const atLimit = tokenOfLength(HUB_TOKEN_MAX_LENGTH);
+    expect(atLimit.length).toBe(HUB_TOKEN_MAX_LENGTH);
+    expect(verify(atLimit)).toBe(USER_EMAIL);
+    const over = tokenOfLength(HUB_TOKEN_MAX_LENGTH + 1);
+    expect(over.length).toBe(HUB_TOKEN_MAX_LENGTH + 1);
+    expect(verify(over)).toBeNull();
+  });
+
+  it("R5：非 canonical base64url——只改最後一個字元的填充位元、解碼結果相同；payload／header 段重新簽章讓 HMAC 仍合法，仍須拒絕", () => {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    const sibling = (seg: string) => seg.slice(0, -1) + alphabet[(alphabet.indexOf(seg[seg.length - 1]!) + 1) % 64]!;
+    // payload：挑一個位元組數不是 3 的倍數的 JSON（最後一個字元帶未使用的位元）
+    let payloadJson = "";
+    for (let pad = 0; pad < 3; pad += 1) {
+      payloadJson = JSON.stringify({ iss: "wiwi-hub", aud: "savepoint-crate", exp: NOW_S + 60, email: USER_EMAIL, pad: "x".repeat(pad) });
+      if (Buffer.byteLength(payloadJson) % 3 !== 0) break;
+    }
+    const h = b64(JSON.stringify({ alg: "HS256" }));
+    const p = b64(payloadJson);
+    expect(verify(`${h}.${p}.${sign(h, p)}`)).toBe(USER_EMAIL);
+    const p2 = sibling(p);
+    expect(Buffer.from(p2, "base64url").equals(Buffer.from(p, "base64url"))).toBe(true);
+    expect(verify(`${h}.${p2}.${sign(h, p2)}`)).toBeNull();
+    // header 段同理：{"alg":"HS256"} 是 15 個位元組（3 的倍數），加一個空白變 16 個位元組
+    const hPad = b64('{"alg":"HS256" }');
+    expect(verify(`${hPad}.${p}.${sign(hPad, p)}`)).toBe(USER_EMAIL);
+    const hPad2 = sibling(hPad);
+    expect(Buffer.from(hPad2, "base64url").equals(Buffer.from(hPad, "base64url"))).toBe(true);
+    expect(verify(`${hPad2}.${p}.${sign(hPad2, p)}`)).toBeNull();
+  });
+
   it("惡意輸入一律回 null、不丟例外：深層巢狀、非 UTF-8、超大數字、NaN／Infinity、型別錯誤", () => {
     const deep = `${"[".repeat(100_000)}${"]".repeat(100_000)}`;
     const cases: Array<Buffer | string> = [
@@ -182,10 +276,6 @@ describe("verifyHubToken（規格 2–5）", () => {
       expect(() => verify(token)).not.toThrow();
       expect(verify(token)).toBeNull();
     }
-    // 巢狀很深但在長度上限內的票證
-    const nested = rawPayloadToken(`{"a":${"[".repeat(1200)}${"]".repeat(1200)},"iss":"wiwi-hub","aud":"savepoint-crate","exp":${NOW_S + 60},"email":"${USER_EMAIL}"}`);
-    expect(nested.length).toBeLessThanOrEqual(HUB_TOKEN_MAX_LENGTH);
-    expect(() => verify(nested)).not.toThrow();
     for (const weird of [{}, [], Symbol("x"), 1n, () => 1, new Proxy({}, { get: () => { throw new Error("boom"); } })]) {
       expect(() => verifyHubToken(weird, SECRET, NOW_MS)).not.toThrow();
       expect(verifyHubToken(weird, SECRET, NOW_MS)).toBeNull();
@@ -291,7 +381,7 @@ describe("GET /sso/callback", () => {
     const before = ctx.store.data.accounts.length;
     const none = await hit(ctx, tokenQuery(makeToken({ email: "nobody@example.test" })));
     expect(none.headers.get("location")).toBe("/login?sso=no_account");
-    expect(none.headers.getSetCookie()).toEqual([]);
+    expectNoSessionIssued(none);
     expect(ctx.store.data.accounts.length).toBe(before);
 
     await ctx.store.update((d) => {
@@ -299,7 +389,7 @@ describe("GET /sso/callback", () => {
     });
     const disabled = await hit(ctx, tokenQuery(makeToken()));
     expect(disabled.headers.get("location")).toBe("/login?sso=no_account");
-    expect(disabled.headers.getSetCookie()).toEqual([]);
+    expectNoSessionIssued(disabled);
 
     await ctx.store.update((d) => {
       const u = d.accounts.find((a) => a.id === USER_ID)!;
@@ -337,8 +427,56 @@ describe("GET /sso/callback", () => {
       const res = await hit(ctx, q);
       expect(res.status, q.slice(0, 40)).toBe(302);
       expect(res.headers.get("location")).toBe("/login?sso=invalid");
-      expect(res.headers.getSetCookie()).toEqual([]);
+      expectNoSessionIssued(res);
     }
+  });
+
+  it("R2：帶著另一個帳號的有效 session 走每一條失敗路徑 → 回應清掉 sp_session、導到登入頁，瀏覽器清 cookie 後看得到 ?sso= 提示", async () => {
+    const ctx = await makeApp();
+    const oldCookie = ctx.sessionCookie(TEST_ADMIN_ID);
+    // 對照：舊 cookie 沒被清掉時，/login 會把已登入的人彈回 /，提示永遠看不到（這就是要修的問題）
+    const bounced = await ctx.app.request("/login?sso=invalid", { headers: { cookie: oldCookie } });
+    expect(bounced.status).toBe(302);
+    expect(bounced.headers.get("location")).toBe("/");
+
+    const good = makeToken();
+    const paths: Array<[string, string, string]> = [
+      ["沒有 sso_token", "", "/login?sso=invalid"],
+      ["票數不對", `?sso_token=${good}&sso_token=${good}`, "/login?sso=invalid"],
+      ["假票", "?sso_token=abc.def.ghi", "/login?sso=invalid"],
+      ["錯密鑰", tokenQuery(makeToken({}, { secret: "wrong-fake-secret-0123456789" })), "/login?sso=invalid"],
+      ["查無帳號", tokenQuery(makeToken({ email: "nobody@example.test" })), "/login?sso=no_account"],
+    ];
+    for (const [name, query, location] of paths) {
+      const res = await hit(ctx, query, { cookie: oldCookie });
+      expect(res.status, name).toBe(302);
+      expect(res.headers.get("location"), name).toBe(location);
+      const cleared = res.headers.getSetCookie().filter((c) => c.startsWith(`${SESSION_COOKIE_NAME}=`));
+      expect(cleared.length, name).toBe(1);
+      const attrs = cookieAttributes(cleared[0]!);
+      expect(attrs[0], name).toBe(`${SESSION_COOKIE_NAME}=`);
+      expect(attrs, name).toContain("Path=/");
+      expect(attrs.some((a) => a === "Max-Age=0"), name).toBe(true);
+      // 瀏覽器照指示清掉 cookie 後，跟著導向去 /login：不會被彈走，看得到提示
+      const page = await ctx.app.request(location);
+      expect(page.status, name).toBe(200);
+      expect(await page.text(), name).toContain("sso-notice");
+    }
+    // 停用帳號
+    await ctx.store.update((d) => {
+      d.accounts.find((a) => a.id === USER_ID)!.status = "disabled";
+    });
+    const disabled = await hit(ctx, tokenQuery(good), { cookie: oldCookie });
+    expect(disabled.headers.get("location")).toBe("/login?sso=no_account");
+    expect(setCookieOf(disabled)!.startsWith(`${SESSION_COOKIE_NAME}=;`)).toBe(true);
+  });
+
+  it("R2：未設定密鑰的 404 路徑即使帶舊 cookie 也沒有任何 Set-Cookie", async () => {
+    const ctx = await makeApp();
+    delete process.env.HUB_JWT_SECRET;
+    const res = await hit(ctx, tokenQuery(makeToken()), { cookie: ctx.sessionCookie(TEST_ADMIN_ID) });
+    expect(res.status).toBe(404);
+    expect(res.headers.getSetCookie()).toEqual([]);
   });
 
   it("規格 9：忽略 next／redirect 之類的參數；Location 一律是相對路徑，不受 Host／X-Forwarded-Host 影響", async () => {
