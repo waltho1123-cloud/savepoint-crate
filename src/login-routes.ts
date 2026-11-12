@@ -4,6 +4,7 @@ import { emailForLog, normalizeEmail } from "./accounts.js";
 import { DUMMY_PASSWORD_HASH, PASSWORD_MAX_LENGTH, verifyPassword } from "./auth.js";
 import { LOGIN_FAILED_MESSAGE, safeNextPath, type AuthKit } from "./auth-kit.js";
 import { ServiceError } from "./common.js";
+import { findAccountByEmail, ssoNotice, verifyHubToken } from "./hub-sso.js";
 import { readJsonObject, readString } from "./http.js";
 import type { SheetsView } from "./line-settings.js";
 import { renderAccountPage, renderLoginPage, renderNoAccountsPage, renderUnavailablePage } from "./settings-page.js";
@@ -12,6 +13,8 @@ import { renderAccountPage, renderLoginPage, renderNoAccountsPage, renderUnavail
  * 登入閘門相關的路由（所有人、任一角色都用得到）：
  *
  *   GET  /login            → 登入頁（Email＋密碼）；已登入者導向 /；還沒有任何帳號時顯示「請管理員先到設定頁」
+ *   GET  /sso/callback     → 從 WIWI Hub 單一登入：驗 ?sso_token → 對應啟用中的本地帳號 → 發同一種 sp_session cookie → 302 /；
+ *                            失敗 302 /login?sso=invalid|no_account；HUB_JWT_SECRET 未設定回 404（見 hub-sso.ts）
  *   POST /login            → Email＋密碼登入，發 sp_session cookie，回 { success, next }（next 只接受同源的相對路徑）
  *   POST /logout           → 登出（清 cookie；伺服器不存 session，所以只清這個瀏覽器）
  *   GET  /api/me           → 目前登入者 { id, name, email, role }
@@ -40,7 +43,8 @@ export function registerLoginRoutes(app: Hono, kit: AuthKit, options: LoginRoute
       return c.redirect("/", 302);
     }
     const next = safeNextPath(c.req.query("next"));
-    return kit.html(c, 200, (ctx) => renderLoginPage(ctx, next));
+    const notice = ssoNotice(c.req.query("sso"));
+    return kit.html(c, 200, (ctx) => renderLoginPage(ctx, next, notice));
   });
 
   kit.mutate("post", "/login", async (c) => {
@@ -88,6 +92,50 @@ export function registerLoginRoutes(app: Hono, kit: AuthKit, options: LoginRoute
     return c.json({ success: true, next: safeNextPath(body.next) });
   });
 
+  // ---------------------------------------------------------------- 從 WIWI Hub 單一登入
+  // 不放在 /api/ 底下（避開該前綴的逐 IP 限流）；SSO 路徑不經密碼登入的失敗鎖定，也不套逐 IP 額度。
+  // 票證不寫進 log（成功時的審計行比照密碼登入記本地帳號 email）。導向一律用相對路徑（反向代理後 request 的 host 是容器內部位址）。
+  app.get("/sso/callback", async (c) => {
+    c.header("Cache-Control", "no-store");
+    const secret = (process.env.HUB_JWT_SECRET ?? "").trim(); // 每次請求現讀；絕不退回使用本系統自己的 session 密鑰
+    if (secret === "") return c.json({ success: false, error: "Not Found" }, 404);
+    // 走進接票流程就結束舊登入：失敗時一併清掉既有的 sp_session，避免「失敗卻以前一個人的身分繼續用」，
+    // 也讓 GET /login 不會因為「已登入」把人彈回系統內而看不到 ?sso= 提示（404 路徑在上面已先回，沒有任何 Set-Cookie）。
+    const fail = (code: "invalid" | "no_account") => {
+      kit.clearSession(c);
+      return c.redirect(`/login?sso=${code}`, 302);
+    };
+    const tokens = c.req.queries("sso_token");
+    if (!tokens || tokens.length !== 1) return fail("invalid");
+    const email = verifyHubToken(tokens[0], secret, now());
+    if (email === null) return fail("invalid");
+    if (!settings.writable) return fail("no_account");
+    const account = findAccountByEmail(settings.data.accounts, email);
+    if (!account || account.status !== "active") return fail("no_account");
+    const iso = new Date(now()).toISOString();
+    let sessionVersion = account.sessionVersion;
+    try {
+      await settings.update((draft) => {
+        // 鎖內重新確認：期間帳號被停用或刪除，這次登入就作廢
+        const live = draft.accounts.find((candidate) => candidate.id === account.id);
+        if (!live || live.status !== "active") throw new ServiceError(401, LOGIN_FAILED_MESSAGE);
+        live.lastLoginAt = iso;
+        sessionVersion = live.sessionVersion;
+      });
+    } catch (error) {
+      if (!(error instanceof ServiceError)) throw error;
+      if (error.status !== 500) return fail("no_account");
+      // 寫檔失敗：lastLoginAt 只是方便查看的紀錄，登入本身不因它失敗（與密碼登入相同）；再確認一次帳號此刻仍然有效
+      const live = settings.data.accounts.find((candidate) => candidate.id === account.id);
+      if (!live || live.status !== "active") return fail("no_account");
+      sessionVersion = live.sessionVersion;
+      log.warn(`[accounts] ${account.email} 單一登入成功，但無法更新最後登入時間：${error.message}`);
+    }
+    kit.issueSession(c, { id: account.id, sessionVersion });
+    kit.audit(c, account.email, "登入成功（WIWI Hub 單一登入）", null);
+    return c.redirect("/", 302);
+  });
+
   kit.mutate("post", "/logout", (c) => {
     kit.clearSession(c);
     return c.json({ success: true });
@@ -111,6 +159,7 @@ export function registerLoginRoutes(app: Hono, kit: AuthKit, options: LoginRoute
   });
 
   kit.allow("/login", "GET, POST");
+  kit.allow("/sso/callback", "GET");
   kit.allow("/logout", "POST");
   kit.allow("/api/me", "GET");
   kit.allow("/account", "GET");

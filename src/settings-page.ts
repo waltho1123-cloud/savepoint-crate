@@ -483,7 +483,7 @@ export function renderUpgradePage(ctx: PageContext): string {
   );
 }
 
-export function renderLoginPage(ctx: PageContext, next = "/"): string {
+export function renderLoginPage(ctx: PageContext, next = "/", notice: string | null = null): string {
   return layout(
     ctx,
     `<section class="card">
@@ -495,7 +495,7 @@ export function renderLoginPage(ctx: PageContext, next = "/"): string {
 <input type="password" id="login-password" autocomplete="current-password" maxlength="200" required>
 <div class="row"><button type="submit" class="btn primary">登入</button></div>
 <p id="login-msg" class="msg" role="status" hidden></p>
-</form>
+</form>${notice === null ? "" : `\n<p id="sso-notice" class="msg err" role="alert">${escapeHtml(notice)}</p>`}
 <p class="muted">帳號由管理員建立。忘記密碼：請管理員在設定頁的「帳號管理」幫你重設。所有管理員都登入不了時，請參考 README 的「忘記所有密碼時的復原方式」（需要動到 Volume 裡的設定檔，有風險，請先讀完說明）。</p>
 </section>`,
     { title: `登入 - ${APP_NAME}`, heading: APP_NAME, sub: "請用你的帳號（Email）與密碼登入", centered: true },
