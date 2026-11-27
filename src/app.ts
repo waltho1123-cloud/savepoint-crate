@@ -14,6 +14,7 @@ import { captureLineGroup, describeSheets, resolveLineConfig } from "./line-sett
 import { handleLineWebhookBody, notifyBoxClosed, parseBoxClosedInput, verifyLineSignature } from "./line.js";
 import { registerLoginRoutes } from "./login-routes.js";
 import { parseImageInput, recognizeLabel } from "./ocr.js";
+import { lookupBoxes, parseBoxLookupInput } from "./box-lookup.js";
 import { ProductCatalog, parseLookupInput } from "./products.js";
 import { FixedWindowLimiter, RATE_LIMIT_WINDOW_MS } from "./rate-limit.js";
 import { registerSettingsRoutes } from "./settings-routes.js";
@@ -34,6 +35,8 @@ export const SAVE_RATE_LIMIT_MAX = 600;
 export const BOX_CLOSED_RATE_LIMIT_MAX = 60;
 /** POST /api/products/lookup（用商品編號查商品總表；每掃一件就查一次）每個 IP 每分鐘的請求上限；有自己的額度，不佔 OCR 的。 */
 export const PRODUCT_LOOKUP_RATE_LIMIT_MAX = 120;
+/** POST /api/boxes/lookup（依日期讀回商品主檔的已關箱資料；每次查詢讀兩次試算表）每個 IP 每分鐘的請求上限；有自己的額度。 */
+export const BOX_LOOKUP_RATE_LIMIT_MAX = 30;
 /** POST /api/line/webhook（LINE 平台打來的 webhook）每個 IP 每分鐘的請求上限；有自己的額度。 */
 export const LINE_WEBHOOK_RATE_LIMIT_MAX = 120;
 /** /api/settings*、/api/accounts*、/api/me（設定頁、帳號管理與目前登入者的 API）每個 IP 每分鐘的請求上限；有自己的額度。另有各自更嚴的限制，見 settings-routes.ts。 */
@@ -76,6 +79,7 @@ export interface AppDeps {
  *   POST /api/ocr        → 取代 n8n webhook ipas-ocr（任一角色；要登入與 X-Requested-With）
  *   POST /api/save       → 取代 n8n webhook ipas-save-product（同上）
  *   POST /api/products/lookup → 用商品編號查商品總表（同上；有自己的限流額度）
+ *   POST /api/boxes/lookup → 依日期讀回商品主檔已關箱的箱子（唯讀；同上；有自己的限流額度）
  *   POST /api/box-closed → 關箱後推播到 LINE 群組（同上；訊息帶操作者姓名；LINE 沒設定時靜默略過）
  *   POST /api/line/webhook → LINE webhook：在群組裡回覆該群組的 ID、記錄最近收到的群組（需要 channel secret；公開，靠簽章驗證）
  *   /login、/logout、/api/me、/account  → 登入、登出、目前登入者、我的帳號（唯讀；沒有自己改密碼的端點，見 login-routes.ts）
@@ -133,6 +137,7 @@ export function createApp(deps: AppDeps): Hono {
   const ocrLimiter = new FixedWindowLimiter(OCR_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const saveLimiter = new FixedWindowLimiter(SAVE_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const productLookupLimiter = new FixedWindowLimiter(PRODUCT_LOOKUP_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const boxLookupLimiter = new FixedWindowLimiter(BOX_LOOKUP_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const boxClosedLimiter = new FixedWindowLimiter(BOX_CLOSED_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const lineWebhookLimiter = new FixedWindowLimiter(LINE_WEBHOOK_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const settingsApiLimiter = new FixedWindowLimiter(SETTINGS_API_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
@@ -140,6 +145,7 @@ export function createApp(deps: AppDeps): Hono {
     if (path === "/api/save") return saveLimiter;
     if (path === "/api/box-closed") return boxClosedLimiter;
     if (path === "/api/products/lookup") return productLookupLimiter;
+    if (path === "/api/boxes/lookup") return boxLookupLimiter;
     if (path === "/api/line/webhook") return lineWebhookLimiter;
     if (path === "/api/settings" || path.startsWith("/api/settings/")) return settingsApiLimiter;
     if (path === "/api/accounts" || path.startsWith("/api/accounts/")) return settingsApiLimiter;
@@ -193,10 +199,10 @@ export function createApp(deps: AppDeps): Hono {
     });
   });
 
-  // 登入閘門：裝箱程式用的四支 API（OCR、存檔、關箱通知、商品編號查詢）一定要有有效的登入 session（任一角色），並帶 CSRF 標頭
+  // 登入閘門：裝箱程式用的五支 API（OCR、存檔、關箱通知、商品編號查詢、商品主檔讀回）一定要有有效的登入 session（任一角色），並帶 CSRF 標頭
   // X-Requested-With: XMLHttpRequest。放在限流之前：沒登入的請求直接 401，不會吃掉同一個出口 IP 上其他人的限流額度。
   // 沒有登入回 401「請先登入」；已登入但缺標頭回 403；資料目錄不可用（沒有地方存帳號）回 503。
-  app.on("POST", ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup"], async (c, next) => {
+  app.on("POST", ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup", "/api/boxes/lookup"], async (c, next) => {
     kit.requireWritable();
     kit.requireActor(c);
     assertXhr(c);
@@ -259,6 +265,13 @@ export function createApp(deps: AppDeps): Hono {
     return c.json({ success: true, data: await productCatalog.lookup(barcodes) });
   });
 
+  // 依日期把商品主檔裡已關箱的箱子讀回來（唯讀；任一角色；要登入與 X-Requested-With）。成功 {success:true,data:{date,boxes,rows,skipped}}。
+  app.post("/api/boxes/lookup", async (c) => {
+    const target = parseBoxLookupInput(await readJsonObject(c));
+    if (!sheets) throw new ServiceError(503, "伺服器尚未完成 Google 試算表設定");
+    return c.json({ success: true, data: await lookupBoxes({ sheets, log, now }, target) });
+  });
+
   // 關箱後的 LINE 群組通知。回應一律 200（輸入格式錯誤除外）：LINE 沒設定好或推播失敗都不是「關箱失敗」，
   // 前端只依 notified／reason 決定要不要提示。成功 {success:true,notified:true}；
   // 失敗 {success:true,notified:false,reason:"not_configured"|"push_failed",error?}。
@@ -302,7 +315,7 @@ export function createApp(deps: AppDeps): Hono {
   registerLoginRoutes(app, kit, { sheets: describeSheets(env) });
   registerSettingsRoutes(app, kit, { env, setupGuard, fetchImpl });
 
-  for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup", "/api/line/webhook"]) {
+  for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup", "/api/boxes/lookup", "/api/line/webhook"]) {
     app.all(path, (c) => {
       c.header("Allow", "POST");
       return c.json({ success: false, error: "此端點只接受 POST" }, 405);

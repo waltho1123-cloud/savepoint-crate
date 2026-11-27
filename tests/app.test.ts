@@ -576,6 +576,7 @@ describe("登入閘門：OCR、存檔、關箱通知一定要登入（任一角�
     ["/api/save", { seqNo: "1", date: "2026/10/05", boxId: "B1", barcode: "123", productName: "品", quantity: 1, time: "2026-10-05 15:20:00" }],
     ["/api/box-closed", { boxId: "B1", items: [], total: 0, successCount: 0, failedCount: 0 }],
     ["/api/products/lookup", { barcodes: ["1801112756"] }],
+    ["/api/boxes/lookup", { date: "2026/11/27" }],
   ];
 
   it.each(PROTECTED)("POST %s 沒有登入 → 401「請先登入」，不呼叫任何上游服務", async (path, body) => {
@@ -652,7 +653,7 @@ describe("登入閘門：OCR、存檔、關箱通知一定要登入（任一角�
 
   it("沒登入時 GET 這些端點仍然是 405（方法不對不必先登入）；不存在的 /api 路徑仍是 404", async () => {
     const { app } = makeApp();
-    for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup"]) {
+    for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup", "/api/boxes/lookup"]) {
       const res = await app.request(path);
       expect(res.status, path).toBe(405);
     }

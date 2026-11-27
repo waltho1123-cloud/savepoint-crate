@@ -73,6 +73,24 @@ interface OuterBoxLike {
   paginate(boxes: PBox[], limits: { half: number; full: number }): Page[];
   renderTable(slot: Slot, esc: (s: unknown) => string): string;
   renderPages(pages: Page[], esc: (s: unknown) => string): string;
+  taipeiToday(nowMs: number): string;
+  formatClosedTime(closedAt: string): string;
+  sheetKey(date: string, boxId: string, closedAt: string, seq: number): string;
+  loadSheetBoxes(date: string, raw: unknown): SheetBox[];
+  dropKeys(order: string[], keys: string[]): string[];
+  pickAll(local: FBox[], sheet: SheetBox[], pick: string): string[];
+  resolveOrder(order: string[], local: FBox[], sheet: SheetBox[]): Array<{ kind: string; box: FBox | SheetBox }>;
+  fetchSheetBoxes(api: { post(url: string, payload: unknown): Promise<unknown> }, date: string): Promise<{ ok: boolean; boxes?: SheetBox[]; error?: string }>;
+  sheetRowName(rep: Item & { mergedName?: string }, product: { productName: string; gender: string; color: string; size: string; officialName: string } | null | undefined): string;
+  prepareSheet(boxes: SheetBox[], opts: { lookup(codes: string[]): Promise<LookupResult> }): Promise<{ boxes: Array<{ key: string; id: string; rows: Row[]; total: number }>; lookupFailed: boolean }>;
+  mergePrepared<T>(chosen: Array<{ kind: string }>, local: T[], sheet: T[]): T[];
+}
+interface SheetBox {
+  key: string;
+  id: string;
+  closedAt: string;
+  status: string;
+  items: Array<Item & { mergedName: string }>;
 }
 
 const OuterBoxLabel = new Function(`${sliceBetween("// ========== OuterBoxLabel", "// ========== UI Logic")}\nreturn OuterBoxLabel;`)() as OuterBoxLabelLike;
@@ -444,6 +462,208 @@ describe("排版輸出（HTML）", () => {
     expect(out.indexOf("箱號：A")).toBeLessThan(out.indexOf("class=\"ob-cut\""));
     expect(out.indexOf("class=\"ob-cut\"")).toBeLessThan(out.indexOf("箱號：B"));
     expect(out.match(/ob-slot-full/g)).toHaveLength(1);
+  });
+});
+
+describe("從商品主檔載入別台裝置的箱子", () => {
+  const raw = (boxId: string, closedAt: string, items: Array<Record<string, unknown>>) => ({ boxId, closedAt, items });
+  const sItem = (barcode: string, qty: number, extra: Record<string, unknown> = {}) => ({ barcode, productName: "", gender: "", color: "", size: "", mergedName: "", qty, ...extra });
+  const prod = (extra: Partial<{ productName: string; gender: string; color: string; size: string; officialName: string }> = {}) => ({ productName: "發熱衣", gender: "男", color: "黑", size: "L", officialName: "發熱衣(男-黑L)", ...extra });
+  const lookupOf = (catalog: Record<string, ReturnType<typeof prod>>) =>
+    vi.fn(async (codes: string[]): Promise<LookupResult> => ({ ok: true, products: new Map(codes.filter((c) => catalog[c]).map((c) => [c, catalog[c]!])) }));
+  const rep = (extra: Record<string, unknown> = {}) => ({ barcode: "1", productName: "發熱衣", gender: "男", color: "黑", size: "L", mergedName: "", ...extra });
+
+  it("品名規則：總表查得到且四欄（trim 後）相同 → 官方品名", () => {
+    expect(OuterBoxLabel.sheetRowName(rep({ mergedName: "別的", productName: " 發熱衣 ", color: "黑 " }), prod())).toBe("發熱衣(男-黑L)");
+  });
+
+  it("品名規則：四欄有任何一欄不同（人員改過）→ 這一列的 mergedName", () => {
+    for (const field of ["productName", "gender", "color", "size"]) {
+      expect(OuterBoxLabel.sheetRowName(rep({ [field]: "被改過", mergedName: "我改的品名" }), prod()), field).toBe("我改的品名");
+    }
+  });
+
+  it("品名規則：總表查不到、商品編號空白、查詢失敗（沒有 product）→ mergedName", () => {
+    expect(OuterBoxLabel.sheetRowName(rep({ mergedName: "試算表品名" }), undefined)).toBe("試算表品名");
+    expect(OuterBoxLabel.sheetRowName(rep({ barcode: "", mergedName: "無編號品名" }), null)).toBe("無編號品名");
+  });
+
+  it("品名規則：mergedName 空白 → 用 buildMergedName 組", () => {
+    expect(OuterBoxLabel.sheetRowName(rep({ mergedName: "  " }), undefined)).toBe("發熱衣(男-黑L)");
+    expect(OuterBoxLabel.sheetRowName(rep({ gender: "", color: "", size: "", mergedName: "" }), undefined)).toBe("發熱衣");
+  });
+
+  it("prepareSheet：同編號合併、數量加總且上限 9999；查得到且四欄相同的用官方品名、被改過的用 mergedName、編號空白不查", async () => {
+    const [box] = OuterBoxLabel.loadSheetBoxes("2026-11-27", [
+      raw("BOX-001", "2026-11-27 18:05:33", [
+        sItem("1", 9000, { productName: "發熱衣", gender: "男", color: "黑", size: "L", mergedName: "試算表舊名" }),
+        sItem("1", 5000, { productName: "發熱衣", gender: "男", color: "黑", size: "L" }),
+        sItem("2", 3, { productName: "改過的", gender: "男", color: "黑", size: "L", mergedName: "改過的(男-黑L)" }),
+        sItem("", 2, { productName: "無編號", mergedName: "無編號品名" }),
+      ]),
+    ]);
+    const lookup = lookupOf({ "1": prod(), "2": prod() });
+    const result = await OuterBoxLabel.prepareSheet([box!], { lookup });
+    expect(lookup).toHaveBeenCalledTimes(1);
+    expect(lookup).toHaveBeenCalledWith(["1", "2"]); // 空白編號不查
+    expect(result.lookupFailed).toBe(false);
+    expect(result.boxes[0]!.rows).toEqual([
+      { barcode: "", name: "無編號品名", qty: 2 },
+      { barcode: "1", name: "發熱衣(男-黑L)", qty: 9999 },
+      { barcode: "2", name: "改過的(男-黑L)", qty: 3 },
+    ]);
+    expect(result.boxes[0]!.total).toBe(9999 + 3 + 2);
+  });
+
+  it("prepareSheet：查詢失敗（回 ok:false 或丟例外）不擋列印，全部退回 mergedName／組出來的品名，並回報 lookupFailed", async () => {
+    const [box] = OuterBoxLabel.loadSheetBoxes("2026-11-27", [raw("B", "", [sItem("1", 1, { mergedName: "A(男-黑L)", productName: "A" }), sItem("2", 1, { productName: "只有欄位", color: "紅" })])]);
+    for (const lookup of [vi.fn(async (): Promise<LookupResult> => ({ ok: false })), vi.fn(async (): Promise<LookupResult> => { throw new Error("boom"); })]) {
+      const result = await OuterBoxLabel.prepareSheet([box!], { lookup });
+      expect(result.lookupFailed).toBe(true);
+      expect(result.boxes[0]!.rows.map((r) => r.name)).toEqual(["A(男-黑L)", "只有欄位(紅)"]);
+    }
+  });
+
+  it("prepareSheet：編號一次最多 200 個，450 個分成 200、200、50", async () => {
+    const items = Array.from({ length: 450 }, (_, i) => sItem(String(1000 + i), 1, { productName: "x" }));
+    const [box] = OuterBoxLabel.loadSheetBoxes("2026-11-27", [raw("B", "", items)]);
+    const lookup = lookupOf({});
+    await OuterBoxLabel.prepareSheet([box!], { lookup });
+    expect(lookup.mock.calls.map((c) => c[0]!.length)).toEqual([200, 200, 50]);
+  });
+
+  it("同一個 boxId 出現多筆：各自有不同的鍵、可各自勾選；鍵不會和本機箱號相撞", () => {
+    const boxes = OuterBoxLabel.loadSheetBoxes("2026-11-27", [
+      raw("BOX-001", "2026-11-27 10:00:00", [sItem("1", 1)]),
+      raw("BOX-001", "2026-11-27 11:00:00", [sItem("2", 1)]),
+      raw("BOX-001", "2026-11-27 11:00:00", [sItem("3", 1)]),
+      raw("BOX-001", "", [sItem("4", 1)]),
+    ]);
+    const keys = boxes.map((b) => b.key);
+    expect(new Set(keys).size).toBe(4);
+    expect(keys[0]).toBe("sheet:2026-11-27|BOX-001|2026-11-27 10:00:00|0");
+    expect(keys.every((k) => k.startsWith("sheet:") && k !== "BOX-001")).toBe(true);
+    let order: string[] = ["BOX-001"]; // 本機也有一箱叫 BOX-001
+    for (const k of keys) order = OuterBoxLabel.toggleOrder(order, k, true);
+    expect(order).toHaveLength(5);
+    order = OuterBoxLabel.toggleOrder(order, keys[1]!, false);
+    expect(order).toEqual(["BOX-001", keys[0], keys[2], keys[3]]);
+  });
+
+  it("loadSheetBoxes：數量夾在 1～9999、沒有商品的箱子與壞資料略過、不改動輸入", () => {
+    const input = [raw("A", "", [sItem("1", 0), sItem("2", 123456), sItem("3", 2.9)]), raw("B", "", []), null, { boxId: "C" }];
+    const snapshot = JSON.stringify(input);
+    const boxes = OuterBoxLabel.loadSheetBoxes("2026-11-27", input);
+    expect(boxes).toHaveLength(1);
+    expect(boxes[0]!.items.map((i) => i.qty)).toEqual([1, 9999, 2]);
+    expect(OuterBoxLabel.summarize(boxes[0]!)).toEqual({ kinds: 3, pieces: 1 + 9999 + 2 });
+    expect(JSON.stringify(input)).toBe(snapshot);
+    expect(OuterBoxLabel.loadSheetBoxes("d", undefined)).toEqual([]);
+  });
+
+  it("重新載入會取代舊的一批：舊的從勾選順序拿掉，本機箱子的勾選不受影響", () => {
+    const local: FBox[] = [
+      { id: "T1", status: "closed", items: [item("1", 1)] },
+      { id: "T2", status: "open", items: [item("2", 1)] },
+    ];
+    const first = OuterBoxLabel.loadSheetBoxes("2026-11-27", [raw("S1", "", [sItem("1", 1)]), raw("S2", "", [sItem("2", 1)])]);
+    let order = OuterBoxLabel.pickAll(local, first, "all");
+    expect(order).toEqual(["T1", "T2", first[0]!.key, first[1]!.key]);
+    order = OuterBoxLabel.toggleOrder(order, "T1", false); // 本機只勾 T2
+    const second = OuterBoxLabel.loadSheetBoxes("2026-11-27", [raw("S1", "", [sItem("1", 1)])]);
+    order = OuterBoxLabel.dropKeys(order, first.map((b) => b.key));
+    expect(order).toEqual(["T2"]); // 舊的一批全不在了；新載入的預設不勾
+    expect(order).not.toContain(second[0]!.key);
+    expect(OuterBoxLabel.dropKeys(["T1", "T2"], [])).toEqual(["T1", "T2"]);
+  });
+
+  it("全選＝本機可選的＋載入的；只選已完成＝本機已完成的＋載入的；空箱不選", () => {
+    const local: FBox[] = [
+      { id: "T1", status: "closed", items: [item("1", 1)] },
+      { id: "T2", status: "open", items: [item("2", 1)] },
+      { id: "T3", status: "closed", items: [] },
+    ];
+    const sheet = OuterBoxLabel.loadSheetBoxes("2026-11-27", [raw("S", "", [sItem("1", 1)])]);
+    expect(OuterBoxLabel.pickAll(local, sheet, "all")).toEqual(["T1", "T2", sheet[0]!.key]);
+    expect(OuterBoxLabel.pickAll(local, sheet, "closed")).toEqual(["T1", sheet[0]!.key]);
+    expect(OuterBoxLabel.pickAll([], [], "all")).toEqual([]);
+  });
+
+  it("resolveOrder／mergePrepared：本機與載入的箱子依勾選順序交錯排版", () => {
+    const local: FBox[] = [{ id: "T1", status: "closed", items: [item("1", 1)] }, { id: "T2", status: "closed", items: [item("2", 1)] }];
+    const sheet = OuterBoxLabel.loadSheetBoxes("2026-11-27", [raw("T1", "", [sItem("1", 1)])]);
+    const chosen = OuterBoxLabel.resolveOrder(["T2", sheet[0]!.key, "T1", "不存在", "sheet:不存在"], local, sheet);
+    expect(chosen.map((c) => c.kind)).toEqual(["local", "sheet", "local"]);
+    expect(OuterBoxLabel.mergePrepared(chosen, ["L-T2", "L-T1"], ["S-T1"])).toEqual(["L-T2", "S-T1", "L-T1"]);
+  });
+
+  it("關箱時間只顯示 HH:MM；空白或認不得的格式不顯示", () => {
+    expect(OuterBoxLabel.formatClosedTime("2026-11-27 18:05:33")).toBe("18:05");
+    expect(OuterBoxLabel.formatClosedTime("2026/11/27 9:05")).toBe("09:05");
+    expect(OuterBoxLabel.formatClosedTime("")).toBe("");
+    expect(OuterBoxLabel.formatClosedTime("   ")).toBe("");
+    expect(OuterBoxLabel.formatClosedTime("亂寫")).toBe("");
+  });
+
+  it("台北時間（UTC+8）的今天：UTC 15:59:59 還是同一天、16:00:00 換日；跨月跨年也對", () => {
+    expect(OuterBoxLabel.taipeiToday(Date.UTC(2026, 10, 27, 15, 59, 59))).toBe("2026-11-27");
+    expect(OuterBoxLabel.taipeiToday(Date.UTC(2026, 10, 27, 16, 0, 0))).toBe("2026-11-28");
+    expect(OuterBoxLabel.taipeiToday(Date.UTC(2026, 10, 27, 0, 0, 0))).toBe("2026-11-27");
+    expect(OuterBoxLabel.taipeiToday(Date.UTC(2026, 11, 31, 16, 0, 0))).toBe("2027-01-01");
+  });
+
+  it("fetchSheetBoxes：成功整理成項目；失敗顯示 API 的 error，沒有 error 或格式不對就用固定句，不丟例外", async () => {
+    const reply = (ok: boolean, body: unknown) => ({ post: vi.fn(async () => ({ ok, json: async () => body })) });
+    const good = reply(true, { success: true, data: { date: "2026/11/27", boxes: [raw("B", "2026-11-27 10:00:00", [sItem("1", 2)])] } });
+    const r = await OuterBoxLabel.fetchSheetBoxes(good, "2026-11-27");
+    expect(good.post).toHaveBeenCalledWith("/api/boxes/lookup", { date: "2026-11-27" });
+    expect(r.ok).toBe(true);
+    expect(r.boxes).toHaveLength(1);
+    expect((await OuterBoxLabel.fetchSheetBoxes(reply(false, { success: false, error: "商品主檔讀取失敗" }), "d"))).toEqual({ ok: false, error: "商品主檔讀取失敗" });
+    const fixed = "無法讀取商品主檔，請稍後再試";
+    expect(await OuterBoxLabel.fetchSheetBoxes(reply(false, { success: false }), "d")).toEqual({ ok: false, error: fixed });
+    expect(await OuterBoxLabel.fetchSheetBoxes(reply(true, { success: true, data: {} }), "d")).toEqual({ ok: false, error: fixed });
+    expect(await OuterBoxLabel.fetchSheetBoxes({ post: async () => ({ ok: false, json: async () => { throw new Error("not json"); } }) }, "d")).toEqual({ ok: false, error: fixed });
+    expect(await OuterBoxLabel.fetchSheetBoxes({ post: async () => { throw new Error("offline"); } }, "d")).toEqual({ ok: false, error: fixed });
+    expect(await OuterBoxLabel.fetchSheetBoxes(reply(true, { success: true, data: { boxes: [] } }), "d")).toEqual({ ok: true, boxes: [] });
+  });
+});
+
+describe("index.html 的商品主檔載入接線（原始碼層級的檢查）", () => {
+  const dialog = sliceBetween("// ========== Outer Box Print Dialog", "// ========== Helpers");
+
+  it("本機沒有箱子也開得起來（不再因為沒有箱子就只跳提示），並有空狀態", () => {
+    expect(dialog).not.toContain("目前沒有任何箱子");
+    expect(dialog).toContain("這台裝置沒有箱子");
+  });
+
+  it("視窗有日期欄（預設台北今天）、載入按鈕、載入中／空結果文字、商品主檔標籤", () => {
+    expect(dialog).toContain('type="date"');
+    expect(dialog).toContain("OuterBoxLabel.taipeiToday(Date.now())");
+    for (const text of ["載入中…", "這一天在商品主檔沒有已完成的箱子", "商品主檔", "別台裝置掃的箱子"]) expect(dialog).toContain(text);
+    expect(dialog).toContain("OuterBoxLabel.fetchSheetBoxes(ApiClient, date)");
+  });
+
+  it("載入的箱子只活在視窗的記憶體：視窗程式碼沒有 persist()、Store、localStorage，也沒有寫進 state.boxes", () => {
+    expect(dialog).not.toMatch(/persist\(/);
+    expect(dialog).not.toMatch(/\bStore\b/);
+    expect(dialog).not.toMatch(/localStorage/);
+    expect(dialog).not.toMatch(/state\.boxes\s*(=|\.push|\.splice|\.unshift)/);
+    expect(dialog).not.toMatch(/BoxManager\.(add|create|update|remove|close|rename)/);
+    // 純邏輯也不碰儲存
+    const logic = sliceBetween("// ========== OuterBoxLabel", "// ========== UI Logic").replace(/^\s*\/\/.*$/gm, "").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(logic).not.toMatch(/localStorage|persist\(/);
+  });
+
+  it("載入的箱子的屬性插值與文字一律跳脫", () => {
+    expect(dialog).toContain("escHtml(box.key)");
+    expect(dialog).toContain("escHtml(box.id)");
+    expect(dialog).toContain("escHtml(time)");
+  });
+
+  it("統計報表空狀態補一句說明，且列印時不印（no-print）", () => {
+    expect(html.match(/這裡只顯示這台裝置掃描的資料；要印別台裝置掃的箱子，請按「列印外箱明細」從商品主檔載入。/g)).toHaveLength(2);
+    expect(html).toContain('class="stats-empty-hint no-print"');
   });
 });
 

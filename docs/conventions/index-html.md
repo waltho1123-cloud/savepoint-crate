@@ -1,6 +1,6 @@
 # 約定：`index.html`（前端單頁）
 
-> 這份是 `CLAUDE.md`「不可破壞的約定」的一部分，**效力與 `CLAUDE.md` 相同**；2026-11-27 從 `CLAUDE.md` 逐字搬出（只加了小標題，內文沒有改寫）；同日依使用者指示改版，新增「2026-11-27 改版：品名查詢、數量與外箱明細」一節——它放寬了前面幾節的範圍，兩者衝突時以它為準。
+> 這份是 `CLAUDE.md`「不可破壞的約定」的一部分，**效力與 `CLAUDE.md` 相同**；2026-11-27 從 `CLAUDE.md` 逐字搬出（只加了小標題，內文沒有改寫）；同日依使用者指示改版，新增「2026-11-27 改版：品名查詢、數量與外箱明細」與「2026-11-27 改版：外箱明細可從商品主檔載入別台裝置的箱子」兩節——它們放寬了前面幾節的範圍，兩者衝突時以它們為準。
 > **動到下列任何一項之前，把這份整份讀完再動手**：`index.html` 的任何改動、`tests/notify-engine.test.ts`、`tests/scan-flow.test.ts`、`tests/outer-box-label.test.ts`。
 > 改了這裡描述的行為，就同步改這份文件；`CLAUDE.md` 的路由表與「底線」摘要也要跟著對一次。
 
@@ -45,6 +45,21 @@
 - 列印模式是 body class `print-mode-outerbox`（已在 `PrintManager._setPrintMode` 的清除清單裡）。`@page` 由 `PrintManager.printOuterBoxes` **動態插入**（`<style id="outer-box-page-style">`）、離開這個模式就移除；靜態樣式表不可以有 `@page`（會影響既有兩種列印）。**不要在 `window.print()` 返回後立刻清掉列印模式**（手機瀏覽器的 `print()` 會立刻返回，馬上清掉會印出空白頁），在 `afterprint` 事件清。列印用的 DOM 留在 `#outer-box-print`，下一次列印才覆蓋。
 - 字型堆疊以 `"Noto Sans CJK TC", "Noto Sans TC"` 開頭、後面接系統的中文字型。**不可載入任何外部資源**（`tests/branding.test.ts` 限制只能有一個 `<link>`），所以印的那台裝置沒裝這個字型就會退回系統字型——這是已知限制，不要為了它去掛外部字型。
 - 驗證範圍：這個版面用電腦版 Chrome 轉 PDF 量過（頁數、每列不被截斷、裁切線位置、欄寬）；iPhone Safari 與實體印表機尚未實測。
+
+## 2026-11-27 改版：外箱明細可從商品主檔載入別台裝置的箱子
+
+使用者 2026-11-27 指示。原因：箱子資料只存在掃描那支手機的 localStorage，辦公室電腦開統計報表是空的、印不了外箱明細；每個箱子「完成此箱」時都會逐筆寫進商品主檔，所以外箱明細的選擇視窗可以把別台裝置已完成的箱子讀回來。後端是唯讀的 `POST /api/boxes/lookup`（`{date}` → `{success,data:{date,boxes:[{boxId,closedAt,items:[{barcode,productName,gender,color,size,mergedName,qty}]}],rows,skipped}}`；同一天「箱號＋關箱時間」相同的算一批，同一個 `boxId` 可能出現多筆，`closedAt` 可能是空字串）。
+
+- **視窗隨時開得起來**：本機沒有箱子也照開（本機清單顯示「這台裝置沒有箱子」），不再跳「目前沒有任何箱子」。
+- **載入的箱子絕不進 `state`／localStorage**：只活在選擇視窗的區域變數（`showOuterBoxDialog` 的 `sheetBoxes`），不寫進 `state.boxes`、不 `persist()`、不動 `Store`／`ipas-state`／箱子資料的載入與儲存；關掉視窗就沒了。`tests/outer-box-label.test.ts` 有原始碼層級的檢查擋住。
+- **清單鍵**：載入的項目鍵是 `sheet:<查詢日期>|<箱號>|<關箱時間>|<序>`（`OuterBoxLabel.sheetKey`），不會和本機箱號相撞，同一個 `boxId` 多筆也各自勾選；標籤顯示「商品主檔」（`ob-tag-sheet`），後面是關箱時間 `HH:MM`（空白就不顯示）與「N 種商品、M 件」。勾選順序與本機箱子共用同一個 `order`（`toggleOrder`）。
+- **取代規則**：再按一次「載入」（同一天或換一天）＝用新結果取代先前載入的那一批，舊的鍵從勾選順序拿掉（`dropKeys`），本機箱子的勾選不動；新載入的預設不勾。「全選」＝本機可選的＋載入的；「只選已完成」＝本機已完成的＋載入的；「全不選」照舊（`pickAll`）。
+- **日期預設今天，以台北時間（UTC+8）計**（`taipeiToday`），`<input type="date">` 的值直接送；失敗時顯示 API 的 `error`、沒有就用固定句「無法讀取商品主檔，請稍後再試」，不可讓視窗壞掉；空結果顯示「這一天在商品主檔沒有已完成的箱子」。所有 `/api` 請求仍只走 `ApiClient`。
+- **載入的箱子的品名規則**（`OuterBoxLabel.sheetRowName`，純函式）：每一筆先用商品編號查商品總表（沿用 `ProductFlow.lookup` 與 200 個一批的分塊）；總表查得到、而且總表的 `productName／gender／color／size`（trim 後）與這一列完全相同 → 印總表的 `officialName`；其他情況（查不到、四欄有任何不同＝當初被人員改過、編號空白、查詢失敗）→ 印這一列的 `mergedName`，空白就用 `buildMergedName` 組。查詢失敗不擋列印（跳提示、退回試算表上的品名）。同箱同編號合併、數量加總且上限 9999（`prepareSheet`）。
+- **列印**沿用既有流程（`prepare`／`prepareSheet` 的結果依勾選順序接在一起 → `measure` → `paginate` → `PrintManager.printOuterBoxes`）；表頭與本機箱子完全一樣（只有「箱號：<箱號>」，沒有日期欄位）。
+- **統計報表空狀態**「尚無盤點資料」底下多一句說明（這裡只顯示這台裝置掃描的資料，要印別台裝置掃的箱子請按「列印外箱明細」從商品主檔載入），`no-print`，列印統計表時不印。
+- **手機版**：新增的一段（日期欄＋載入按鈕）用 `flex-wrap`，≤600px 與 320px 寬度不可造成水平捲動；`.dialog-wide` 加了 `max-height`＋`overflow-y: auto`，視窗太高時整個可捲動。
+- 驗證範圍：純邏輯有單元測試；真實瀏覽器（手機窄螢幕、實際列印）另由獨立驗證者確認。
 
 ## 跳脫（XSS）備忘：已解決的既有問題
 
