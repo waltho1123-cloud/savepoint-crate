@@ -444,6 +444,29 @@ body {
 }
 .stats-empty { text-align: center; color: var(--text-muted); padding: 36px; }
 .stats-empty-hint { margin-top: 8px; font-size: .82rem; line-height: 1.5; }
+/* 統計表的欄位是用 td:nth-child 定位的——表頭 8 欄與 renderStats 的欄位順序改了，下面兩段與手機版卡片（Responsive 區）的規則要一起改。
+   表格模式（寬度 >= 768px）：欄位不可被擠成一個字一行（中文每個字都能斷行，空間不夠時品名會先被擠扁），所以每欄給最小寬度；
+   內容超過最小寬度照樣換行（不用 nowrap：一筆超長的編號或顏色不該把整張表撐寬）。只對 screen 生效；列印統計表有自己的一組（在 Print styles 的 print-mode-stats）。 */
+@media screen and (min-width: 768px) {
+  .stats-table th { white-space: nowrap; }
+  /* 全站是 border-box，min-width 會把左右內距算進去；這裡改成 content-box，下面的最小寬度才是「內容」的寬度 */
+  .stats-table td { box-sizing: content-box; }
+  .stats-table td:nth-child(1), .stats-table td:nth-child(7) { white-space: nowrap; }
+  .stats-table td:nth-child(2) { min-width: 11ch; overflow-wrap: anywhere; }
+  .stats-table td:nth-child(3) { min-width: 9em; }
+  .stats-table td:nth-child(4) { min-width: 2.5em; }
+  .stats-table td:nth-child(5) { min-width: 4em; }
+  .stats-table td:nth-child(6) { min-width: 3em; }
+  .stats-table td:nth-child(8) { min-width: 5em; }
+  .stats-table td.stats-empty { white-space: normal; }
+}
+/* 768～899px（平板直放）：左右內距縮小，8 欄的最小寬度才放得進去、不用水平捲動 */
+@media screen and (min-width: 768px) and (max-width: 899px) {
+  .stats-table th, .stats-table td { padding-left: 10px; padding-right: 10px; }
+}
+@media screen and (min-width: 900px) {
+  .stats-table td:nth-child(3) { min-width: 13em; }
+}
 
 /* ===== Toast — 預設是反白（深字底＋白字），成功／失敗用狀態色字 + 淡底 ===== */
 .toast-container {
@@ -715,6 +738,41 @@ body {
   .card { padding: 18px 16px; }
 }
 
+/* 統計報表在窄螢幕（< 768px：手機直放、小平板）改成一筆一張卡片——8 欄的表格放不下。同一份 DOM，只改排版。
+   第 1 行：序號、商品編號、（靠右）數量；第 2 行：品名；第 3 行：性別／顏色／尺寸；第 4 行：所在箱號。
+   只對 screen 生效——列印統計表走 print media，仍然是表格。 */
+@media screen and (max-width: 767px) {
+  .stats-table, .stats-table tbody { display: block; }
+  .stats-table thead { display: none; }
+  .stats-table tbody tr {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+    padding: 12px 2px; border-bottom: 1px solid var(--border-subtle);
+  }
+  .stats-table tbody td {
+    display: block; padding: 0; border-bottom: none; min-width: 0;
+    white-space: normal; overflow-wrap: anywhere;
+  }
+  .stats-table tbody td::before { color: var(--text-muted); font-weight: 400; font-size: .8rem; }
+  /* 卡片之間有空隙，hover 的底色改畫在整列上，才不會一塊一塊的 */
+  .stats-table tbody tr:hover { background: var(--wiwi-thermal-tint); }
+  .stats-table tbody tr:hover td { background: none; }
+  .stats-table tbody td:nth-child(1) { order: 1; flex: 0 0 auto; white-space: nowrap; color: var(--text-muted); font-size: .8rem; }
+  /* 商品編號吃掉第 1 行剩下的寬度（flex-basis 0：再長也是在自己的格子裡換行，不會把數量擠到下一行） */
+  .stats-table tbody td:nth-child(2) { order: 2; flex: 1 1 0; }
+  .stats-table tbody td:nth-child(7) { order: 3; flex: 0 0 auto; white-space: nowrap; text-align: right; font-size: 1.05rem; }
+  .stats-table tbody td:nth-child(7)::before { content: '數量 '; }
+  .stats-table tbody td:nth-child(3) { order: 4; flex: 0 0 100%; font-weight: 700; font-size: .95rem; line-height: 1.45; }
+  .stats-table tbody td:nth-child(4) { order: 5; flex: 0 1 auto; }
+  .stats-table tbody td:nth-child(4)::before { content: '性別 '; }
+  .stats-table tbody td:nth-child(5) { order: 6; flex: 0 1 auto; }
+  .stats-table tbody td:nth-child(5)::before { content: '顏色 '; }
+  .stats-table tbody td:nth-child(6) { order: 7; flex: 0 1 auto; }
+  .stats-table tbody td:nth-child(6)::before { content: '尺寸 '; }
+  .stats-table tbody td:nth-child(8) { order: 8; flex: 0 0 100%; }
+  .stats-table tbody td:nth-child(8)::before { content: '箱號 '; }
+  .stats-table tbody td.stats-empty { order: 0; flex: 0 0 100%; padding: 28px 8px; white-space: normal; color: var(--text-muted); font-size: .88rem; text-align: center; }
+}
+
 /* ===== Print styles ===== */
 @media print {
   body { background: var(--wiwi-surface) !important; background-image: none !important; }
@@ -741,6 +799,18 @@ body {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
+  /* 列印統計表：和螢幕的表格模式一樣，每欄給最小寬度（內容寬度），不讓品名、性別、顏色被擠成直的
+     （一筆商品分裝在很多箱時，所在箱號那一欄會把其他欄擠扁）；左右內距縮成 8px，A4 直式放得下。欄位一樣用 td:nth-child 定位。 */
+  body.print-mode-stats .stats-table th { white-space: nowrap; padding-left: 8px; padding-right: 8px; }
+  body.print-mode-stats .stats-table td { box-sizing: content-box; padding-left: 8px; padding-right: 8px; }
+  body.print-mode-stats .stats-table td:nth-child(1), body.print-mode-stats .stats-table td:nth-child(7) { white-space: nowrap; }
+  body.print-mode-stats .stats-table td:nth-child(2) { min-width: 11ch; overflow-wrap: anywhere; }
+  body.print-mode-stats .stats-table td:nth-child(3) { min-width: 12em; }
+  body.print-mode-stats .stats-table td:nth-child(4) { min-width: 2.5em; }
+  body.print-mode-stats .stats-table td:nth-child(5) { min-width: 4em; }
+  body.print-mode-stats .stats-table td:nth-child(6) { min-width: 3em; }
+  body.print-mode-stats .stats-table td:nth-child(8) { min-width: 5em; }
+  body.print-mode-stats .stats-table td.stats-empty { white-space: normal; }
 
   body.print-mode-box .box-label-print { display: block !important; }
   body.print-mode-box .box-label-table th {
