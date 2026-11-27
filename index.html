@@ -315,11 +315,13 @@ body {
   border-radius: var(--radius-sm);
   background: var(--glass-bg);
   box-shadow: var(--neu-shadow-sm);
-  gap: 10px;
+  gap: 6px 10px;
+  flex-wrap: wrap;
   transition: all .15s;
 }
 .scan-list li:hover { background: var(--wiwi-thermal-tint); }
-.scan-item-info { flex: 1; min-width: 0; }
+.scan-item-info { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.scan-item-controls { display: flex; align-items: center; gap: 8px; margin-left: auto; flex: none; }
 .scan-item-barcode {
   font-weight: 700;
   font-family: 'SF Mono', 'Fira Code', monospace;
@@ -328,7 +330,7 @@ body {
 }
 .scan-item-name { color: var(--text-muted); font-size: .82rem; margin-top: 1px; }
 .scan-item-detail { color: var(--text-muted); font-size: .78rem; margin-top: 1px; display: flex; gap: 6px; flex-wrap: wrap; }
-.scan-item-detail span { background: var(--wiwi-thermal-tint); padding: 1px 6px; border-radius: 4px; }
+.scan-item-detail span { background: var(--wiwi-thermal-tint); padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
 .scan-item-time { color: var(--text-muted); font-size: .78rem; white-space: nowrap; }
 .scan-list .empty {
   color: var(--text-muted);
@@ -572,14 +574,16 @@ body {
 .dialog-actions { display: flex; gap: 10px; justify-content: flex-end; }
 .dialog-form { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
 .dialog-form label { font-size: .85rem; font-weight: 600; color: var(--text); }
+.dialog-form > div { display: flex; flex-direction: column; gap: 4px; }
 .dialog-form input, .dialog-form select {
+  width: 100%;
   padding: 9px 12px; border: 1px solid var(--wiwi-border-strong); border-radius: var(--radius-sm);
   font-size: 16px; background: var(--wiwi-surface); box-shadow: var(--neu-inset);
   color: var(--text); transition: border-color .2s;
 }
 .dialog-form input:focus, .dialog-form select:focus { border-color: var(--wiwi-focus-ring); }
 .dialog-form .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.dialog-form .form-row > div { display: flex; flex-direction: column; gap: 4px; }
+.dialog-form .form-row > div { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
 
 @keyframes dotPulse { 0%,20% { opacity: .2; } 50% { opacity: 1; } 80%,100% { opacity: .2; } }
 
@@ -590,10 +594,106 @@ body {
   margin-top: 14px;
 }
 
+/* 每次加入的數量（拍照與手動輸入共用） */
+.scan-qty-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; font-size: .88rem; font-weight: 600; }
+.scan-qty-row input {
+  width: 96px;
+  padding: 9px 12px;
+  border: 1px solid var(--wiwi-border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 16px;
+  text-align: center;
+  background: var(--wiwi-surface);
+  box-shadow: var(--neu-inset);
+  color: var(--text);
+}
+.scan-qty-row input:disabled { opacity: .5; cursor: not-allowed; }
+
+/* 掃描清單：總表狀態標記與直接輸入數量 */
+.scan-tag {
+  display: inline-block;
+  font-size: .72rem;
+  font-weight: 700;
+  padding: 1px 8px;
+  border-radius: 20px;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.scan-tag-missing { background: var(--wiwi-danger-tint); color: var(--wiwi-danger); border: 1px solid var(--wiwi-danger); }
+.scan-tag-unverified { background: var(--wiwi-warning-tint); color: var(--wiwi-warning); border: 1px solid var(--wiwi-warning); }
+.item-qty-input {
+  width: 72px;
+  padding: 6px 8px;
+  border: 1px solid var(--wiwi-border-strong);
+  border-radius: var(--radius-sm);
+  font-size: 16px;
+  text-align: center;
+  background: var(--wiwi-surface);
+  color: var(--text);
+}
+.item-qty-label { font-size: .78rem; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+
+/* 商品對話框的提示區塊（總表查無／無法查詢） */
+.dialog-wide { max-width: 520px; }
+.dialog-alert { padding: 10px 12px; border-radius: var(--radius-sm); font-size: .88rem; line-height: 1.5; margin-bottom: 14px; }
+.dialog-alert-danger { background: var(--wiwi-danger-tint); color: var(--wiwi-danger); border: 1px solid var(--wiwi-danger); }
+.dialog-alert-warning { background: var(--wiwi-warning-tint); color: var(--wiwi-warning); border: 1px solid var(--wiwi-warning); }
+
+/* 列印外箱明細：選擇視窗 */
+.ob-pick-tools { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.ob-pick-list { max-height: 45vh; overflow: auto; display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.ob-pick {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--wiwi-border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--wiwi-surface);
+  font-size: .88rem;
+  cursor: pointer;
+}
+.ob-pick.disabled { opacity: .5; cursor: not-allowed; }
+.ob-pick-id { font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
+.ob-pick-meta { color: var(--text-muted); font-size: .8rem; margin-left: auto; text-align: right; white-space: nowrap; }
+.ob-pick-order { font-size: .78rem; font-weight: 700; color: var(--primary-dark); min-width: 2.2em; }
+.ob-tag { white-space: nowrap; flex: none; font-size: .72rem; font-weight: 700; padding: 1px 8px; border-radius: 20px; }
+.ob-tag-open { background: var(--wiwi-success-tint); color: var(--wiwi-success); border: 1px solid var(--wiwi-success); }
+.ob-tag-closed { background: var(--wiwi-surface-sunken); color: var(--text-muted); border: 1px solid var(--wiwi-border-strong); }
+
+/* 列印外箱明細：A4 直式一頁兩箱（畫面與列印用同一份樣式，量高度才準；字型只用系統字型，不載入任何外部資源） */
+#outer-box-print { display: none; }
+.ob-page, .ob-measure {
+  font-family: "Noto Sans CJK TC", "Noto Sans TC", "PingFang TC", "Heiti TC", "Microsoft JhengHei", "WenQuanYi Micro Hei", sans-serif;
+  color: var(--wiwi-text);
+}
+.ob-measure { position: absolute; left: -9999px; top: 0; width: 194mm; visibility: hidden; pointer-events: none; }
+.ob-page { width: 194mm; height: 276mm; break-after: page; page-break-after: always; }
+.ob-page:last-child { break-after: auto; page-break-after: auto; }
+.ob-slot { height: 135mm; overflow: visible; }
+.ob-slot-full { height: 276mm; }
+.ob-cut { height: 3mm; margin-bottom: 3mm; border-bottom: 1.5px dashed var(--wiwi-text); }
+.ob-table { width: 100%; border-collapse: collapse; table-layout: fixed; color: var(--wiwi-text); }
+.ob-table th, .ob-table td { border: 1.5px solid var(--wiwi-text); padding: 6px 10px; text-align: left; vertical-align: middle; overflow-wrap: anywhere; word-break: break-word; }
+.ob-table tr { break-inside: avoid; page-break-inside: avoid; }
+.ob-title th { font-size: 30pt; font-weight: 800; line-height: 1.25; padding: 8px 12px; }
+.ob-colhead th { font-size: 13pt; font-weight: 700; }
+.ob-row td { font-size: 14pt; line-height: 1.35; }
+.ob-col-code { width: 24%; }
+.ob-col-name { width: 60%; }
+.ob-col-qty { width: 16%; }
+.ob-code { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.ob-qty { text-align: center !important; font-variant-numeric: tabular-nums; }
+.ob-row .ob-qty { font-weight: 800; font-size: 16pt; }
+.ob-total td { font-size: 15pt; font-weight: 800; text-align: right; }
+
 /* ===== Responsive ===== */
 @media (max-width: 600px) {
+  .scan-item-info { flex: 1 1 100%; }
+  .current-box-banner { padding: 12px 12px; }
   .header h1 { font-size: .95rem; }
-  .header { padding: 6px 12px; gap: 10px; }
+  .header { padding: 6px 12px; gap: 10px; flex-wrap: wrap; }
   .btn { padding: 10px 16px; font-size: .88rem; }
   .main { padding: 14px 10px; }
   .card { padding: 18px 16px; }
@@ -632,6 +732,11 @@ body {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
   }
+
+  /* 外箱明細：只印 #outer-box-print，其餘全部隱藏（紙張設定由 PrintManager 在列印前動態加入 @page，只在這個模式生效） */
+  body.print-mode-outerbox .main,
+  body.print-mode-outerbox .dialog-backdrop { display: none !important; }
+  body.print-mode-outerbox #outer-box-print { display: block !important; }
 }
 </style>
 </head>
@@ -648,6 +753,7 @@ body {
   <img class="brand-logo" src="/assets/wiwi-logo.svg" alt="WIWI" width="53" height="48">
   <h1>IPAS 庫存盤點裝箱系統</h1>
   <div class="header-actions">
+    <button class="btn btn-sm btn-outline" id="btn-reset-product-cache">重設品名記憶</button>
     <button class="btn btn-sm btn-outline" onclick="confirmClearAll()">清除資料</button>
   </div>
 </header>
@@ -679,8 +785,9 @@ body {
         <span class="box-id" id="current-box-id"></span>
         <span class="box-status status-open" id="current-box-status">開放中</span>
       </div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
         <button class="btn btn-outline btn-sm" id="btn-print-box">列印標籤單</button>
+        <button class="btn btn-outline btn-sm" id="btn-print-outer-current">列印外箱明細</button>
         <button class="btn btn-success btn-sm" id="btn-close-box">完成此箱</button>
       </div>
     </div>
@@ -688,6 +795,10 @@ body {
     <!-- Camera OCR：一直顯示；沒有開放中的箱號時停用控制項並提示「請先新增箱號」（見 renderCurrentBox／setScannerEnabled） -->
     <div class="card" id="scanner-card">
       <div class="card-title">📷 拍照辨識</div>
+      <div class="scan-qty-row">
+        <label for="input-scan-qty">每次加入數量</label>
+        <input type="number" id="input-scan-qty" value="1" min="1" max="9999" step="1" inputmode="numeric">
+      </div>
       <div class="scanner-area" id="scanner-area">
         <div class="scanner-placeholder" id="scanner-placeholder">
           <div class="icon">📷</div>
@@ -725,7 +836,10 @@ body {
     <div class="card">
       <div class="card-title" style="justify-content:space-between;flex-wrap:wrap">
         <span>📊 統計報表</span>
-        <button class="btn btn-primary btn-sm no-print" id="btn-print">列印統計表</button>
+        <span style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn btn-outline btn-sm no-print" id="btn-print-outer-stats">列印外箱明細</button>
+          <button class="btn btn-primary btn-sm no-print" id="btn-print">列印統計表</button>
+        </span>
       </div>
       <div id="stats-summary" style="margin-bottom:14px;font-size:.9rem;color:var(--text-muted)"></div>
       <div style="overflow-x:auto">
@@ -773,6 +887,9 @@ body {
   </table>
   <div class="box-label-footer" id="box-label-footer"></div>
 </div>
+
+<!-- 外箱明細列印區（畫面上隱藏；產生後保留到下一次列印才覆蓋，只在 print-mode-outerbox 時顯示） -->
+<div id="outer-box-print"></div>
 
 <div class="toast-container" id="toast-container"></div>
 
@@ -839,6 +956,8 @@ const BoxManager = {
       qty: info.qty || 1,
       scannedAt: new Date().toISOString()
     };
+    if (info.officialName) item.officialName = info.officialName;
+    if (info.catalog) item.catalog = info.catalog;
     box.items.push(item);
     persist();
     return item;
@@ -859,6 +978,11 @@ const BoxManager = {
     if (updates.color !== undefined) item.color = updates.color;
     if (updates.size !== undefined) item.size = updates.size;
     if (updates.qty !== undefined) item.qty = updates.qty;
+    if (updates.officialName !== undefined) {
+      if (updates.officialName) item.officialName = updates.officialName;
+      else delete item.officialName;
+    }
+    if (updates.catalog !== undefined) item.catalog = updates.catalog;
     persist();
     return item;
   },
@@ -1121,8 +1245,25 @@ const CloseFlow = {
 // ========== PrintManager ==========
 const PrintManager = {
   _setPrintMode(mode) {
-    document.body.classList.remove('print-mode-stats', 'print-mode-box');
+    document.body.classList.remove('print-mode-stats', 'print-mode-box', 'print-mode-outerbox');
+    // 外箱明細的 @page（A4 直式）只在外箱明細模式生效：切到任何其他模式（或結束列印）就移除，不影響既有兩種列印
+    const pageStyle = document.getElementById('outer-box-page-style');
+    if (pageStyle) pageStyle.remove();
     if (mode) document.body.classList.add('print-mode-' + mode);
+  },
+  // 外箱明細：把已排好版的 HTML 放進 #outer-box-print（保留到下一次列印才覆蓋）→ 進入列印模式＋插入 @page → 列印。
+  // 手機瀏覽器的 print() 會立刻返回，所以不能在這裡清掉列印模式；改在 afterprint 事件呼叫 endOuterBoxPrint()。
+  printOuterBoxes(pagesHtml) {
+    document.getElementById('outer-box-print').innerHTML = pagesHtml;
+    this._setPrintMode('outerbox');
+    const pageStyle = document.createElement('style');
+    pageStyle.id = 'outer-box-page-style';
+    pageStyle.textContent = '@page { size: A4 portrait; margin: 10.5mm 8mm 8mm; }';
+    document.head.appendChild(pageStyle);
+    window.print();
+  },
+  endOuterBoxPrint() {
+    if (document.body.classList.contains('print-mode-outerbox')) this._setPrintMode(null);
   },
   printStats() {
     const now = new Date();
@@ -1184,6 +1325,404 @@ const PrintManager = {
     this._setPrintMode('box');
     window.print();
     this._setPrintMode(null);
+  }
+};
+
+// ========== ProductFlow (商品編號 → 同箱累加／查商品總表／手動輸入 → 加入箱子；純邏輯，相依的東西都從參數傳入，不碰 DOM、state、localStorage) ==========
+// 品名只來自商品總表（POST /api/products/lookup）。OCR 只提供商品編號，OCR 回傳的品名、性別、顏色、尺寸一律不採用。
+// 品名記憶（productCache）每筆多一個 source：'edit'（編輯商品改過，優先於總表）、'manual'（查無時手動輸入，只用來預填）；
+// 沒有 source 的舊資料（改版前 AI 猜的）比照 'manual'，絕不蓋過總表。
+const ProductFlow = {
+  LOOKUP_URL: '/api/products/lookup',
+  MAX_QTY: 9999,
+  _busy: false,
+
+  /** 數量一律是 1～9999 的整數：非數字、0、負數 → 1；小數捨去；超過 9999 → 9999。 */
+  clampQty(value) {
+    const n = Math.floor(Number(value));
+    if (Number.isNaN(n)) return 1;
+    return Math.min(this.MAX_QTY, Math.max(1, n));
+  },
+
+  _text(value) {
+    return value === undefined || value === null ? '' : String(value).trim();
+  },
+
+  _fieldsOf(source) {
+    const s = source || {};
+    return { productName: this._text(s.productName), gender: this._text(s.gender), color: this._text(s.color), size: this._text(s.size) };
+  },
+
+  cacheGet(cache, code) {
+    if (!cache || !Object.prototype.hasOwnProperty.call(cache, code)) return null;
+    const entry = cache[code];
+    return entry && typeof entry === 'object' ? entry : null;
+  },
+
+  cacheSet(cache, code, entry) {
+    if (cache && code !== '__proto__') cache[code] = entry;
+  },
+
+  /** 重設品名記憶：只清空記憶，箱子與商品不動。回傳清掉幾筆。 */
+  resetCache(appState) {
+    const removed = Object.keys(appState.productCache || {}).length;
+    appState.productCache = {};
+    return removed;
+  },
+
+  findItem(box, code) {
+    return box.items.find(item => item.barcode === code) || null;
+  },
+
+  /** 查商品總表。失敗（斷線、4xx/5xx、回應格式不對）一律回 { ok: false }，不丟例外。成功回 { ok: true, products: Map<編號, 商品> }（查不到的編號不在 Map 裡）。 */
+  async lookup(api, barcodes) {
+    try {
+      const resp = await api.post(this.LOOKUP_URL, { barcodes });
+      if (!resp.ok) return { ok: false };
+      const body = await resp.json();
+      const data = body && body.success === true ? body.data : null;
+      if (!data || !data.products || typeof data.products !== 'object') return { ok: false };
+      const products = new Map();
+      for (const code of Object.keys(data.products)) {
+        const p = data.products[code];
+        if (p && typeof p === 'object') products.set(code, { ...this._fieldsOf(p), officialName: this._text(p.officialName) });
+      }
+      return { ok: true, products };
+    } catch (e) {
+      return { ok: false };
+    }
+  },
+
+  /** 同一箱已有這個編號就把數量加上去（上限 9999），沒有才新增一筆。改版前留下的重複資料不合併，累加到第一筆。 */
+  addOrMerge(box, code, info, qty, deps) {
+    if (!deps.isBoxOpen(box)) return { status: 'closed' };
+    const existing = this.findItem(box, code);
+    if (existing) {
+      const sum = (Number(existing.qty) || 1) + qty;
+      existing.qty = Math.min(this.MAX_QTY, sum);
+      deps.persist();
+      return { status: 'merged', item: existing, capped: sum > this.MAX_QTY };
+    }
+    const item = deps.addItem(box.id, code, { ...info, qty });
+    return item ? { status: 'added', item } : { status: 'closed' };
+  },
+
+  /**
+   * 拿到商品編號之後的唯一流程（拍照與手動輸入共用）。
+   * input: { barcode, qty }；deps: { box, api, cache(), isBoxOpen(box), addItem(boxId, code, info), persist(),
+   *   askBarcode() → 編號或 null, askProduct({ barcode, reason: 'missing'|'unverified', prefill, qty }) → { barcode, info, qty } 或 null, notify(msg, type) }
+   * 回傳 { status: 'added'|'merged'|'closed'|'cancelled'|'busy', item?, catalog?, capped? }（busy＝上一筆還在處理，這一次被忽略）。
+   */
+  async run(input, deps) {
+    // 防連點：上一筆（查詢或視窗）還沒結束時直接忽略，數量框填 100 連點兩下才不會變 200
+    if (this._busy) return { status: 'busy' };
+    this._busy = true;
+    try {
+      return await this._run(input, deps);
+    } finally {
+      this._busy = false;
+    }
+  },
+
+  async _run(input, deps) {
+    let code = this._text(input.barcode);
+    if (!code) {
+      code = this._text(await deps.askBarcode());
+      if (!code) return { status: 'cancelled' };
+    }
+    return this._resolve(code, this.clampQty(input.qty), deps, null);
+  },
+
+  // typed：人員在「總表查無」視窗手動輸入、又改了商品編號時帶進來的內容（用新編號再查一次；仍查不到才用它）
+  async _resolve(code, qty, deps, typed) {
+    const box = deps.box;
+    if (!deps.isBoxOpen(box)) return { status: 'closed' };
+    if (this.findItem(box, code)) return this.addOrMerge(box, code, {}, qty, deps);
+
+    // 編輯商品改過的品名優先於總表（查得到也一樣），不必再查
+    const remembered = this.cacheGet(deps.cache(), code);
+    if (remembered && remembered.source === 'edit') {
+      return this.addOrMerge(box, code, { ...this._fieldsOf(remembered), catalog: 'edited' }, qty, deps);
+    }
+
+    const found = await this.lookup(deps.api, [code]);
+    if (found.ok) {
+      const product = found.products.get(code);
+      if (product) {
+        if (typed) deps.notify('商品編號 ' + code + ' 在總表查得到，已改用總表品名', '');
+        const info = { productName: product.productName, gender: product.gender, color: product.color, size: product.size, officialName: product.officialName, catalog: 'found' };
+        return { ...this.addOrMerge(box, code, info, qty, deps), catalog: 'found' };
+      }
+    }
+    const catalog = found.ok ? 'missing' : 'unverified';
+    if (typed) return this._addManual(box, code, typed, qty, catalog, deps);
+
+    // 查無／無法查詢：跳視窗讓人員手動輸入（只用 manual 或舊資料的記憶預填）
+    const answer = await deps.askProduct({ barcode: code, reason: found.ok ? 'missing' : 'unverified', prefill: remembered ? this._fieldsOf(remembered) : {}, qty });
+    const answeredCode = answer ? this._text(answer.barcode) : '';
+    if (!answer || !answeredCode) return { status: 'cancelled' };
+    const answeredQty = this.clampQty(answer.qty);
+    const info = this._fieldsOf(answer.info);
+    if (answeredCode !== code) return this._resolve(answeredCode, answeredQty, deps, info);
+    return this._addManual(box, code, info, answeredQty, catalog, deps);
+  },
+
+  _addManual(box, code, info, qty, catalog, deps) {
+    this.cacheSet(deps.cache(), code, { ...this._fieldsOf(info), source: 'manual' });
+    deps.persist();
+    return { ...this.addOrMerge(box, code, { ...this._fieldsOf(info), catalog }, qty, deps), catalog };
+  },
+
+  /**
+   * 編輯商品存檔前先算好：品名／性別／顏色／尺寸有沒有真的改、要寫進記憶的內容與商品新的 catalog。
+   * 記憶的 source：這筆是「總表查無／未核對」時記 'manual'，其他（found、舊資料）記 'edit'。
+   * 只改數量（四個欄位沒變）不算編輯：不寫記憶、不清官方品名。
+   */
+  planEdit(item, fields) {
+    const next = this._fieldsOf(fields);
+    const prev = this._fieldsOf(item);
+    const changed = Object.keys(next).some(key => next[key] !== prev[key]);
+    if (!changed) return { changed: false, fields: next, cacheEntry: null, catalog: item.catalog };
+    const manual = item.catalog === 'missing' || item.catalog === 'unverified';
+    return { changed: true, fields: next, cacheEntry: { ...next, source: manual ? 'manual' : 'edit' }, catalog: item.catalog || 'edited' };
+  }
+};
+
+// ========== OuterBoxLabel (列印外箱明細：A4 直式一頁上下各一箱；合併、取官方品名、分頁、排版。純邏輯，相依的東西都從參數傳入，不碰 DOM、state、localStorage) ==========
+const OuterBoxLabel = {
+  LOOKUP_CHUNK: 200,
+  // 紙張（A4 直式，邊界 上 10.5mm、左右下 8mm，可用範圍 194 × 278.5mm）：每頁上下各一個半頁區塊（135mm），中間 6mm 放裁切虛線，虛線中心剛好在 10.5 + 135 + 3 = 148.5mm（紙張正中央）。
+  // 量到的高度要留一點餘裕（邊框與四捨五入），所以分頁用的上限比區塊小 3mm。
+  HALF_LIMIT_MM: 132,
+  FULL_LIMIT_MM: 273,
+
+  /** 與後端 src/sheets.ts 的 buildMergedName 完全一致：有性別 → 品名(性別-顏色尺寸)；沒有性別 → 品名(顏色尺寸)；都沒有 → 只有品名。 */
+  buildMergedName(productName, gender, color, size) {
+    let mergedName = productName;
+    if (productName) {
+      const colorSize = (color || '') + (size || '');
+      if (gender || colorSize) {
+        mergedName = productName + '(';
+        mergedName += gender ? gender + '-' + colorSize : colorSize;
+        mergedName += ')';
+      }
+    }
+    return mergedName;
+  },
+
+  _text(value) {
+    return value === undefined || value === null ? '' : String(value).trim();
+  },
+
+  _qtyOf(item) {
+    return Math.max(1, Math.floor(Number(item.qty)) || 1);
+  },
+
+  /** 空箱不能選。 */
+  isSelectable(box) {
+    return Array.isArray(box.items) && box.items.length > 0;
+  },
+
+  /** 選擇視窗每一箱的摘要：幾種商品（不同編號）、幾件。 */
+  summarize(box) {
+    const codes = new Set();
+    let pieces = 0;
+    for (const item of box.items) {
+      codes.add(this._text(item.barcode));
+      pieces += this._qtyOf(item);
+    }
+    return { kinds: codes.size, pieces };
+  },
+
+  /** 預設勾選：mode 'box'＝只勾那一箱；mode 'stats'＝所有已完成的箱（沒有已完成的就全勾）。空箱一律不勾。回傳依列表順序的箱號。 */
+  defaultSelection(boxes, mode, boxId) {
+    const selectable = boxes.filter(box => this.isSelectable(box));
+    if (mode === 'box') return selectable.filter(box => box.id === boxId).map(box => box.id);
+    const closed = selectable.filter(box => box.status === 'closed');
+    return (closed.length > 0 ? closed : selectable).map(box => box.id);
+  },
+
+  /** 勾選順序：勾起來加到最後、取消就移除（列印依這個順序排版）。 */
+  toggleOrder(order, boxId, checked) {
+    const rest = order.filter(id => id !== boxId);
+    return checked ? [...rest, boxId] : rest;
+  },
+
+  /** 同一箱同一個編號合併成一列（數量加總），依商品編號由小到大。 */
+  groupBox(box) {
+    const map = new Map();
+    for (const item of box.items) {
+      const code = this._text(item.barcode);
+      if (!map.has(code)) map.set(code, { barcode: code, qty: 0, items: [] });
+      const group = map.get(code);
+      group.qty += this._qtyOf(item);
+      group.items.push(item);
+    }
+    const groups = Array.from(map.values()).sort((a, b) => a.barcode.localeCompare(b.barcode, 'en', { numeric: true }));
+    for (const group of groups) {
+      group.rep = group.items.find(item => this._text(item.officialName)) || group.items.find(item => this._text(item.productName)) || group.items[0];
+    }
+    return groups;
+  },
+
+  /** 改版前加入的舊商品（沒有 officialName、也沒有 catalog）才需要查總表；人員編輯過的（catalog 為 'edited'，或 found 但官方品名已清掉）與手動輸入的不查。 */
+  needsLookup(group) {
+    return !this._text(group.rep.officialName) && group.rep.catalog === undefined;
+  },
+
+  /**
+   * 整理要印的資料。opts.lookup(barcodes) → { ok, products: Map }（一次最多 200 個）。
+   * 商品名稱：有 officialName → 用它；舊商品 → 總表查到的官方品名（只用於這次列印，不改箱子裡的資料）；否則用欄位組出品名。
+   * 回傳 { boxes: [{ id, rows: [{ barcode, name, qty }], total }], lookupFailed }。
+   */
+  async prepare(boxes, opts) {
+    const grouped = boxes.map(box => ({ box, groups: this.groupBox(box) }));
+    const need = [];
+    const seen = new Set();
+    for (const { groups } of grouped) {
+      for (const group of groups) {
+        if (this.needsLookup(group) && !seen.has(group.barcode)) {
+          seen.add(group.barcode);
+          need.push(group.barcode);
+        }
+      }
+    }
+    const official = new Map();
+    let lookupFailed = false;
+    for (let i = 0; i < need.length; i += this.LOOKUP_CHUNK) {
+      let result = null;
+      try { result = await opts.lookup(need.slice(i, i + this.LOOKUP_CHUNK)); } catch (e) { result = null; }
+      if (!result || !result.ok) {
+        lookupFailed = true;
+        continue;
+      }
+      for (const [code, product] of result.products) {
+        if (product.officialName) official.set(code, product.officialName);
+      }
+    }
+    const out = grouped.map(({ box, groups }) => {
+      const rows = groups.map(group => {
+        const rep = group.rep;
+        const name = this._text(rep.officialName)
+          || (this.needsLookup(group) ? official.get(group.barcode) : '')
+          || this.buildMergedName(this._text(rep.productName), this._text(rep.gender), this._text(rep.color), this._text(rep.size));
+        return { barcode: group.barcode, name, qty: group.qty };
+      });
+      return { id: box.id, rows, total: rows.reduce((sum, row) => sum + row.qty, 0) };
+    });
+    return { boxes: out, lookupFailed };
+  },
+
+  /**
+   * 分頁（純函式）。boxes: [{ id, rows, total, metrics: { headH, contHeadH, footH, rowHs } }]（高度是實際量到的，每列不等高）；
+   * limits: { half, full } 半頁與整頁可用高度（同單位）。
+   * 放得下半頁的箱子依序兩兩配成一頁；放不下半頁的箱子自己佔整頁、放不下整頁就接到下一頁（任何一列都不截斷）；
+   * 大箱前後不補位、維持原順序。接續段標 continued，合計（showFooter）只在該箱最後一段。
+   * 回傳 [{ full: boolean, slots: [{ boxId, rows, continued, showFooter, total }] }]。
+   */
+  paginate(boxes, limits) {
+    const pages = [];
+    let waiting = null; // 只有一個小箱、等著配對的半頁
+    const sum = values => values.reduce((a, b) => a + b, 0);
+    for (const box of boxes) {
+      const m = box.metrics;
+      if (m.headH + sum(m.rowHs) + m.footH <= limits.half) {
+        const slot = { boxId: box.id, rows: box.rows, continued: false, showFooter: true, total: box.total };
+        if (waiting) {
+          waiting.slots.push(slot);
+          waiting = null;
+        } else {
+          waiting = { full: false, slots: [slot] };
+          pages.push(waiting);
+        }
+        continue;
+      }
+      waiting = null;
+      let start = 0;
+      let continued = false;
+      for (;;) {
+        let used = continued ? m.contHeadH : m.headH;
+        let end = start;
+        while (end < box.rows.length && (end === start || used + m.rowHs[end] <= limits.full)) {
+          used += m.rowHs[end];
+          end += 1;
+        }
+        if (end === box.rows.length && (used + m.footH <= limits.full || end - start <= 1)) {
+          pages.push({ full: true, slots: [{ boxId: box.id, rows: box.rows.slice(start, end), continued, showFooter: true, total: box.total }] });
+          break;
+        }
+        if (end === box.rows.length) end -= 1; // 合計放不下：最後一列連同合計移到下一頁，不留「只有合計」的一頁
+        pages.push({ full: true, slots: [{ boxId: box.id, rows: box.rows.slice(start, end), continued, showFooter: false, total: box.total }] });
+        start = end;
+        continued = true;
+      }
+    }
+    return pages;
+  },
+
+  /** 一個箱段的表格（格式照現用的 Word 範本）：箱號大字 → 欄名 → 商品列 → 合計。所有動態內容經 esc。 */
+  renderTable(slot, esc) {
+    const title = '箱號：' + slot.boxId + (slot.continued ? '（續）' : '');
+    let html = '<table class="ob-table"><colgroup><col class="ob-col-code"><col class="ob-col-name"><col class="ob-col-qty"></colgroup><tbody>';
+    html += '<tr class="ob-title"><th colspan="3">' + esc(title) + '</th></tr>';
+    html += '<tr class="ob-colhead"><th class="ob-code">商品編號</th><th>商品名稱</th><th class="ob-qty">數量</th></tr>';
+    for (const row of slot.rows) {
+      html += '<tr class="ob-row"><td class="ob-code">' + esc(row.barcode) + '</td><td>' + (esc(row.name) || '—') + '</td><td class="ob-qty">' + esc(String(row.qty)) + '</td></tr>';
+    }
+    if (slot.showFooter) html += '<tr class="ob-total"><td colspan="3">合計：' + esc(String(slot.total)) + ' 件</td></tr>';
+    return html + '</tbody></table>';
+  },
+
+  renderPages(pages, esc) {
+    return pages.map(page => {
+      if (page.full) return '<section class="ob-page"><div class="ob-slot ob-slot-full">' + this.renderTable(page.slots[0], esc) + '</div></section>';
+      const second = page.slots[1] ? this.renderTable(page.slots[1], esc) : '';
+      return '<section class="ob-page"><div class="ob-slot">' + this.renderTable(page.slots[0], esc) + '</div><div class="ob-cut"></div><div class="ob-slot">' + second + '</div></section>';
+    }).join('');
+  },
+
+  /**
+   * 量實際高度（唯一碰 DOM 的地方，doc 從參數傳入）：把每一箱完整排進畫面外的容器（與列印同一份樣式），
+   * 讀每一列的高度（品名會換行，每列不等高）與半頁／整頁的可用高度。回傳 { boxes（每箱加上 metrics）, limits }。
+   */
+  measure(doc, prepared, esc) {
+    const host = doc.createElement('div');
+    host.className = 'ob-measure';
+    doc.body.appendChild(host);
+    try {
+      const probe = mm => {
+        const el = doc.createElement('div');
+        el.style.height = mm + 'mm';
+        host.appendChild(el);
+        const height = el.getBoundingClientRect().height;
+        el.remove();
+        return height;
+      };
+      const rowHeights = slot => {
+        host.innerHTML = this.renderTable(slot, esc);
+        const table = host.querySelector('table');
+        const trs = Array.from(table.querySelectorAll('tr'));
+        const tops = trs.map(tr => tr.getBoundingClientRect().top);
+        const bottom = table.getBoundingClientRect().bottom;
+        return tops.map((top, i) => (i + 1 < tops.length ? tops[i + 1] : bottom) - top);
+      };
+      const boxes = prepared.map(box => {
+        const heights = rowHeights({ boxId: box.id, rows: box.rows, continued: false, showFooter: true, total: box.total });
+        const contHeights = rowHeights({ boxId: box.id, rows: [], continued: true, showFooter: false, total: box.total });
+        return {
+          ...box,
+          metrics: {
+            headH: heights[0] + heights[1],
+            contHeadH: contHeights[0] + contHeights[1],
+            footH: heights[heights.length - 1],
+            rowHs: heights.slice(2, heights.length - 1)
+          }
+        };
+      });
+      return { boxes, limits: { half: probe(this.HALF_LIMIT_MM), full: probe(this.FULL_LIMIT_MM) } };
+    } finally {
+      host.remove();
+    }
   }
 };
 
@@ -1312,36 +1851,9 @@ document.getElementById('btn-capture').addEventListener('click', async () => {
       return;
     }
 
-    const barcode = (result.barcode || result.productCode || '').trim();
-    const info = {
-      productName: result.productName || '',
-      gender: result.gender || '',
-      color: result.color || '',
-      size: result.size || ''
-    };
-
-    // If barcode found and cached, auto-add
-    if (barcode && state.productCache[barcode]) {
-      BoxManager.addItem(box.id, barcode, state.productCache[barcode]);
-      try { navigator.vibrate?.(100); } catch(e) {}
-      showToast('掃描成功：' + barcode, 'success');
-      renderScanList();
-      return;
-    }
-
-    // Show dialog with pre-filled info for confirmation
-    showProductDialog(barcode, info, (confirmedBarcode, confirmedInfo) => {
-      if (!confirmedBarcode) {
-        showToast('商品編號不可為空', 'error');
-        return;
-      }
-      state.productCache[confirmedBarcode] = confirmedInfo;
-      persist();
-      BoxManager.addItem(box.id, confirmedBarcode, confirmedInfo);
-      try { navigator.vibrate?.(100); } catch(e) {}
-      showToast('已加入：' + confirmedBarcode, 'success');
-      renderScanList();
-    });
+    // OCR 只取商品編號：回來的品名、性別、顏色、尺寸一律不採用，也不預填視窗（品名由商品總表決定）
+    const barcode = String(result.barcode || result.productCode || '').trim();
+    await scanBarcode(barcode);
   } catch(e) {
     statusEl.textContent = '';
     statusEl.style.display = 'none';
@@ -1351,98 +1863,180 @@ document.getElementById('btn-capture').addEventListener('click', async () => {
 });
 
 // ========== Product Info Dialog ==========
-function addManualBarcode(barcode) {
+function readScanQty() {
+  const el = document.getElementById('input-scan-qty');
+  const qty = ProductFlow.clampQty(el.value);
+  el.value = qty;
+  return qty;
+}
+
+/** 拿到商品編號後的唯一入口（拍照與手動輸入共用）：同箱已有就累加、查總表、查無／查詢失敗才跳視窗讓人員手動輸入。 */
+async function scanBarcode(barcode) {
   const box = BoxManager.getCurrentBox();
   if (!box || box.status === 'closed') {
     showToast('請先建立或選擇一個開放中的箱號', 'error');
     return;
   }
-  barcode = barcode.trim();
-  if (!barcode) return;
-
-  const cached = state.productCache[barcode];
-  if (cached) {
-    BoxManager.addItem(box.id, barcode, cached);
-    try { navigator.vibrate?.(100); } catch(e) {}
-    showToast('已加入：' + barcode, 'success');
-    renderScanList();
+  if (ProductFlow._busy) {
+    showToast('正在處理上一筆，請稍候', '');
     return;
   }
+  const qty = readScanQty();
+  const manualBtn = document.getElementById('btn-add-manual');
+  const deps = {
+    box,
+    api: ApiClient,
+    cache: () => state.productCache,
+    isBoxOpen: b => b.status === 'open' && state.boxes.includes(b),
+    addItem: (boxId, code, info) => BoxManager.addItem(boxId, code, info),
+    persist,
+    askBarcode: () => askBarcodeDialog(),
+    askProduct: opts => askProductDialog(opts),
+    notify: showToast
+  };
+  let result;
+  manualBtn.disabled = true;
+  try {
+    result = await ProductFlow.run({ barcode, qty }, deps);
+  } catch (e) {
+    console.error('加入商品失敗:', e);
+    showToast('加入商品時發生錯誤：' + e.message, 'error');
+    return;
+  } finally {
+    const current = BoxManager.getCurrentBox();
+    manualBtn.disabled = !(current && current.status === 'open');
+  }
+  if (result.status === 'closed') {
+    showToast('此箱已完成或已刪除，未加入', 'error');
+    return;
+  }
+  if (result.status !== 'added' && result.status !== 'merged') return;
+  document.getElementById('input-scan-qty').value = 1; // 成功加入後重設回 1，避免下一件誤加整批數量
+  try { navigator.vibrate?.(100); } catch(e) {}
+  if (result.status === 'merged') {
+    showToast(`已累加：${result.item.barcode}，本箱共 ${result.item.qty} 件${result.capped ? '（已達上限 9999）' : ''}`, 'success');
+  } else {
+    showToast('已加入：' + result.item.barcode + (result.item.qty > 1 ? ' ×' + result.item.qty : ''), 'success');
+  }
+  renderBoxTabs();
+  renderScanList();
+}
 
-  showProductDialog(barcode, {}, (confirmedBarcode, confirmedInfo) => {
-    if (!confirmedBarcode) {
-      showToast('商品編號不可為空', 'error');
-      return;
-    }
-    state.productCache[confirmedBarcode] = confirmedInfo;
-    persist();
-    BoxManager.addItem(box.id, confirmedBarcode, confirmedInfo);
-    try { navigator.vibrate?.(100); } catch(e) {}
-    showToast('已加入：' + confirmedBarcode, 'success');
-    renderScanList();
+function genderOptions(selected) {
+  return ['男', '女', '中性'].map(g => `<option value="${g}"${selected === g ? ' selected' : ''}>${g}</option>`).join('');
+}
+
+/** OCR 沒讀到編號時：請人員輸入商品編號。回傳編號（Promise），取消回 null。 */
+function askBarcodeDialog() {
+  return new Promise(resolve => {
+    const backdrop = document.createElement('div');
+    backdrop.className = 'dialog-backdrop';
+    backdrop.innerHTML = `
+      <div class="dialog">
+        <h3>沒有讀到商品編號</h3>
+        <p>請輸入商品編號，確認後會到商品總表查詢品名。</p>
+        <div class="dialog-form">
+          <input type="text" id="dlg-barcode-only" placeholder="商品編號" style="font-family:'SF Mono','Fira Code',monospace">
+        </div>
+        <div class="dialog-actions">
+          <button class="btn btn-outline btn-sm dialog-cancel">取消</button>
+          <button class="btn btn-primary btn-sm dialog-confirm">確認</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(backdrop);
+    const input = backdrop.querySelector('#dlg-barcode-only');
+    setTimeout(() => input.focus(), 100);
+    const finish = value => { backdrop.remove(); resolve(value); };
+    const confirm = () => {
+      const value = input.value.trim();
+      if (!value) { showToast('商品編號不可為空', 'error'); return; }
+      finish(value);
+    };
+    backdrop.querySelector('.dialog-cancel').addEventListener('click', () => finish(null));
+    backdrop.querySelector('.dialog-confirm').addEventListener('click', confirm);
+    input.addEventListener('keydown', e => { if (e.key === 'Enter') confirm(); });
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) finish(null); });
   });
 }
 
-function showProductDialog(barcode, prefilledInfo, onConfirm) {
-  const info = prefilledInfo || {};
-  const backdrop = document.createElement('div');
-  backdrop.className = 'dialog-backdrop';
-  backdrop.innerHTML = `
-    <div class="dialog">
-      <h3>商品資訊</h3>
-      <div class="dialog-form">
-        <div>
-          <label>商品編號</label>
-          <input type="text" id="dlg-barcode" value="${escHtml(barcode || '')}" placeholder="條碼編號" style="font-family:'SF Mono','Fira Code',monospace">
+/**
+ * 總表查無（reason 'missing'）或無法查詢商品總表（'unverified'）時的手動輸入視窗。
+ * 商品編號可以改（確認時會用新編號再查一次）；回傳 { barcode, info, qty }（Promise），取消回 null。
+ */
+function askProductDialog({ barcode, reason, prefill, qty }) {
+  return new Promise(resolve => {
+    const info = prefill || {};
+    const missing = reason === 'missing';
+    const backdrop = document.createElement('div');
+    backdrop.className = 'dialog-backdrop';
+    backdrop.innerHTML = `
+      <div class="dialog dialog-wide">
+        <h3>${missing ? '總表查無此商品' : '無法查詢商品總表'}</h3>
+        <div class="dialog-alert ${missing ? 'dialog-alert-danger' : 'dialog-alert-warning'}" role="alert">
+          ${missing
+            ? '<strong>總表查無</strong>：請先核對商品編號，再手動輸入品名。商品編號改了會重新查詢總表。'
+            : '<strong>無法查詢商品總表</strong>（連線或系統問題）：請手動輸入品名，這一筆會標記為「未核對」。'}
         </div>
-        <div>
-          <label>品名</label>
-          <input type="text" id="dlg-product-name" value="${escHtml(info.productName || '')}" placeholder="例：第五代溫灸刷毛圓領發熱衣">
-        </div>
-        <div class="form-row">
+        <div class="dialog-form">
           <div>
-            <label>性別</label>
-            <select id="dlg-gender">
-              <option value="">請選擇</option>
-              <option value="男"${info.gender === '男' ? ' selected' : ''}>男</option>
-              <option value="女"${info.gender === '女' ? ' selected' : ''}>女</option>
-              <option value="中性"${info.gender === '中性' ? ' selected' : ''}>中性</option>
-            </select>
+            <label>商品編號</label>
+            <input type="text" id="dlg-barcode" value="${escHtml(barcode || '')}" placeholder="條碼編號" style="font-family:'SF Mono','Fira Code',monospace">
           </div>
           <div>
-            <label>顏色</label>
-            <input type="text" id="dlg-color" value="${escHtml(info.color || '')}" placeholder="例：經典黑">
+            <label>品名</label>
+            <input type="text" id="dlg-product-name" value="${escHtml(info.productName || '')}" placeholder="例：第五代溫灸刷毛圓領發熱衣">
+          </div>
+          <div class="form-row">
+            <div>
+              <label>性別</label>
+              <select id="dlg-gender">
+                <option value="">請選擇</option>
+                ${genderOptions(info.gender)}
+              </select>
+            </div>
+            <div>
+              <label>顏色</label>
+              <input type="text" id="dlg-color" value="${escHtml(info.color || '')}" placeholder="例：經典黑">
+            </div>
+          </div>
+          <div class="form-row">
+            <div>
+              <label>尺寸</label>
+              <input type="text" id="dlg-size" value="${escHtml(info.size || '')}" placeholder="例：L、XL、XXL">
+            </div>
+            <div>
+              <label>數量</label>
+              <input type="number" id="dlg-qty" value="${escHtml(String(ProductFlow.clampQty(qty)))}" min="1" max="9999" step="1" style="text-align:center">
+            </div>
           </div>
         </div>
-        <div>
-          <label>尺寸</label>
-          <input type="text" id="dlg-size" value="${escHtml(info.size || '')}" placeholder="例：L、XL、XXL">
+        <div class="dialog-actions">
+          <button class="btn btn-outline btn-sm dialog-cancel">取消</button>
+          <button class="btn btn-primary btn-sm dialog-confirm">確認</button>
         </div>
       </div>
-      <div class="dialog-actions">
-        <button class="btn btn-outline btn-sm dialog-cancel">取消</button>
-        <button class="btn btn-primary btn-sm dialog-confirm">確認</button>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(backdrop);
-  setTimeout(() => {
-    const first = backdrop.querySelector(barcode ? '#dlg-product-name' : '#dlg-barcode');
-    first.focus();
-  }, 100);
-  backdrop.querySelector('.dialog-cancel').addEventListener('click', () => backdrop.remove());
-  backdrop.querySelector('.dialog-confirm').addEventListener('click', () => {
-    const confirmedBarcode = backdrop.querySelector('#dlg-barcode').value.trim();
-    const confirmedInfo = {
-      productName: backdrop.querySelector('#dlg-product-name').value.trim(),
-      gender: backdrop.querySelector('#dlg-gender').value,
-      color: backdrop.querySelector('#dlg-color').value.trim(),
-      size: backdrop.querySelector('#dlg-size').value.trim()
-    };
-    backdrop.remove();
-    onConfirm(confirmedBarcode, confirmedInfo);
+    `;
+    document.body.appendChild(backdrop);
+    setTimeout(() => backdrop.querySelector(barcode ? '#dlg-product-name' : '#dlg-barcode').focus(), 100);
+    const finish = value => { backdrop.remove(); resolve(value); };
+    backdrop.querySelector('.dialog-cancel').addEventListener('click', () => finish(null));
+    backdrop.querySelector('.dialog-confirm').addEventListener('click', () => {
+      const confirmedBarcode = backdrop.querySelector('#dlg-barcode').value.trim();
+      if (!confirmedBarcode) { showToast('商品編號不可為空', 'error'); return; }
+      finish({
+        barcode: confirmedBarcode,
+        info: {
+          productName: backdrop.querySelector('#dlg-product-name').value.trim(),
+          gender: backdrop.querySelector('#dlg-gender').value,
+          color: backdrop.querySelector('#dlg-color').value.trim(),
+          size: backdrop.querySelector('#dlg-size').value.trim()
+        },
+        qty: ProductFlow.clampQty(backdrop.querySelector('#dlg-qty').value)
+      });
+    });
+    backdrop.addEventListener('click', e => { if (e.target === backdrop) finish(null); });
   });
-  backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
 }
 
 // Edit item dialog
@@ -1506,11 +2100,20 @@ function showEditItemDialog(boxId, scanId) {
       gender: backdrop.querySelector('#edit-gender').value,
       color: backdrop.querySelector('#edit-color').value.trim(),
       size: backdrop.querySelector('#edit-size').value.trim(),
-      qty: Math.max(1, parseInt(backdrop.querySelector('#edit-qty').value, 10) || 1)
+      qty: ProductFlow.clampQty(backdrop.querySelector('#edit-qty').value)
     };
     backdrop.remove();
+    // 品名等欄位真的改了：同時寫進品名記憶（查無／未核對的記 manual，其他記 edit），並清掉官方品名（之後顯示與列印改用修改後的欄位）
+    const plan = ProductFlow.planEdit(item, updates);
+    if (plan.changed) {
+      updates.officialName = '';
+      updates.catalog = plan.catalog;
+      ProductFlow.cacheSet(state.productCache, item.barcode, plan.cacheEntry);
+    }
     BoxManager.updateItem(boxId, scanId, updates);
+    persist();
     showToast('商品已更新', 'success');
+    renderBoxTabs();
     renderScanList();
   });
   backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
@@ -1522,7 +2125,7 @@ document.getElementById('btn-add-manual').addEventListener('click', () => {
   const val = input.value.trim();
   if (!val) return;
   input.value = '';
-  addManualBarcode(val);
+  scanBarcode(val);
 });
 document.getElementById('input-manual-barcode').addEventListener('keydown', e => {
   if (e.key === 'Enter') document.getElementById('btn-add-manual').click();
@@ -1530,6 +2133,14 @@ document.getElementById('input-manual-barcode').addEventListener('keydown', e =>
 
 // Print stats
 document.getElementById('btn-print').addEventListener('click', () => PrintManager.printStats());
+
+// 列印外箱明細：統計報表（預設勾所有已完成的箱）、目前箱子的橫幅（只勾這一箱）；箱號列的按鈕在 renderBoxTabs
+document.getElementById('btn-print-outer-stats').addEventListener('click', () => showOuterBoxDialog('stats'));
+document.getElementById('btn-print-outer-current').addEventListener('click', () => {
+  const box = BoxManager.getCurrentBox();
+  if (box) showOuterBoxDialog('box', box.id);
+});
+window.addEventListener('afterprint', () => PrintManager.endOuterBoxPrint());
 
 // Print box label
 document.getElementById('btn-print-box').addEventListener('click', () => {
@@ -1583,6 +2194,18 @@ function renderBoxTabs() {
       startEditBox(box.id, wrapper, tab);
     });
     actions.appendChild(editBtn);
+
+    // 列印外箱明細（只預設勾這一箱）
+    const outerBtn = document.createElement('button');
+    outerBtn.className = 'box-action-btn';
+    outerBtn.title = '列印外箱明細';
+    outerBtn.setAttribute('aria-label', '列印外箱明細：' + box.id);
+    outerBtn.textContent = '🖨';
+    outerBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      showOuterBoxDialog('box', box.id);
+    });
+    actions.appendChild(outerBtn);
 
     // Delete button
     const delBtn = document.createElement('button');
@@ -1686,6 +2309,7 @@ function setScannerEnabled(enabled, hint) {
   document.getElementById('btn-start-scan').disabled = !enabled;
   document.getElementById('btn-add-manual').disabled = !enabled;
   document.getElementById('input-manual-barcode').disabled = !enabled;
+  document.getElementById('input-scan-qty').disabled = !enabled;
 }
 
 function resetScannerUI() {
@@ -1721,18 +2345,32 @@ function renderScanList() {
     const canEdit = box.status === 'open';
     const itemQty = item.qty || 1;
     const details = [item.gender, item.color, item.size].filter(Boolean);
+    const catalogTag = item.catalog === 'missing' ? '<span class="scan-tag scan-tag-missing">總表查無</span>'
+      : item.catalog === 'unverified' ? '<span class="scan-tag scan-tag-unverified">未核對</span>' : '';
     li.innerHTML = `
       <div class="scan-item-info">
-        <div class="scan-item-barcode">${escHtml(item.barcode)}${itemQty > 1 ? ` <span style="color:var(--primary-dark);font-size:.82rem">×${itemQty}</span>` : ''}</div>
+        <div class="scan-item-barcode">${escHtml(item.barcode)}${!canEdit && itemQty > 1 ? ` <span style="color:var(--primary-dark);font-size:.82rem">×${itemQty}</span>` : ''}${catalogTag}</div>
         ${item.productName ? `<div class="scan-item-name">${escHtml(item.productName)}</div>` : ''}
         ${details.length ? `<div class="scan-item-detail">${details.map(d => `<span>${escHtml(d)}</span>`).join('')}</div>` : ''}
       </div>
+      <div class="scan-item-controls">
       <span class="scan-item-time">${new Date(item.scannedAt).toLocaleTimeString('zh-TW')}</span>
+      ${canEdit ? `<label class="item-qty-label">數量 <input type="number" class="item-qty-input" data-scan-id="${escHtml(item.scanId)}" value="${itemQty}" min="1" max="9999" step="1" inputmode="numeric"></label>` : ''}
       ${canEdit ? `<button class="btn btn-outline btn-sm btn-edit-item" data-scan-id="${item.scanId}" style="padding:6px 10px">✎</button>` : ''}
       ${canEdit ? `<button class="btn btn-danger btn-sm btn-delete-item" data-scan-id="${item.scanId}" style="padding:6px 10px">✕</button>` : ''}
+      </div>
     `;
     list.appendChild(li);
   }
+
+  // 直接在清單輸入數量（不必進編輯視窗）：一律修正成 1～9999 的整數
+  list.querySelectorAll('.item-qty-input').forEach(input => {
+    input.addEventListener('change', () => {
+      BoxManager.updateItem(box.id, input.dataset.scanId, { qty: ProductFlow.clampQty(input.value) });
+      renderBoxTabs();
+      renderScanList();
+    });
+  });
 
   // Bind edit buttons
   list.querySelectorAll('.btn-edit-item').forEach(btn => {
@@ -1747,6 +2385,7 @@ function renderScanList() {
       const scanId = btn.dataset.scanId;
       BoxManager.removeItem(box.id, scanId);
       showToast('已刪除條目', '');
+      renderBoxTabs();
       renderScanList();
     });
   });
@@ -1822,6 +2461,101 @@ function confirmClearAll() {
     renderAll();
     renderStats();
   });
+}
+
+document.getElementById('btn-reset-product-cache').addEventListener('click', () => {
+  const count = Object.keys(state.productCache || {}).length;
+  showDialog('重設品名記憶', `只清除系統記住的品名（${count} 筆），箱子與商品都不會刪除。`, () => {
+    ProductFlow.resetCache(state);
+    persist();
+    showToast('品名記憶已重設', 'success');
+  });
+});
+
+// ========== Outer Box Print Dialog ==========
+/** 列印外箱明細：選擇要印的箱子（空箱不能選；依勾選順序排版）→ 查官方品名 → 量高度分頁 → 列印。 */
+function showOuterBoxDialog(mode, boxId) {
+  const boxes = state.boxes;
+  if (boxes.length === 0) {
+    showToast('目前沒有任何箱子', 'error');
+    return;
+  }
+  let order = OuterBoxLabel.defaultSelection(boxes, mode, boxId);
+  const backdrop = document.createElement('div');
+  backdrop.className = 'dialog-backdrop';
+  const rowsHtml = boxes.map((box, i) => {
+    const selectable = OuterBoxLabel.isSelectable(box);
+    const sum = OuterBoxLabel.summarize(box);
+    return `<label class="ob-pick${selectable ? '' : ' disabled'}">
+      <input type="checkbox" data-box-id="${escHtml(box.id)}" data-index="${i}"${selectable ? '' : ' disabled'}>
+      <span class="ob-pick-id">${escHtml(box.id)}</span>
+      <span class="ob-tag ${box.status === 'closed' ? 'ob-tag-closed' : 'ob-tag-open'}">${box.status === 'closed' ? '已完成' : '進行中'}</span>
+      <span class="ob-pick-order"></span>
+      <span class="ob-pick-meta">${selectable ? `${sum.kinds} 種商品、${sum.pieces} 件` : '空箱（不能列印）'}</span>
+    </label>`;
+  }).join('');
+  backdrop.innerHTML = `
+    <div class="dialog dialog-wide">
+      <h3>列印外箱明細</h3>
+      <p>A4 直式，一頁上下各一箱，中間有裁切虛線。依勾選順序排版（數字是順序）。</p>
+      <div class="ob-pick-tools">
+        <button class="btn btn-outline btn-sm" data-pick="all">全選</button>
+        <button class="btn btn-outline btn-sm" data-pick="closed">只選已完成</button>
+        <button class="btn btn-outline btn-sm" data-pick="none">全不選</button>
+      </div>
+      <div class="ob-pick-list">${rowsHtml}</div>
+      <div class="dialog-actions">
+        <button class="btn btn-outline btn-sm dialog-cancel">取消</button>
+        <button class="btn btn-primary btn-sm dialog-confirm">列印</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(backdrop);
+  const checkboxes = Array.from(backdrop.querySelectorAll('input[type="checkbox"]'));
+  const confirmBtn = backdrop.querySelector('.dialog-confirm');
+  const refresh = () => {
+    for (const cb of checkboxes) {
+      const at = order.indexOf(cb.dataset.boxId);
+      cb.checked = at >= 0;
+      cb.parentElement.querySelector('.ob-pick-order').textContent = at >= 0 ? '#' + (at + 1) : '';
+    }
+    confirmBtn.disabled = order.length === 0;
+  };
+  checkboxes.forEach(cb => cb.addEventListener('change', () => {
+    order = OuterBoxLabel.toggleOrder(order, cb.dataset.boxId, cb.checked);
+    refresh();
+  }));
+  backdrop.querySelectorAll('[data-pick]').forEach(btn => btn.addEventListener('click', () => {
+    const pick = btn.dataset.pick;
+    order = pick === 'none' ? [] : boxes.filter(b => OuterBoxLabel.isSelectable(b) && (pick === 'all' || b.status === 'closed')).map(b => b.id);
+    refresh();
+  }));
+  refresh();
+  backdrop.querySelector('.dialog-cancel').addEventListener('click', () => backdrop.remove());
+  confirmBtn.addEventListener('click', async () => {
+    const chosen = order.map(id => BoxManager.getBox(id)).filter(b => b && OuterBoxLabel.isSelectable(b));
+    if (chosen.length === 0) return;
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = '準備中…';
+    try {
+      await printOuterBoxes(chosen);
+      backdrop.remove();
+    } catch (e) {
+      console.error('列印外箱明細失敗:', e);
+      showToast('列印外箱明細失敗：' + e.message, 'error');
+      confirmBtn.disabled = false;
+      confirmBtn.textContent = '列印';
+    }
+  });
+  backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
+}
+
+async function printOuterBoxes(chosen) {
+  const prepared = await OuterBoxLabel.prepare(chosen, { lookup: codes => ProductFlow.lookup(ApiClient, codes) });
+  if (prepared.lookupFailed) showToast('無法查詢官方品名，舊商品改用現有品名列印', 'error');
+  const measured = OuterBoxLabel.measure(document, prepared.boxes, escHtml);
+  const pages = OuterBoxLabel.paginate(measured.boxes, measured.limits);
+  PrintManager.printOuterBoxes(OuterBoxLabel.renderPages(pages, escHtml));
 }
 
 // ========== Helpers ==========
