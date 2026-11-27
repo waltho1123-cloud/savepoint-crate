@@ -464,6 +464,7 @@ src/env.ts              環境變數載入
 src/common.ts           共用型別與工具（ServiceError、Logger、FetchLike）
 scripts/docker-entrypoint.sh  容器入口：修正 Volume 擁有者後用 su-exec 降權
 tests/                  vitest（含 assets.test.ts：靜態資源路由與路徑穿越；branding.test.ts：配色檔 sha256、CSS 只寫 token 且守住配色鐵律、頁面結構與 CSP；notify-engine.test.ts：直接從 index.html 取出 ApiClient、各引擎與 UserBar 在 Node 執行來測；server*.test.ts 真的啟動 src/server.ts；login-gate.test.ts：登入閘門、next 白名單、角色與權限、v2→v3）；tests/fixtures/n8n-golden.json 是 n8n 現行版的標準答案（產生腳本：tests/fixtures/generate-n8n-golden.mjs）
+docs/conventions/       按需讀的約定文件，效力與 CLAUDE.md 相同（CLAUDE.md 的路由表指向這裡）：auth-accounts.md（登入、帳號、設定頁、SSO）、branding.md（配色與靜態資源）、index-html.md（前端單頁）
 docs/legacy-n8n/        已退役的 n8n 工作流匯出（歷史參考）
 Dockerfile              兩階段建置，EXPOSE／預設 PORT=8080、DATA_DIR=/app/data，入口腳本降權
 ```
