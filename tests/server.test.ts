@@ -41,6 +41,8 @@ describe("src/server.ts（實際啟動行程）", () => {
         ok: true,
         openaiConfigured: true,
         sheetsConfigured: false,
+        productsConfigured: false,
+        productCatalogRows: null,
         serviceAccountEmail: null,
         clientIp: "127.0.0.1",
         requestIsHttps: false,

@@ -113,6 +113,8 @@ describe("GET /healthz", () => {
       ok: true,
       openaiConfigured: true,
       sheetsConfigured: true,
+      productsConfigured: true,
+      productCatalogRows: null, // 還沒載入過；/healthz 本身不會去讀商品總表
       serviceAccountEmail: creds.email,
       clientIp: "unknown", // app.request 沒有真實連線，也沒帶 X-Forwarded-For
       requestIsHttps: false, // app.request 的網址是 http://localhost，也沒帶 X-Forwarded-Proto
@@ -141,6 +143,8 @@ describe("GET /healthz", () => {
       ok: true,
       openaiConfigured: true,
       sheetsConfigured: false,
+      productsConfigured: false,
+      productCatalogRows: null,
       serviceAccountEmail: null,
       clientIp: "unknown",
       requestIsHttps: false,
@@ -239,6 +243,8 @@ describe("GET /healthz", () => {
       "lineWebhookConfigured",
       "ok",
       "openaiConfigured",
+      "productCatalogRows",
+      "productsConfigured",
       "requestIsHttps",
       "serviceAccountEmail",
       "sheetsConfigured",
@@ -569,6 +575,7 @@ describe("登入閘門：OCR、存檔、關箱通知一定要登入（任一角�
     ["/api/ocr", { image: SAMPLE_IMAGE }],
     ["/api/save", { seqNo: "1", date: "2026/10/05", boxId: "B1", barcode: "123", productName: "品", quantity: 1, time: "2026-10-05 15:20:00" }],
     ["/api/box-closed", { boxId: "B1", items: [], total: 0, successCount: 0, failedCount: 0 }],
+    ["/api/products/lookup", { barcodes: ["1801112756"] }],
   ];
 
   it.each(PROTECTED)("POST %s 沒有登入 → 401「請先登入」，不呼叫任何上游服務", async (path, body) => {
@@ -645,7 +652,7 @@ describe("登入閘門：OCR、存檔、關箱通知一定要登入（任一角�
 
   it("沒登入時 GET 這些端點仍然是 405（方法不對不必先登入）；不存在的 /api 路徑仍是 404", async () => {
     const { app } = makeApp();
-    for (const path of ["/api/ocr", "/api/save", "/api/box-closed"]) {
+    for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup"]) {
       const res = await app.request(path);
       expect(res.status, path).toBe(405);
     }

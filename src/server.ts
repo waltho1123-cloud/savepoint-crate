@@ -86,7 +86,7 @@ async function main(): Promise<void> {
     }
   }
 
-  const app = createApp({ env, indexHtml, assets, settings });
+  const app = createApp({ env, indexHtml, assets, settings, warmProductCatalog: true });
   const server = serve({ fetch: app.fetch, port: env.PORT, hostname: "0.0.0.0" }, (info) => {
     console.log(`savepoint-crate listening on port ${info.port} (${info.address})`);
   });
