@@ -564,4 +564,66 @@ describe("index.html 的接線（原始碼層級的檢查）", () => {
       expect(source).not.toContain("officialName");
     }
   });
+
+  it("統計報表：欄位不會被擠成一個字一行；手機是一筆一張卡片，CSS 的 nth-child 與 8 個欄位的順序對得上", () => {
+    // CSS 用 td:nth-child 定位欄位，所以表頭與 renderStats 的欄位順序是約定的一部分
+    const table = sliceBetween('<table class="stats-table" id="stats-table">', "</thead>");
+    expect([...table.matchAll(/<th>([^<]*)<\/th>/g)].map((m) => m[1])).toEqual([
+      "#", "商品編號", "品名", "性別", "顏色", "尺寸", "數量", "所在箱號",
+    ]);
+    const render = sliceBetween("function renderStats", "// ========== Dialog");
+    const cells = [...render.slice(render.indexOf("aggItems.forEach")).matchAll(/<td[^>]*>\$\{([^}]*)\}/g)].map((m) => m[1]);
+    expect(cells).toHaveLength(8);
+    expect(cells[0]).toContain("idx + 1");
+    expect(cells[1]).toContain("item.barcode");
+    expect(cells[2]).toContain("item.productName");
+    expect(cells[3]).toContain("item.gender");
+    expect(cells[4]).toContain("item.color");
+    expect(cells[5]).toContain("item.size");
+    expect(cells[6]).toContain("item.totalQty");
+    expect(cells[7]).toContain("item.boxes");
+
+    // 表格模式（>= 768px）：每欄有最小寬度；不用 nowrap 撐寬（超長的編號、顏色照樣換行）；空狀態那一格（也是第 1 格）要能換行。
+    // 只對 screen 生效：列印統計表不吃這些規則（它有自己的一組，見下）。
+    const wide = sliceBetween("@media screen and (min-width: 768px) {", "@media screen and (min-width: 900px) {");
+    expect(wide).toContain(".stats-table td:nth-child(3) { min-width: 9em; }");
+    expect(wide).toContain(".stats-table td:nth-child(2) { min-width: 11ch; overflow-wrap: anywhere; }");
+    // 全站是 border-box：不改成 content-box 的話，最小寬度會被左右內距吃掉，短欄照樣被擠成直的
+    expect(wide).toContain(".stats-table td { box-sizing: content-box; }");
+    expect(wide).toContain(".stats-table td.stats-empty { white-space: normal; }");
+    expect(wide).not.toMatch(/td:nth-child\((2|3|4|5|6|8)\)[^}]*white-space: nowrap/);
+    // 沒有包在 @media 裡的 nth-child 規則（那種會連列印一起影響）
+    const statsCss = sliceBetween("/* ===== Stats table", "@media screen and (min-width: 768px) {");
+    expect(statsCss).not.toContain("nth-child(");
+
+    // 列印統計表：自己的一組最小寬度（只在 print-mode-stats），同樣是內容寬度、不用 nowrap 撐欄位
+    const print = sliceBetween("/* ===== Print styles ===== */", "</style>");
+    expect(print).toContain("body.print-mode-stats .stats-table td { box-sizing: content-box; padding-left: 8px; padding-right: 8px; }");
+    expect(print).toContain("body.print-mode-stats .stats-table td:nth-child(2) { min-width: 11ch; overflow-wrap: anywhere; }");
+    expect(print).toContain("body.print-mode-stats .stats-table td:nth-child(3) { min-width: 12em; }");
+    expect(print).toContain("body.print-mode-stats .stats-table td.stats-empty { white-space: normal; }");
+    expect(print).not.toMatch(/td:nth-child\((2|3|4|5|6|8)\)[^}]*white-space: nowrap/);
+    // 列印區裡的 nth-child 規則一律掛在 print-mode-stats 底下（不可影響標籤單與外箱明細的列印）
+    for (const line of print.split("\n").filter((l) => l.includes("nth-child("))) {
+      expect(line.trim().startsWith("body.print-mode-stats .stats-table"), line).toBe(true);
+    }
+
+    // 窄螢幕（< 768px）：卡片；只對 screen 生效（列印統計表仍是表格）
+    const mobile = sliceBetween("@media screen and (max-width: 767px) {", "/* ===== Print styles ===== */");
+    expect(mobile).toMatch(/td:nth-child\(2\) \{ order: 2; flex: 1 1 0; \}/);
+    expect(mobile).toContain(".stats-table thead { display: none; }");
+    expect(mobile).toMatch(/\.stats-table tbody tr \{\s*display: flex; flex-wrap: wrap;/);
+    expect(mobile).toMatch(/td:nth-child\(3\) \{ order: 4; flex: 0 0 100%;/);
+    expect(mobile).toContain(".stats-table tbody td:nth-child(7)::before { content: '數量 '; }");
+    expect(mobile).toContain(".stats-table tbody td:nth-child(4)::before { content: '性別 '; }");
+    expect(mobile).toContain(".stats-table tbody td:nth-child(5)::before { content: '顏色 '; }");
+    expect(mobile).toContain(".stats-table tbody td:nth-child(6)::before { content: '尺寸 '; }");
+    expect(mobile).toContain(".stats-table tbody td:nth-child(8)::before { content: '箱號 '; }");
+    expect(mobile).toMatch(/td\.stats-empty \{ order: 0; flex: 0 0 100%;/);
+  });
+
+  it("<style> 的大括號成對（多一個 } 會讓後面的規則整條失效，原始碼層級的其他檢查抓不到）", () => {
+    const css = sliceBetween("<style>", "</style>").replace(/\/\*[\s\S]*?\*\//g, "");
+    expect(css.split("{").length).toBe(css.split("}").length);
+  });
 });
