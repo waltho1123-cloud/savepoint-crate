@@ -138,7 +138,7 @@ export function firstPublicIp(xForwardedFor: string): string | null {
 }
 
 /**
- * 取客戶端 IP（限流用）。服務跑在 Zeabur 反向代理後面，代理會把真實連線 IP 附加在
+ * 取客戶端 IP（限流用）。服務跑在反向代理後面，代理會把真實連線 IP 附加在
  * X-Forwarded-For 的最右邊；左邊的值可能是客戶端自己偽造的，所以由右往左取第一個公開位址。
  * 沒有 X-Forwarded-For（例如本機直連）或整串都不是公開位址時，退回 TCP 連線位址。
  */

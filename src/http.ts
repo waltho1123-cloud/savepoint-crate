@@ -35,7 +35,7 @@ export function readString(body: Record<string, unknown>, key: string): string {
   return typeof value === "string" ? value : "";
 }
 
-/** 這個請求是不是走 HTTPS（Zeabur 的反向代理終止 TLS，靠 X-Forwarded-Proto 告知；沒有這個標頭就看連線本身）。 */
+/** 這個請求是不是走 HTTPS（反向代理終止 TLS，靠 X-Forwarded-Proto 告知；沒有這個標頭就看連線本身）。 */
 export function isHttpsRequest(c: Context): boolean {
   const forwarded = c.req.header("x-forwarded-proto")?.split(",")[0]?.trim().toLowerCase();
   if (forwarded) return forwarded === "https";

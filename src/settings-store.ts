@@ -11,7 +11,7 @@ import { describeError, ServiceError, type Logger } from "./common.js";
  * 寫檔用暫存檔＋rename（原子替換），權限 0600。
  *
  * 資料目錄不存在或不可寫時，store 進入「不可用」狀態（writable=false）：沒有地方存帳號，所以沒有人登得進去——
- * 整個網站（含裝箱主頁與 OCR、存檔、關箱通知）都回 503「請在 Zeabur 掛載 Volume 到 /app/data」。
+ * 整個網站（含裝箱主頁與 OCR、存檔、關箱通知）都回 503「請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data」。
  *
  * 檔案格式版本：
  *   - version 1：最舊的版本，只有一個管理密碼（`admin: { passwordHash, updatedAt }`），沒有帳號。
@@ -22,7 +22,7 @@ import { describeError, ServiceError, type Logger } from "./common.js";
  * 有了帳號的那一次寫入才會變成版本 3（之後舊版程式不認得版本 3，會把檔案當成損毀）。
  */
 
-/** 資料目錄不可用時，設定相關端點回的訊息（Zeabur 上要掛 Volume 的位置固定是 /app/data）。 */
+/** 資料目錄不可用時，設定相關端點回的訊息（Coolify 上持久儲存要掛的位置固定是 /app/data）。 */
 export const DATA_DIR_UNAVAILABLE_MESSAGE = "請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data";
 
 export const SETTINGS_FILE_NAME = "settings.json";

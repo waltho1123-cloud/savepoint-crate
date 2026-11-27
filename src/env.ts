@@ -2,7 +2,7 @@
  * 環境變數載入。
  *
  * 設計取捨：缺少 OPENAI_API_KEY／GOOGLE_SERVICE_ACCOUNT_CREDENTIALS 時服務**仍會啟動**
- * （靜態頁與 /healthz 照常），只是對應端點回 503；這樣部署到 Zeabur 後即使金鑰還沒填，
+ * （靜態頁與 /healthz 照常），只是對應端點回 503；這樣部署後即使金鑰還沒填，
  * 也能開 /healthz 看到「哪一項還沒設定」，不會變成反覆崩潰重啟。
  * LINE 三個變數（關箱通知）都是選填：沒設定時整個通知功能靜默略過，絕不影響關箱與存檔；
  * 它們現在是「備援」——設定頁（/settings）存在 DATA_DIR 的設定檔優先（見 line-settings.ts）。
@@ -14,7 +14,7 @@ export const DEFAULT_OPENAI_MODEL = "gpt-5.6-luna";
 export const DEFAULT_GOOGLE_SHEET_ID = "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A";
 export const DEFAULT_GOOGLE_SHEET_NAME = "商品主檔";
 export const DEFAULT_PORT = 8080;
-/** 本機預設的資料目錄（相對於啟動時的工作目錄）；容器裡由 Dockerfile 設成 /app/data（Zeabur 把 Volume 掛在這裡）。 */
+/** 本機預設的資料目錄（相對於啟動時的工作目錄）；容器裡由 Dockerfile 設成 /app/data（Coolify 的持久儲存掛在這裡）。 */
 export const DEFAULT_DATA_DIR = "./data";
 
 export interface AppEnv {
@@ -33,7 +33,7 @@ export interface AppEnv {
   LINE_GROUP_ID: string;
   /** channel secret，只用來驗證 webhook 簽章；空字串＝未設定（POST /api/line/webhook 回 503）。 */
   LINE_CHANNEL_SECRET: string;
-  /** 設定頁的資料目錄（放 settings.json；Zeabur 上要掛 Volume 到這裡）。 */
+  /** 設定頁的資料目錄（放 settings.json；正式環境要把 Coolify 的持久儲存掛到這裡）。 */
   DATA_DIR: string;
   PORT: number;
 }

@@ -139,9 +139,9 @@ export function createApp(deps: AppDeps): Hono {
   app.get("/index.html", serveIndex);
 
   // 健康檢查：回「有沒有設定好」、服務帳號的 email（部署後要把試算表分享給它），以及呼叫端 IP。
-  // clientIp 與限流用的是同一個判斷（clientIpOf）：部署後 curl 一次，就能確認 Zeabur 反向代理的
+  // clientIp 與限流用的是同一個判斷（clientIpOf）：部署後 curl 一次，就能確認 Coolify 反向代理的
   // X-Forwarded-For 有被正確處理（應該是呼叫端自己的對外 IP，而不是代理的內部位址或所有人共用的同一個值）。
-  // requestIsHttps：這個請求被判斷為 HTTPS（看 X-Forwarded-Proto；Zeabur 的反向代理要有送，登入 cookie 才會加 Secure），
+  // requestIsHttps：這個請求被判斷為 HTTPS（看 X-Forwarded-Proto；Coolify 的反向代理要有送，登入 cookie 才會加 Secure），
   // 和 clientIp 一樣是部署後 curl 一次就能確認代理行為的診斷欄位。
   // dataDirWritable：資料目錄（Volume）可寫入，設定頁才能用；dataDirMounted：它是不是獨立掛載的磁碟（null＝判斷不出來；
   // false＝只是容器內的暫存目錄，重新部署後設定會消失）。

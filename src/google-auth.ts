@@ -45,7 +45,7 @@ function tryParseCredentialsJson(text: string): ServiceAccountCredentials | null
 
 /**
  * 解析 `GOOGLE_SERVICE_ACCOUNT_CREDENTIALS`：接受「原始 JSON」或「整包 JSON 的 base64」兩種格式
- * （Zeabur 上實際存的是 base64，避免多行私鑰與引號被環境變數介面弄壞）。
+ * （正式環境建議存 base64，避免多行私鑰與引號被環境變數介面弄壞）。
  * 先當 JSON 解析，失敗才當 base64 解碼後再當 JSON 解析（Node 的 base64 解碼會忽略換行與空白，
  * 也接受 base64url 字元）。只接受同時含非空 `client_email` 與 `private_key` 字串的物件，否則回 null。
  */

@@ -6,7 +6,7 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 
-# 坑 (a)：Zeabur 會把服務環境變數（含 NODE_ENV=production）一併注入 build 階段。
+# 坑 (a)：部署平台可能把服務環境變數（含 NODE_ENV=production）一併注入 build 階段（舊的 Zeabur 就會）。
 # 在 NODE_ENV=production 底下 pnpm 會自動跳過 devDependencies（typescript 等建置工具），
 # 導致 `pnpm run build` 找不到 tsc 而失敗，而且本機 docker build 永遠測不出來。
 # 這裡把 build stage 的 NODE_ENV 明確蓋成 development，並加 --prod=false 強制連 devDependencies 一起裝。
@@ -47,11 +47,11 @@ COPY public ./public
 COPY scripts/docker-entrypoint.sh ./scripts/docker-entrypoint.sh
 RUN chmod 755 ./scripts/docker-entrypoint.sh
 
-# 設定頁的資料目錄（settings.json 放這裡）：Zeabur Dashboard → 服務 → 硬碟（Volume）→ 掛載路徑填 /app/data。
+# 設定頁的資料目錄（settings.json 放這裡）：Coolify 應用頁 → 持久儲存（Persistent Storage）→ 掛載路徑填 /app/data。
 # 映像本身不含 data/；沒掛 Volume 時入口腳本仍會建出這個目錄（重新部署後內容會消失）。
 ENV DATA_DIR=/app/data
 
-# 坑 (b)：Zeabur 的反向代理固定打容器的 8080，並注入 PORT=8080（不看 EXPOSE）；
+# 坑 (b)：反向代理打的是容器的 PORT（Coolify 依應用設定的容器埠注入 PORT；舊的 Zeabur 固定打 8080、不看 EXPOSE）；
 # 程式一律讀 process.env.PORT（見 src/env.ts），這裡的 8080 只是本機沒有注入 PORT 時的預設值。
 ENV PORT=8080
 EXPOSE 8080

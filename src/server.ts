@@ -19,7 +19,7 @@ const SHUTDOWN_GRACE_MS = 25_000;
 
 /**
  * 啟動入口：讀環境變數、index.html 與靜態資源（public/assets）→ 開啟資料目錄（設定頁用，見 settings-store.ts）→ 建立 app → 監聽 0.0.0.0:${PORT}。
- * Zeabur 的反向代理固定打容器的 8080 並注入 PORT=8080，所以一律讀 process.env.PORT，不寫死埠號。
+ * 反向代理打的是容器的 PORT（Coolify 依應用設定的容器埠注入），所以一律讀 process.env.PORT，不寫死埠號。
  * log 只印變數「名稱」，不印任何變數的值。
  */
 async function main(): Promise<void> {
@@ -38,7 +38,7 @@ async function main(): Promise<void> {
   }
 
   // 靜態資源（WIWI 配色 token 與 Logo）在 public/assets，和 index.html 一樣放在 dist/ 的上一層；缺了整個網站沒有品牌配色，所以啟動就失敗
-  // （部署時新版起不來，Zeabur 會繼續用舊版，比上線一個沒有樣式的網站好）。
+  // （寧可讓新版起不來、部署明顯失敗，也不要上線一個沒有樣式的網站）。
   const assetsDir = resolve(projectRoot, "public", "assets");
   let assets: ReturnType<typeof loadStaticAssets>;
   try {

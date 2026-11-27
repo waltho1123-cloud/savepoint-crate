@@ -8,10 +8,10 @@
 #
 # 資料目錄的任何問題（建不了、改不了擁有者、不可寫）只印警告、**不讓容器退出**：資料目錄只給設定頁用，
 # OCR、存檔、環境變數版的 LINE 通知都不該因為 Volume 的問題一起停擺。node 端會再寫一行 error log，
-# /healthz 的 dataDirWritable 會是 false，設定頁回 503「請在 Zeabur 掛載 Volume 到 /app/data」。
+# /healthz 的 dataDirWritable 會是 false，設定頁回 503「請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data」。
 # （要改成「資料目錄有問題就整個起不來」：把下面的 warn 換成 die。）
 #
-# 注意：在 Zeabur 上沒有掛 Volume 時，這裡的 mkdir -p 仍然會建出一個「容器內的暫存目錄」，服務能啟動、設定頁也能用，
+# 注意：沒有掛 Volume 時，這裡的 mkdir -p 仍然會建出一個「容器內的暫存目錄」，服務能啟動、設定頁也能用，
 # 但重新部署後設定會消失。node 端會偵測資料目錄是不是獨立掛載的磁碟（/healthz 的 dataDirMounted）並在 log 提醒。
 set -eu
 
