@@ -14,6 +14,7 @@ import { captureLineGroup, describeSheets, resolveLineConfig } from "./line-sett
 import { handleLineWebhookBody, notifyBoxClosed, parseBoxClosedInput, verifyLineSignature } from "./line.js";
 import { registerLoginRoutes } from "./login-routes.js";
 import { parseImageInput, recognizeLabel } from "./ocr.js";
+import { ProductCatalog, parseLookupInput } from "./products.js";
 import { FixedWindowLimiter, RATE_LIMIT_WINDOW_MS } from "./rate-limit.js";
 import { registerSettingsRoutes } from "./settings-routes.js";
 import { SettingsStore } from "./settings-store.js";
@@ -31,6 +32,8 @@ export const OCR_RATE_LIMIT_MAX = 60;
 export const SAVE_RATE_LIMIT_MAX = 600;
 /** POST /api/box-closed（關箱後的 LINE 群組通知）每個 IP 每分鐘的請求上限；有自己的額度，不佔 OCR／存檔的。 */
 export const BOX_CLOSED_RATE_LIMIT_MAX = 60;
+/** POST /api/products/lookup（用商品編號查商品總表；每掃一件就查一次）每個 IP 每分鐘的請求上限；有自己的額度，不佔 OCR 的。 */
+export const PRODUCT_LOOKUP_RATE_LIMIT_MAX = 120;
 /** POST /api/line/webhook（LINE 平台打來的 webhook）每個 IP 每分鐘的請求上限；有自己的額度。 */
 export const LINE_WEBHOOK_RATE_LIMIT_MAX = 120;
 /** /api/settings*、/api/accounts*、/api/me（設定頁、帳號管理與目前登入者的 API）每個 IP 每分鐘的請求上限；有自己的額度。另有各自更嚴的限制，見 settings-routes.ts。 */
@@ -59,6 +62,8 @@ export interface AppDeps {
   settings?: SettingsStore;
   /** 首次設定碼（測試時注入）；不給就隨機產生一組，並在還沒有任何帳號時寫進 log。 */
   setupCode?: SetupCodeGuard;
+  /** true 且有服務帳號憑證時，建立後在背景預先載入一次商品總表（失敗只寫 warn）；預設 false。server.ts 傳 true。 */
+  warmProductCatalog?: boolean;
 }
 
 /**
@@ -70,6 +75,7 @@ export interface AppDeps {
  *   GET  /healthz        → 設定狀態與服務帳號 email（不含任何金鑰）、呼叫端 IP（限流用的同一個判斷）、資料目錄與 LINE 設定來源（公開）
  *   POST /api/ocr        → 取代 n8n webhook ipas-ocr（任一角色；要登入與 X-Requested-With）
  *   POST /api/save       → 取代 n8n webhook ipas-save-product（同上）
+ *   POST /api/products/lookup → 用商品編號查商品總表（同上；有自己的限流額度）
  *   POST /api/box-closed → 關箱後推播到 LINE 群組（同上；訊息帶操作者姓名；LINE 沒設定時靜默略過）
  *   POST /api/line/webhook → LINE webhook：在群組裡回覆該群組的 ID、記錄最近收到的群組（需要 channel secret；公開，靠簽章驗證）
  *   /login、/logout、/api/me、/account  → 登入、登出、目前登入者、我的帳號（唯讀；沒有自己改密碼的端點，見 login-routes.ts）
@@ -98,9 +104,10 @@ export function createApp(deps: AppDeps): Hono {
 
   // 憑證只解析一次；解析失敗（缺少或格式錯誤）時 sheets 為 null，/api/save 回 503。
   const credentials = parseServiceAccountCredentials(env.GOOGLE_SERVICE_ACCOUNT_CREDENTIALS);
+  const sheetsTokenProvider = credentials ? new GoogleTokenProvider(credentials, { fetchImpl, log, now }) : null;
   const sheets = credentials
     ? new SheetsClient({
-        tokenProvider: new GoogleTokenProvider(credentials, { fetchImpl, log, now }),
+        tokenProvider: sheetsTokenProvider!,
         spreadsheetId: env.GOOGLE_SHEET_ID,
         sheetName: env.GOOGLE_SHEET_NAME,
         fetchImpl,
@@ -109,15 +116,30 @@ export function createApp(deps: AppDeps): Hono {
         sleep: sleepFn,
       })
     : null;
+  // 商品總表（WIWI商品資料庫）：與 sheets 共用同一個 token 提供者；沒有憑證時為 null，查詢回 503。
+  const productCatalog = credentials
+    ? new ProductCatalog({
+        tokenProvider: sheetsTokenProvider!,
+        spreadsheetId: env.PRODUCT_SHEET_ID,
+        masterSheetName: env.PRODUCT_MASTER_SHEET_NAME,
+        cloudSheetName: env.PRODUCT_CLOUD_SHEET_NAME,
+        fetchImpl,
+        log,
+        now,
+      })
+    : null;
+  if (productCatalog && deps.warmProductCatalog) void productCatalog.warm(); // warm 不會 reject
   // OCR、存檔、關箱通知、LINE webhook 各用自己的限流額度（每 IP 每分鐘），互不擠壓。
   const ocrLimiter = new FixedWindowLimiter(OCR_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const saveLimiter = new FixedWindowLimiter(SAVE_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
+  const productLookupLimiter = new FixedWindowLimiter(PRODUCT_LOOKUP_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const boxClosedLimiter = new FixedWindowLimiter(BOX_CLOSED_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const lineWebhookLimiter = new FixedWindowLimiter(LINE_WEBHOOK_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const settingsApiLimiter = new FixedWindowLimiter(SETTINGS_API_RATE_LIMIT_MAX, RATE_LIMIT_WINDOW_MS);
   const limiterFor = (path: string): FixedWindowLimiter => {
     if (path === "/api/save") return saveLimiter;
     if (path === "/api/box-closed") return boxClosedLimiter;
+    if (path === "/api/products/lookup") return productLookupLimiter;
     if (path === "/api/line/webhook") return lineWebhookLimiter;
     if (path === "/api/settings" || path.startsWith("/api/settings/")) return settingsApiLimiter;
     if (path === "/api/accounts" || path.startsWith("/api/accounts/")) return settingsApiLimiter;
@@ -157,6 +179,8 @@ export function createApp(deps: AppDeps): Hono {
       ok: true,
       openaiConfigured: env.OPENAI_API_KEY !== "",
       sheetsConfigured: credentials !== null,
+      productsConfigured: credentials !== null,
+      productCatalogRows: productCatalog?.rowCount ?? null,
       serviceAccountEmail: credentials?.client_email ?? null,
       clientIp: clientIpOf(c),
       requestIsHttps: isHttpsRequest(c),
@@ -169,10 +193,10 @@ export function createApp(deps: AppDeps): Hono {
     });
   });
 
-  // 登入閘門：裝箱程式用的三支 API（OCR、存檔、關箱通知）一定要有有效的登入 session（任一角色），並帶 CSRF 標頭
+  // 登入閘門：裝箱程式用的四支 API（OCR、存檔、關箱通知、商品編號查詢）一定要有有效的登入 session（任一角色），並帶 CSRF 標頭
   // X-Requested-With: XMLHttpRequest。放在限流之前：沒登入的請求直接 401，不會吃掉同一個出口 IP 上其他人的限流額度。
   // 沒有登入回 401「請先登入」；已登入但缺標頭回 403；資料目錄不可用（沒有地方存帳號）回 503。
-  app.on("POST", ["/api/ocr", "/api/save", "/api/box-closed"], async (c, next) => {
+  app.on("POST", ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup"], async (c, next) => {
     kit.requireWritable();
     kit.requireActor(c);
     assertXhr(c);
@@ -228,6 +252,13 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(result.updatedRange ? { success: true, range: result.updatedRange } : { success: true });
   });
 
+  // 用商品編號查商品總表（任一角色；要登入與 X-Requested-With）。成功 {success:true,data:{products:{<編號>:{productName,gender,color,size,officialName}},missing:[…]}}。
+  app.post("/api/products/lookup", async (c) => {
+    const barcodes = parseLookupInput(await readJsonObject(c));
+    if (!productCatalog) throw new ServiceError(503, "伺服器尚未完成商品總表設定");
+    return c.json({ success: true, data: await productCatalog.lookup(barcodes) });
+  });
+
   // 關箱後的 LINE 群組通知。回應一律 200（輸入格式錯誤除外）：LINE 沒設定好或推播失敗都不是「關箱失敗」，
   // 前端只依 notified／reason 決定要不要提示。成功 {success:true,notified:true}；
   // 失敗 {success:true,notified:false,reason:"not_configured"|"push_failed",error?}。
@@ -271,7 +302,7 @@ export function createApp(deps: AppDeps): Hono {
   registerLoginRoutes(app, kit, { sheets: describeSheets(env) });
   registerSettingsRoutes(app, kit, { env, setupGuard, fetchImpl });
 
-  for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/line/webhook"]) {
+  for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup", "/api/line/webhook"]) {
     app.all(path, (c) => {
       c.header("Allow", "POST");
       return c.json({ success: false, error: "此端點只接受 POST" }, 405);

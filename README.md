@@ -1,16 +1,19 @@
 # savepoint-crate — IPAS 庫存盤點裝箱系統
 
-倉庫人員用手機開網頁、**用自己的帳號（Email＋密碼）登入**後，建立箱號 → 對著商品條碼標籤拍照 → 系統用 OpenAI Vision 辨識（條碼、品名、性別、顏色、尺寸）→ 人工確認或修改 → **關箱時**逐筆寫進 Google 試算表「商品主檔」，並（選配）推播一則關箱通知到 LINE 群組（訊息帶操作者的姓名）。**全站要登入**：帳號有兩種角色——管理員（可進 `/settings` 設定頁：設定 LINE 通知、建立與管理所有人的帳號與角色）與一般使用者（只能使用裝箱程式）。**密碼統一由管理員設定，個人不能自己改密碼**（沒有「改自己的密碼」的功能），見「設定頁與 Volume」。
+倉庫人員用手機開網頁、**用自己的帳號（Email＋密碼）登入**後，建立箱號 → 對著商品條碼標籤拍照 → AI（OpenAI Vision）**只負責讀出商品編號**，系統再用編號到商品總表（Google 試算表「WIWI商品資料庫」，只讀）查出品名、性別、顏色、尺寸並直接加入（總表查不到才請人員手動輸入）→ 人員可再編輯 → **關箱時**逐筆寫進 Google 試算表「商品主檔」，並（選配）推播一則關箱通知到 LINE 群組（訊息帶操作者的姓名）。**全站要登入**：帳號有兩種角色——管理員（可進 `/settings` 設定頁：設定 LINE 通知、建立與管理所有人的帳號與角色）與一般使用者（只能使用裝箱程式）。**密碼統一由管理員設定，個人不能自己改密碼**（沒有「改自己的密碼」的功能），見「設定頁與 Volume」。另可把一到多個箱子的明細印成 A4 外箱明細（見「掃描流程與外箱明細列印」）。
+
+> **目前狀態（2026-11-27）**：「品名改從商品總表帶出」、「同箱同編號累加」與「列印外箱明細」三項修改已在分支 `feat/product-catalog-outer-box-print` 完成，**尚未部署到正式站**；本文件已照新版寫，部署前正式站仍是舊行為。商品資料庫已於 2026-11-27 共用給服務帳號（檢視者）；部署後的檢查見「部署 → 部署後檢查」第 8、9 項。
 
 ## 架構
 
-這是**單一 Node 服務**（Hono ＋ `@hono/node-server`，TypeScript）：同一個服務既提供原本的 `index.html`，也提供後端端點（辨識、存檔、關箱 LINE 通知）。OpenAI 金鑰與 Google 服務帳號金鑰只存在伺服器環境變數；LINE token 存在環境變數或設定頁的設定檔（Volume 上，見「設定頁與 Volume」）。它們都不會進入前端。帳號（含密碼雜湊）也存在 Volume 上的設定檔。
+這是**單一 Node 服務**（Hono ＋ `@hono/node-server`，TypeScript）：同一個服務既提供原本的 `index.html`，也提供後端端點（辨識商品編號、查商品總表、存檔、關箱 LINE 通知）。OpenAI 金鑰與 Google 服務帳號金鑰只存在伺服器環境變數；LINE token 存在環境變數或設定頁的設定檔（Volume 上，見「設定頁與 Volume」）。它們都不會進入前端。帳號（含密碼雜湊）也存在 Volume 上的設定檔。
 
 ```
 手機瀏覽器 ── GET /login、POST /login ─→ 後端（Email＋密碼登入，發 session cookie）
           ── GET /            ─→ index.html（要先登入；純靜態頁，邏輯都在頁面內）
           ── GET /assets/*     ─→ 靜態資源（WIWI 配色 token 與 Logo；公開，不用登入）
-          ── POST /api/ocr    ─→ 後端（要登入）─→ OpenAI chat/completions（Vision）
+          ── POST /api/ocr    ─→ 後端（要登入）─→ OpenAI chat/completions（Vision；前端只採用其中的商品編號）
+          ── POST /api/products/lookup ─→ 後端（要登入）─→ Google Sheets API（只讀「WIWI商品資料庫」，整份目錄快取在記憶體）
           ── POST /api/save   ─→ 後端（要登入）─→ Google Sheets API（讀表頭＋append）
           ── POST /api/box-closed ─→ 後端（要登入）─→ LINE Messaging API（push 到群組，訊息帶操作者；選配）
 LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；選配；靠簽章驗證，不用登入）
@@ -25,8 +28,9 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 |---|---|
 | `GET /`、`GET /index.html` | 回傳 `index.html`（`Cache-Control: no-cache`）。**沒登入 → 302 導向 `/login?next=/`**（登入後回到主頁）。 |
 | `GET /assets/<檔名>`（公開，不用登入） | WIWI 品牌配色與 Logo（`public/assets/` 底下的 `wiwi-colors.css`、`wiwi-logo.svg`、`wiwi-logo-white.svg`）：`Cache-Control: public, max-age=86400`、`X-Content-Type-Options: nosniff`、正確的 Content-Type（CSS `text/css; charset=utf-8`、SVG `image/svg+xml`）；只有「剛好是資源表裡的檔名」才有內容，其餘（不存在、路徑穿越寫法、子目錄、大小寫不同…）一律 404，非 GET／HEAD 回 405。見「品牌配色與靜態資源」。 |
-| `GET /healthz`（公開，不用登入） | 回 `{ ok, openaiConfigured, sheetsConfigured, serviceAccountEmail, clientIp, requestIsHttps, dataDirWritable, dataDirMounted, adminConfigured, adminCount, accountCount, legacyAdminPending, lineConfigured, lineWebhookConfigured, lineSource }`。`requestIsHttps`：這個請求被判斷為 HTTPS（看 `X-Forwarded-Proto`；Coolify 的反向代理要有送，登入 cookie 才會加 `Secure`），和 `clientIp` 一樣是部署後 curl 一次就能確認代理行為的診斷欄位。`dataDirWritable`：資料目錄（Volume）可寫入，設定頁才能用；`dataDirMounted`：它是不是獨立掛載的磁碟（`false`＝只是容器內的暫存目錄，重新部署後設定會消失；`null`＝判斷不出來，例如非 Linux）；`adminConfigured`：有至少一位啟用中的管理員（角色 admin），或仍有待升級的舊版單一密碼（設定頁「有人進得去」）；`adminCount`：角色是 admin 的帳號數（含停用的）；`accountCount`：帳號總數（兩種角色、含停用的）；`legacyAdminPending`：還有舊版的單一管理密碼沒升級成帳號。`lineConfigured` 是**生效的** LINE 設定裡 token 與群組 ID 都有、且開關開著（關箱通知會推播），`lineWebhookConfigured` 是有 channel secret（webhook 啟用），`lineSource` 是生效的設定來自設定頁（`"settings"`）還是環境變數（`"env"`），都沒設定是 `null`；皆不含任何設定值。`serviceAccountEmail` 是從 `GOOGLE_SERVICE_ACCOUNT_CREDENTIALS` 解析出的 `client_email`（缺少或解析失敗時為 `null`），部署後用它知道要把試算表分享給誰；**絕不**回傳 `private_key` 或憑證其他欄位。`clientIp` 是**限流用的同一個判斷**所得到的呼叫端 IP（`X-Forwarded-For` 由右往左第一個公開位址；沒有就是 TCP 連線位址；再沒有就是 `"unknown"`），部署後 curl 一次就能確認 Coolify 反向代理的處理是否正確（見「部署」）。 |
-| `POST /api/ocr` | **要登入（任一角色），而且要帶 `X-Requested-With: XMLHttpRequest`**（沒登入 401 `{success:false,error:"請先登入"}`、缺標頭 403；`/api/save`、`/api/box-closed` 同）。請求 `{ "image": "data:image/jpeg;base64,...", "boxId": "BOX-001" }`。成功 `{ "success": true, "data": { "barcode", "productName", "gender", "color", "size" } }`。 |
+| `GET /healthz`（公開，不用登入） | 回 `{ ok, openaiConfigured, sheetsConfigured, productsConfigured, productCatalogRows, serviceAccountEmail, clientIp, requestIsHttps, dataDirWritable, dataDirMounted, adminConfigured, adminCount, accountCount, legacyAdminPending, lineConfigured, lineWebhookConfigured, lineSource }`。`requestIsHttps`：這個請求被判斷為 HTTPS（看 `X-Forwarded-Proto`；Coolify 的反向代理要有送，登入 cookie 才會加 `Secure`），和 `clientIp` 一樣是部署後 curl 一次就能確認代理行為的診斷欄位。`dataDirWritable`：資料目錄（Volume）可寫入，設定頁才能用；`dataDirMounted`：它是不是獨立掛載的磁碟（`false`＝只是容器內的暫存目錄，重新部署後設定會消失；`null`＝判斷不出來，例如非 Linux）；`adminConfigured`：有至少一位啟用中的管理員（角色 admin），或仍有待升級的舊版單一密碼（設定頁「有人進得去」）；`adminCount`：角色是 admin 的帳號數（含停用的）；`accountCount`：帳號總數（兩種角色、含停用的）；`legacyAdminPending`：還有舊版的單一管理密碼沒升級成帳號。`lineConfigured` 是**生效的** LINE 設定裡 token 與群組 ID 都有、且開關開著（關箱通知會推播），`lineWebhookConfigured` 是有 channel secret（webhook 啟用），`lineSource` 是生效的設定來自設定頁（`"settings"`）還是環境變數（`"env"`），都沒設定是 `null`；皆不含任何設定值。`productsConfigured` 是有可用的服務帳號憑證（商品總表查詢才有機會成功），`productCatalogRows` 是最近一次成功載入的商品數（還沒成功載入過是 `null`；服務啟動時會先載入一次）——**部署後不用登入，看它是不是數字（約 2.4 萬）就知道服務帳號讀不讀得到商品資料庫**。`serviceAccountEmail` 是從 `GOOGLE_SERVICE_ACCOUNT_CREDENTIALS` 解析出的 `client_email`（缺少或解析失敗時為 `null`），部署後用它知道要把試算表分享給誰；**絕不**回傳 `private_key` 或憑證其他欄位。`clientIp` 是**限流用的同一個判斷**所得到的呼叫端 IP（`X-Forwarded-For` 由右往左第一個公開位址；沒有就是 TCP 連線位址；再沒有就是 `"unknown"`），部署後 curl 一次就能確認 Coolify 反向代理的處理是否正確（見「部署」）。 |
+| `POST /api/ocr` | **要登入（任一角色），而且要帶 `X-Requested-With: XMLHttpRequest`**（沒登入 401 `{success:false,error:"請先登入"}`、缺標頭 403；`/api/save`、`/api/box-closed` 同）。請求 `{ "image": "data:image/jpeg;base64,...", "boxId": "BOX-001" }`。成功 `{ "success": true, "data": { "barcode", "productName", "gender", "color", "size" } }`。行為與回應格式沒有改，但**前端只採用其中的商品編號**（`barcode`），品名等欄位改由 `/api/products/lookup` 查商品總表。 |
+| `POST /api/products/lookup` | 要登入（任一角色，見 `/api/ocr`），要帶 `X-Requested-With: XMLHttpRequest`。用商品編號查商品總表（見「試算表設定 → 商品資料庫」）。請求 `{ "barcodes": ["1801112756", …] }`（1～200 個字串，每個 trim 後 1～64 字，重複的會去重）。成功 `{ "success": true, "data": { "products": { "<編號>": { productName, gender, color, size, officialName } }, "missing": ["<查不到的編號>"] } }`；`officialName` 是官方完整品名（外箱明細印的就是它）。只讀，不寫試算表。 |
 | `POST /api/save` | 要登入（見 `/api/ocr`）。請求 `{ seqNo, date, boxId, barcode, productName, gender, color, size, quantity, time }`（與原 n8n webhook 相同）。成功 `{ "success": true, "range": "'商品主檔'!A125:K125" }`；`range` 取自 Sheets API `values.append` 回應的 `updates.updatedRange`，拿不到時省略該欄位。 |
 | `POST /api/box-closed` | 要登入（見 `/api/ocr`）。關箱後的 LINE 群組通知（見「LINE 群組通知」），訊息帶**登入者的姓名**（來自 session，請求內容裡的任何 `operator` 欄位都忽略）。請求 `{ boxId, closedAt?, items: [{ barcode, productName, gender, color, size, qty }], total, successCount, failedCount }`。**輸入格式正確、且沒被限流（429）或擋下（413）時一律回 200**：`{ "success": true, "notified": true }`，或 `{ "success": true, "notified": false, "reason": "not_configured" }`（LINE 沒設定好，靜默略過）、`{ "success": true, "notified": false, "reason": "push_failed", "error": "…" }`（推播失敗，`error` 是簡短原因）——LINE 的狀況不會讓關箱看起來失敗。 |
 | `POST /api/line/webhook` | 公開（靠簽章驗證，不用登入）。LINE 平台的 webhook（生效的設定裡有 channel secret 才啟用，否則 503；secret 來自設定頁或 `LINE_CHANNEL_SECRET`，見「設定頁與 Volume」）。驗證 `X-Line-Signature`（對原始 body 做 HMAC-SHA256，不符回 401），驗證通過一律回 200。群組裡的 `join` 事件或文字訊息「群組ID」／「群組 ID」，會用 `replyToken` 回覆該群組的 ID；`join` 與群組裡的所有訊息事件還會把該群組記到設定檔的「最近收到的群組」（同一群組去重、最新在前、最多 10 筆；同一個群組的訊息事件 10 分鐘內只處理一次——查名稱與寫檔都不重複，節流表在記憶體內、服務重啟後重新開始），讓設定頁一鍵帶入群組 ID；其他事件忽略。 |
@@ -43,17 +47,17 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 
 | 狀態碼 | 情況 |
 |---|---|
-| 400 | JSON 格式錯誤、缺少 `image`、`image` 不是合法 data URL、`/api/save` 欄位型別不對或整筆都是空的、`/api/box-closed` 輸入不合規則（`boxId` 空白或超過 100 字、`items` 不是陣列或超過 500 筆、文字欄位超過 200 字、`qty` 不是 1～9999 的整數、數量欄位不是非負整數）；設定頁、登入與 `/api/accounts*` 的輸入不合規則（姓名不是 1～50 字、Email 格式不對、密碼不是 8～200 字、`role` 不是 `admin`／`user`、`status` 不是 `active`／`disabled`、`PATCH` 沒有任何要改的欄位、還沒有任何帳號就想登入） |
+| 400 | JSON 格式錯誤、缺少 `image`、`image` 不是合法 data URL、`/api/save` 欄位型別不對或整筆都是空的、`/api/products/lookup` 的 `barcodes` 不是 1～200 個字串的陣列、或單一編號 trim 後不是 1～64 字；`/api/box-closed` 輸入不合規則（`boxId` 空白或超過 100 字、`items` 不是陣列或超過 500 筆、文字欄位超過 200 字、`qty` 不是 1～9999 的整數、數量欄位不是非負整數）；設定頁、登入與 `/api/accounts*` 的輸入不合規則（姓名不是 1～50 字、Email 格式不對、密碼不是 8～200 字、`role` 不是 `admin`／`user`、`status` 不是 `active`／`disabled`、`PATCH` 沒有任何要改的欄位、還沒有任何帳號就想登入） |
 | 401 | `/api/line/webhook` 的 `X-Line-Signature` 缺少或不符；**OCR、存檔、關箱通知、`/api/me`、設定 API、帳號 API 沒登入**（或 cookie 過期、被竄改、帳號已被停用／刪除、重設過密碼或改過角色）；登入失敗（帳號不存在、帳號停用、密碼不對都是同一句「帳號或密碼不正確」）；升級時目前的密碼不對 |
 | 403 | 登入的是一般使用者卻存取設定頁、設定 API、帳號 API（「需要管理員權限」）；首次設定碼不正確；狀態變更請求（含 OCR、存檔、關箱通知）缺少 `X-Requested-With` 標頭 |
 | 404 | `/api/accounts/:id*`：找不到這個帳號（id 不存在或格式不對）；沒有這個路徑（包括已經不存在的自助改密碼 `POST /account/password`）；`/assets/*` 沒有這個檔案（含各種路徑穿越寫法） |
 | 409 | `/settings/setup`：已經有帳號（或還有舊版單一密碼等著升級）；`/settings/upgrade`：沒有待升級的舊版密碼；`/login`：還沒升級；`/api/accounts*`：Email 重複、不能停用或刪除自己、不能把自己改成一般使用者、不能停用、刪除或降級最後一位啟用中的管理員、帳號數量已達上限（200 個） |
 | 415 | 設定頁的狀態變更請求不是 `Content-Type: application/json` |
 | 413 | 請求內容超過 15 MB（登入、登出、`/settings/*`、`/api/settings/*`、`/api/accounts*` 的上限是 16 KB） |
-| 429 | 同一個 IP 一分鐘內超過額度：`/api/ocr` 60 次、`/api/save` 600 次、`/api/box-closed` 60 次、`/api/line/webhook` 120 次，`/api/settings*`、`/api/accounts*` 與 `/api/me` 共用 60 次，五個額度各自計算（其他 `/api/*` 路徑算進 OCR 的額度）；登入頁另有更嚴的限制：建立第一位管理員 5 次、登入／升級共用 10 次、測試訊息 6 次；沒登入的 OCR／存檔／關箱通知請求在限流之前就被 401 擋下，其他沒登入的 `/api/*` 請求（`/api/me`、設定與帳號 API 的探測、不存在的路徑）算在另一組「匿名」額度，兩者都不會吃掉同一個出口 IP 上已登入同事的額度；另外 scrypt（密碼雜湊／驗證）同時最多跑 2 個、排隊 16 個，超過直接回 429「目前驗證請求過多，請稍後再試」；兩種 429 都帶 `Retry-After`（秒） |
-| 500 | 試算表／憑證設定問題：表頭缺必要欄位（訊息會列出缺哪欄）、服務帳號沒有權限或憑證無效、找不到試算表或分頁 |
-| 502 | OpenAI 或 Google 暫時失敗（OCR 已自動重試一次）、OpenAI 回傳內容無法解析 |
-| 503 | 伺服器尚未設定 `OPENAI_API_KEY`（OCR）或 Google 憑證（存檔）；或同時排隊等待寫入的存檔超過 50 筆；或 `/api/line/webhook` 沒有 channel secret（webhook 未啟用）；或資料目錄不可用（沒有地方存帳號，沒有人登入得了）時的登入頁、設定頁、OCR、存檔、關箱通知與各 API（訊息是「請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data」；`/healthz` 與 LINE webhook 不受影響） |
+| 429 | 同一個 IP 一分鐘內超過額度：`/api/ocr` 60 次、`/api/save` 600 次、`/api/box-closed` 60 次、`/api/products/lookup` 120 次、`/api/line/webhook` 120 次，`/api/settings*`、`/api/accounts*` 與 `/api/me` 共用 60 次，六個額度各自計算（其他 `/api/*` 路徑算進 OCR 的額度）；登入頁另有更嚴的限制：建立第一位管理員 5 次、登入／升級共用 10 次、測試訊息 6 次；沒登入的 OCR／存檔／關箱通知請求在限流之前就被 401 擋下，其他沒登入的 `/api/*` 請求（`/api/me`、設定與帳號 API 的探測、不存在的路徑）算在另一組「匿名」額度，兩者都不會吃掉同一個出口 IP 上已登入同事的額度；另外 scrypt（密碼雜湊／驗證）同時最多跑 2 個、排隊 16 個，超過直接回 429「目前驗證請求過多，請稍後再試」；兩種 429 都帶 `Retry-After`（秒） |
+| 500 | 試算表／憑證設定問題：表頭缺必要欄位（訊息會列出缺哪欄；`/api/products/lookup` 則會指出哪個分頁缺哪一欄）、服務帳號沒有權限或憑證無效、找不到試算表或分頁 |
+| 502 | OpenAI 或 Google 暫時失敗（OCR 已自動重試一次）、OpenAI 回傳內容無法解析；`/api/products/lookup` 讀不到商品總表而且記憶體裡沒有任何舊資料可用（「商品總表暫時無法讀取，請稍後再試」） |
+| 503 | 伺服器尚未設定 `OPENAI_API_KEY`（OCR）或 Google 憑證（存檔、商品總表查詢）；或同時排隊等待寫入的存檔超過 50 筆；或 `/api/line/webhook` 沒有 channel secret（webhook 未啟用）；或資料目錄不可用（沒有地方存帳號，沒有人登入得了）時的登入頁、設定頁、OCR、存檔、關箱通知與各 API（訊息是「請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data」；`/healthz` 與 LINE webhook 不受影響） |
 
 ## 環境變數
 
@@ -64,9 +68,12 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 | `OPENAI_API_KEY` | 是 | — | OpenAI 金鑰。未設定時服務仍會啟動，但 `/api/ocr` 回 503。 |
 | `OPENAI_BASE_URL` | 否 | `https://api.openai.com` | OpenAI 相容端點（**不含** `/v1`、結尾不加斜線）。 |
 | `OPENAI_MODEL` | 否 | `gpt-5.6-luna` | 辨識模型。請求參數（`max_completion_tokens`、`reasoning_effort: none`）沿用 n8n 現行版，換模型前先確認該模型支援這些參數。 |
-| `GOOGLE_SERVICE_ACCOUNT_CREDENTIALS` | 是 | — | Google 服務帳號金鑰：**JSON 原文或整包 JSON 的 base64 都可以**（正式環境建議存 base64）。未設定或無法解析時服務仍會啟動，但 `/api/save` 回 503。 |
+| `GOOGLE_SERVICE_ACCOUNT_CREDENTIALS` | 是 | — | Google 服務帳號金鑰：**JSON 原文或整包 JSON 的 base64 都可以**（正式環境建議存 base64）。未設定或無法解析時服務仍會啟動，但 `/api/save` 與 `/api/products/lookup` 回 503。 |
 | `GOOGLE_SHEET_ID` | 否 | `1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A` | 目標試算表 ID。 |
 | `GOOGLE_SHEET_NAME` | 否 | `商品主檔` | 目標分頁名稱。 |
+| `PRODUCT_SHEET_ID` | 否 | `1cqjAGZP53FZCbfvGg78syO979Qe5G3JrGK6S3UJQ92s` | 商品總表（「WIWI商品資料庫」）的試算表 ID，**只讀**。要把它共用給服務帳號（`/healthz` 的 `serviceAccountEmail`），「檢視者」即可。見「試算表設定 → 商品資料庫」。 |
+| `PRODUCT_MASTER_SHEET_NAME` | 否 | `商品總表` | 商品資料庫裡「商品總表」分頁名稱（查詢鍵 `商品編號+尺寸`、品名、性別、顏色、尺寸）。 |
+| `PRODUCT_CLOUD_SHEET_NAME` | 否 | `雲端總表` | 商品資料庫裡「雲端總表」分頁名稱（官方完整品名）。 |
 | `LINE_CHANNEL_ACCESS_TOKEN` | 否 | 空（未設定） | **備援**（設定頁優先，見「設定頁與 Volume」）。LINE Messaging API 的 channel access token（長期）：關箱通知推播、webhook 回覆用。 |
 | `LINE_GROUP_ID` | 否 | 空（未設定） | **備援**。關箱通知的目標群組 ID（`C` 開頭）。**token 與群組 ID 兩者都有才會推播**，只有一個等於沒設定。 |
 | `LINE_CHANNEL_SECRET` | 否 | 空（未設定） | **備援**。channel secret，**只用來驗證 webhook 簽章**（取得群組 ID 時才需要）；沒設定時 `POST /api/line/webhook` 回 503。 |
@@ -92,6 +99,41 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 4. **寫入方式**：`values.append`，範圍 `'商品主檔'!A1`，`valueInputOption=USER_ENTERED`、`insertDataOption=INSERT_ROWS`——內容會像使用者手動輸入一樣被試算表解析。若要保留商品編號的前導 0，請把該欄格式設成「純文字」。
 5. **寫入速度**：Google Sheets API 的寫入配額是每分鐘 60 次／使用者（服務帳號算一個使用者）。伺服器對 append 做**全域的滾動視窗配額**：過去 60 秒內已起始的 append 少於 55 次（留 5 次餘裕）就立刻送出、不等待；達到 55 次才先進先出排隊。所以 **55 件內全速寫入、超過才放慢**（以過去 60 秒內累計的件數計算，所有箱子、所有人共用同一份配額；見「安全與限制」的「限流與寫入速度」）。讀表頭不受影響。
 6. 專案內的 `商品主檔範本.csv` 是**舊版範本（只有 9 欄，缺 `合併品名`、`數量`）**，不能直接當新表頭用，請以上面的 11 欄為準。
+
+### 商品資料庫（WIWI商品資料庫，只讀）
+
+關箱寫入的「商品主檔」之外，另有一份**只讀**的商品資料庫，用來把商品編號換成品名、性別、顏色、尺寸（`src/products.ts`；環境變數 `PRODUCT_SHEET_ID`、`PRODUCT_MASTER_SHEET_NAME`、`PRODUCT_CLOUD_SHEET_NAME`，預設值見「環境變數」）。
+
+1. **分享（上線前必要步驟）**：把這份試算表共用給服務帳號（`/healthz` 的 `serviceAccountEmail`），權限給「**檢視者**」即可（只讀，不需要編輯者）。正式站的服務帳號已於 2026-11-27 加入這份表的共用名單（檢視者；以唯讀方式查過共用名單確認）。換試算表或換服務帳號時要重做這一步；沒共用的症狀是 `/healthz` 的 `productCatalogRows` 一直是 `null`、查詢回 502、現場每筆都跳「無法查詢商品總表」。
+2. **兩個分頁、表頭都在第 1 列**，系統依表頭名稱找欄位（欄位順序可以調整，但**表頭名稱不能改**）；商品編號一律當文字比對（不補零、不去零）：
+   - 「商品總表」：表頭 `商品編號+尺寸`（10 碼）是查詢鍵，帶出 `商品名稱`、`性別`、`顏色`、`尺寸`；表頭要一字不差。
+   - 「雲端總表」：表頭以 `商品編號` 開頭的那一欄是查詢鍵、以 `商品名稱` 開頭的那一欄是官方完整品名（格式 `品名(性別-顏色尺寸)`，例如 `第五代溫灸刷毛圓領發熱衣(男-陶玫粉2XL)`），外箱明細印的就是它；這兩種開頭的欄位各自必須剛好一欄。
+   - 表頭缺欄（或雲端總表的欄位不唯一）回 500，訊息會指出哪個分頁缺哪一欄。
+3. **更新頻率**：整份目錄放在伺服器記憶體（約 2.4 萬筆），**10 分鐘過期後重抓**；查詢的編號有查不到的，最多**每 60 秒**重抓一次（所以總表新增的商品大約 1 分鐘內查得到，改了既有商品的品名最多 10 分鐘生效）；讀取失敗時沿用舊資料，失敗後 **10 秒**內不再重試上游。服務啟動時會先載入一次（重新部署或重啟後）。
+4. **讀不到總表時**：記憶體裡有舊資料就照舊資料回答（log 一行警告）；完全沒有資料才回錯誤（上游失敗 502、表頭缺欄 500）。前端遇到錯誤不會擋住裝箱，見下一節。
+
+## 掃描流程與外箱明細列印
+
+### 掃描與品名
+
+1. 拍照後 AI 只讀出**商品編號**（`/api/ocr` 的行為與回應沒有改，前端只採用其中的編號）。也可以手動輸入編號。
+2. 同一箱掃到**已有的商品編號**：那一筆數量累加，不新增一筆（改版前留下的同箱重複資料不會被自動合併，列印時才合併顯示）。
+3. 沒有的編號：前端呼叫 `POST /api/products/lookup` 查商品總表。
+   - **查得到** → 直接加入，不跳確認視窗。
+   - **查不到** → 跳出標示「總表查無」的視窗，請人員先核對編號、再手動輸入品名；視窗裡把編號改掉會用新編號再查一次；清單上該筆有「總表查無」標記。
+   - **查詢失敗**（斷線、伺服器錯誤、限流）→ 跳出「無法查詢商品總表」的視窗讓人員手動輸入，清單上標「未核對」。**現場不會因為查不到總表就不能裝箱。**
+4. 瀏覽器會記住人員輸入過的品名（`productCache`，存在 localStorage，各裝置各自記）：用「編輯商品」改過品名的編號，之後掃到同編號**優先用修改後的內容**（即使總表查得到）；查無時手動輸入的內容也會記住，但只用來預填視窗，**總表一旦查得到就用總表的**；改版前記住的舊品名（以前是 AI 猜的）同樣只用來預填。header 的「**重設品名記憶**」按鈕只清掉這份記憶，箱子與商品不會刪（「清除資料」才會全部刪）。
+5. 掃描卡片有「**每次加入數量**」輸入框（預設 1，加入成功後自動回到 1）；清單上每筆可以直接改數量。數量一律是 1～9999 的整數。
+6. 關箱同步到「商品主檔」時，品名、性別、顏色、尺寸就是從總表帶出的值（或人員修改後的值）；`/api/save` 與寫入的 11 個欄位沒有改。
+
+### 列印外箱明細
+
+- **按鈕位置**：統計報表頁、目前箱號的橫幅（「列印標籤單」旁）、箱號旁的動作按鈕，任何登入的人都能用；既有的「列印標籤單」與統計列印保留。
+- 按下後先選要印的箱子（全選／只選已完成／全不選；空箱不能選；依勾選順序排版）。
+- **版面**：A4 直式，一頁上下各一箱，中間一條裁切虛線。每箱一張表：第一列「箱號：T1」大字，表頭「商品編號｜商品名稱｜數量」，同箱同編號合併成一列、依編號排序，最後一列「合計：X 件」。品項多、半頁放不下的箱子自己佔整頁，整頁放不下就接到下一頁（接續頁標「箱號：T1（續）」，合計只印在最後），不會截斷；小箱後面接大箱時，小箱那一頁的下半會留空（維持勾選順序、不重排）。
+- **商品名稱**用總表的官方完整品名；人員編輯過的商品用修改後的欄位組出品名；改版前加入、沒有官方品名的舊商品，列印時會即時向總表查。
+- **字型與列印設定**：字型指定 Noto Sans CJK TC／Noto Sans TC；網頁不載入任何外部字型，所以**印的那台裝置有安裝這個字型才會用到**，沒裝會退回系統的中文字型。建議用 Chrome（電腦或 Android）；紙張 A4、邊界由頁面自己指定，列印對話框裡請維持「預設」邊界、不要勾「頁首與頁尾」。
+- **驗證範圍**：這個版面已用電腦版 Chrome 轉 PDF 驗證；**iPhone Safari 與實體印表機尚未實測**。
 
 ## 設定頁與 Volume
 
@@ -132,7 +174,7 @@ LINE 平台 ── POST /api/line/webhook ─→ 後端（取得群組 ID 用；
 | 路徑 | 沒登入 | 一般使用者 | 管理員 |
 |---|---|---|---|
 | `GET /`、`/index.html`（裝箱程式） | 302 → `/login?next=/` | 可 | 可 |
-| `POST /api/ocr`、`/api/save`、`/api/box-closed` | 401 | 可（要帶 `X-Requested-With`） | 可 |
+| `POST /api/ocr`、`/api/save`、`/api/box-closed`、`/api/products/lookup` | 401 | 可（要帶 `X-Requested-With`） | 可 |
 | `GET /api/me`、`GET /account`（唯讀） | 401／302 → `/login?next=/account` | 可 | 可 |
 | `GET /settings`、`/api/settings*`、`/api/accounts*` | 302 → `/login?next=/settings`／401 | **403** | 可 |
 | `POST /api/accounts/:id/password`（設定密碼：唯一的途徑） | 401 | **403**（連自己的也不行） | 可（任何帳號，包括自己） |
@@ -367,12 +409,14 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 - 本機驗證映像：`docker build -t savepoint-crate:local .`，再 `docker run --rm -p 8080:8080 -v "$(mktemp -d):/app/data" -e OPENAI_API_KEY=x -e GOOGLE_SERVICE_ACCOUNT_CREDENTIALS=x savepoint-crate:local`（`-v` 那段模擬 Volume）。
 - 部署後檢查：
   1. runtime log 出現 `savepoint-crate listening on port 8080`。
-  2. `curl -s https://<網域>/healthz`：`openaiConfigured`、`sheetsConfigured` 皆為 `true`，並把 `serviceAccountEmail` 加為試算表編輯者。
+  2. `curl -s https://<網域>/healthz`：`openaiConfigured`、`sheetsConfigured` 皆為 `true`，並把 `serviceAccountEmail` 加為試算表編輯者（「商品主檔」；另外還要把商品資料庫共用給它，見第 8 項）。
   3. **確認反向代理的 IP 處理**：同一個 `/healthz` 回應的 `clientIp` 應該是你自己的對外 IP（可與「我的 IP」網站比對）。如果看到 `10.x`、`172.16–31.x`、`192.168.x`、`100.64–127.x` 這類內部位址或 `"unknown"`，或不同人 curl 得到同一個值，代表 `X-Forwarded-For` 沒有被正確取得，**所有使用者會共用同一個限流額度**，需要先處理再上線。
   4. **偽造測試**：`curl -s -H 'X-Forwarded-For: 203.0.113.99' https://<網域>/healthz` 回的 `clientIp` **不得**是 `203.0.113.99`（應該仍是你自己的對外 IP）。若回的是偽造值，代表代理沒有把真實 IP 附加在 `X-Forwarded-For` 最右邊，限流可以被客戶端自填的標頭繞過，需要先處理。
   5. **LINE 通知（選配）**：照上面「設定頁與 Volume」（或「LINE 群組通知」的環境變數備援）設定後，`/healthz` 的 `lineConfigured` 應為 `true`、`lineSource` 顯示來自 `settings` 還是 `env`；關一個測試箱子，群組應收到一則通知。沒設定 LINE 時什麼都不會發生（也不會有錯誤）。
   6. **帳號與 Volume**：`/healthz` 的 `dataDirWritable` 與 `dataDirMounted` 都是 `true`（見「設定頁與 Volume」的對照表）；`requestIsHttps` 是 `true`（代理有送 `X-Forwarded-Proto: https`，登入 cookie 才會加 `Secure`；是 `false` 的話登入頁與設定頁頂端會顯示警告）。**部署後所有人都要登入，管理員先建帳號**：全新安裝：到 Coolify 應用的 Logs 找設定碼、開 `/settings` 建立第一位管理員（越早越好）；從舊版單一密碼升級：`/healthz` 先顯示 `legacyAdminPending: true`，開 `/settings` 用目前的密碼升級成管理員帳號（見「設定頁與 Volume → 從舊版的單一管理密碼升級」），之後 `legacyAdminPending` 變 `false`、`adminCount` 為 1；已經有管理員帳號的版本 2 檔案：照原本的 Email 與密碼登入即可。接著到「帳號管理」替每位同事建立帳號並通知大家。**登入的暴力破解防護（逐 IP 限流）依賴上面第 3、4 項的 `clientIp` 判斷是正確的**，請務必先做。
   7. 最後用一個**一般使用者**的帳號登入主頁（確認頂端有「👤 姓名（一般使用者）」且進 `/settings` 是 403）、實際拍一張標籤、關一個箱子，確認有寫進試算表，LINE 群組收到的通知有「操作：<姓名>」。
+  8. **商品資料庫（新版上線前必做）**：先到「WIWI商品資料庫」試算表把 `serviceAccountEmail` 加為「**檢視者**」（見「試算表設定 → 商品資料庫」；正式站的服務帳號已於 2026-11-27 共用）。部署後 `curl -s https://<網域>/healthz`：`productsConfigured` 為 `true`，`productCatalogRows` 是數字（約 2.4 萬）；若是 `null`，看 Coolify Logs 的 `[products]` 訊息（多半是沒共用、或表頭被改）。
+  9. **品名與外箱明細實測**：登入後在主頁輸入商品編號 `1801112756`，應直接帶出 `第五代溫灸刷毛圓領發熱衣(男-陶玫粉2XL)`（不跳確認視窗）；再輸入一個不存在的編號，應跳出「總表查無」視窗；最後對一個箱子按「列印外箱明細」，確認版面（A4 直式、一頁上下各一箱）。iPhone Safari 與實體印表機尚未實測，請用 Chrome 並先轉 PDF 確認。
 
 ## 回滾
 
@@ -407,11 +451,12 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 | 回應 `range` | 無 | `/api/save` 成功時多帶 `range` |
 | 關箱 LINE 通知 | 無 | 新功能：關箱後推播到 LINE 群組（選配，見「LINE 群組通知」） |
 | 寫入速度 | 每筆各自寫入，沒有節流（量大時會撞到 Google 配額而失敗） | 過去 60 秒內最多起始 55 次 append（Google 寫入配額每分鐘 60 次／使用者，留 5 次餘裕）：過去 60 秒累計 55 件內全速寫入，超過才排隊放慢，而不是失敗 |
+| 品名、性別、顏色、尺寸的來源（2026-11-27，尚未部署） | AI 辨識出五個欄位，人員第一次確認後記在瀏覽器（`productCache`），之後同編號直接帶出 | AI 只讀商品編號（`/api/ocr` 行為與回應沒改，前端只採用編號），其餘欄位用 `POST /api/products/lookup` 查商品總表；查不到才手動輸入（見「掃描流程與外箱明細列印」） |
 | `color`、`size` 是 JSON 數字時的合併品名 | JavaScript 會把兩個數字相加（例如 `-1` 與 `5` 得到 `(4)`） | 一律當文字串接（得到 `(-15)`）。前端永遠送字串，不會觸發 |
 
 ## 安全與限制
 
-- **全站要登入**（見「設定頁與 Volume」）：主頁、`/api/ocr`、`/api/save`、`/api/box-closed` 都要有效的登入 session（任一角色），並帶 `X-Requested-With: XMLHttpRequest`（CSRF 防護）；沒登入的請求在限流**之前**就被 401 擋下，不會吃掉同一個出口 IP 上其他人的限流額度（其他沒登入的 `/api/*` 請求——`/api/me`、設定與帳號 API 的探測、不存在的路徑——算在另一組匿名額度，同樣不會擠壓已登入的人）。仍然公開的只有 `/healthz`（不含任何金鑰與設定值）、`/api/line/webhook`（靠簽章驗證）與登入頁。已做的防護：登入、每 IP 每分鐘限流（OCR 60 次、存檔 600 次、關箱通知 60 次、LINE webhook 120 次、設定／帳號／目前登入者 API 60 次，各自計算；記憶體內，服務重啟即重置；IP 取 `X-Forwarded-For` 由右往左第一個公開位址）、15 MB body 上限、存檔欄位驗證與公式字元處理、錯誤訊息不帶金鑰。登入帳號是「同事」層級的存取控制，不是細緻的權限系統：任何一位登入的人都能呼叫這三支 API（內容由呼叫端決定）。
+- **全站要登入**（見「設定頁與 Volume」）：主頁、`/api/ocr`、`/api/save`、`/api/box-closed`、`/api/products/lookup` 都要有效的登入 session（任一角色），並帶 `X-Requested-With: XMLHttpRequest`（CSRF 防護）；沒登入的請求在限流**之前**就被 401 擋下，不會吃掉同一個出口 IP 上其他人的限流額度（其他沒登入的 `/api/*` 請求——`/api/me`、設定與帳號 API 的探測、不存在的路徑——算在另一組匿名額度，同樣不會擠壓已登入的人）。仍然公開的只有 `/healthz`（不含任何金鑰與設定值）、`/api/line/webhook`（靠簽章驗證）與登入頁。已做的防護：登入、每 IP 每分鐘限流（OCR 60 次、存檔 600 次、關箱通知 60 次、商品編號查詢 120 次、LINE webhook 120 次、設定／帳號／目前登入者 API 60 次，各自計算；記憶體內，服務重啟即重置；IP 取 `X-Forwarded-For` 由右往左第一個公開位址）、15 MB body 上限、存檔欄位驗證與公式字元處理、錯誤訊息不帶金鑰。登入帳號是「同事」層級的存取控制，不是細緻的權限系統：任何一位登入的人都能呼叫這幾支 API（內容由呼叫端決定）。
 - **登入與設定頁的安全設計**（細節見「設定頁與 Volume」）：
   - 密碼用 scrypt（N=16384、r=8、p=1、16 位元組隨機 salt）雜湊，格式 `scrypt$N$r$p$salt$hash`，以 `timingSafeEqual` 比對；8～200 個字元。每個帳號各有自己的雜湊。
   - 登入後發 `sp_session` cookie：值是 `<到期時間>.<帳號 id>.<sessionVersion>.<亂數>.<HMAC-SHA256 簽章>`（金鑰是設定檔裡隨機產生的 `sessionSecret`，平常不會換），`HttpOnly`、`SameSite=Lax`、`Path=/`、7 天，走 HTTPS（`X-Forwarded-Proto: https`）時加 `Secure`。驗證時除了簽章與到期，還要對照目前的帳號資料：帳號必須存在、啟用中、`sessionVersion` 相符（角色是每次請求從目前的帳號資料讀的，不簽在 cookie 裡）。**登出只清除這個瀏覽器的 cookie**（伺服器不存 session）；要讓某個帳號所有裝置立刻失效，用重設密碼、停用或改角色（`sessionVersion` 加一）。
@@ -425,13 +470,15 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
   - 已知限制：登入 session 是無狀態的 cookie，**登出只清瀏覽器端**（偷到的 cookie 7 天內仍有效，要作廢請重設該帳號的密碼或停用它）；密碼只檢查長度（8～200 字元），不檢查強度；角色只有兩種（管理員與一般使用者）、沒有更細的權限；任何一位啟用中的管理員都能新增、停用、刪除其他帳號與改角色（但不能動自己、也不能讓系統沒有管理員）；`index.html` 是同源的另一個頁面，它的任何 XSS 都能借用已登入者的 cookie 呼叫 API（一般使用者的 cookie 呼叫不了設定與帳號 API）。
 - **WIWI Hub 單一登入（2026-11-12 使用者指示；2026-11-13 已部署並上線，生產正路 11/13 實測通過）**：`GET /sso/callback` 的上線順序與現況：(1) 先部署（未設 `HUB_JWT_SECRET` 時 404，無害）——**已完成**：PR #3 squash 合併為 `09ebf20`，2026-11-13 00:32 Coolify 自動部署完成；(2) 把 Hub 的 `HUB_JWT_SECRET` 手貼到 Coolify 應用 `savepoint-crate` 的 Environment Variables 並 Redeploy（換版會中斷，固定容器名；有人在關箱時避免）——**已完成**（使用者已手貼進 Production 環境變數）；(3) 黑盒：`curl -sI https://ipas.wiwiapps.com/sso/callback?sso_token=x` 應由 404 變成 302 `/login?sso=invalid`——**已通過**（302 `/login?sso=invalid` 並帶清除 `sp_session` 的 Set-Cookie，帶假 `sp_session` 亦同；登入頁 `?sso=invalid` 顯示提示）；(4) 才到 Hub 把卡片網址改成 `https://ipas.wiwiapps.com/sso/callback`——**已完成**（wiwi-hub seed `879c9c1`，2026-11-13 06:59 部署完成；未登入打 Hub 的 `/launch/savepoint-crate` 已由 307 到本系統變成 307 到 Hub 登入頁；紀錄見 wiwi-hub 的 `CLAUDE_CONTEXT.md` D69–D81 與 §7）；(5) 從 Hub 點卡片實測——**已通過**（2026-11-13 07:35 經使用者授權，由指揮官在使用者的瀏覽器以其 Hub 身分代測：從 Hub 的 `/launch/savepoint-crate` 進入，免密碼落在首頁 `/`、沒有失敗提示；重開首頁登入狀態仍有效；紀錄見 wiwi-hub 的 `CLAUDE_CONTEXT.md` D71 與 §7；查無帳號、停用帳號等失敗路徑未在正式站實測）。回滾：Hub 後台取消卡片的 SSO，或刪掉 `HUB_JWT_SECRET` 並 Redeploy（端點回 404）。票證只在 Hub 簽發給「看得到這張卡」的人；本系統只採信 email，角色與啟用狀態以本地帳號為準。
 - **限流與寫入速度**：
-  - **限流（每 IP 每分鐘）**：`/api/ocr` 60 次（`OCR_RATE_LIMIT_MAX`）、`/api/save` 600 次（`SAVE_RATE_LIMIT_MAX`）、`/api/box-closed` 60 次（`BOX_CLOSED_RATE_LIMIT_MAX`）、`/api/line/webhook` 120 次（`LINE_WEBHOOK_RATE_LIMIT_MAX`）、`/api/settings*`、`/api/accounts*` 與 `/api/me` 共用 60 次（`SETTINGS_API_RATE_LIMIT_MAX`），五個額度**各自獨立計算**——關箱時前端是逐筆、循序送出，不會被拍照的次數擠壓。其他 `/api/*` 路徑（含不存在的）算進 OCR 的額度。常數在 `src/app.ts`。同一個出口 IP（例如倉庫同一個網路）的人共用一份額度。
+  - **限流（每 IP 每分鐘）**：`/api/ocr` 60 次（`OCR_RATE_LIMIT_MAX`）、`/api/save` 600 次（`SAVE_RATE_LIMIT_MAX`）、`/api/box-closed` 60 次（`BOX_CLOSED_RATE_LIMIT_MAX`）、`/api/products/lookup` 120 次（`PRODUCT_LOOKUP_RATE_LIMIT_MAX`，每掃一件查一次，有自己的額度、不和 OCR 共用）、`/api/line/webhook` 120 次（`LINE_WEBHOOK_RATE_LIMIT_MAX`）、`/api/settings*`、`/api/accounts*` 與 `/api/me` 共用 60 次（`SETTINGS_API_RATE_LIMIT_MAX`），六個額度**各自獨立計算**——關箱時前端是逐筆、循序送出，不會被拍照的次數擠壓。其他 `/api/*` 路徑（含不存在的）算進 OCR 的額度。常數在 `src/app.ts`。同一個出口 IP（例如倉庫同一個網路）的人共用一份額度。
   - **寫入速度（滾動視窗配額）**：Google Sheets API 的寫入配額預設是每分鐘 60 次／使用者（服務帳號算一個使用者；每專案 300 次，超過回 429；來源：developers.google.com/workspace/sheets/api/limits，2026-10-05 查閱）。所以伺服器對 `values.append` 做**全域的滾動視窗配額**（整個程序共用、不分來源請求）：過去 **60 秒**內已起始的 append 少於 **55 次**（留 5 次餘裕）就**立刻送出、不等待**（視窗內可以同時有多筆在途）；達到 55 次時依先進先出排隊，等最舊的那次起始時間離開視窗才送。常數是 `src/sheets.ts` 的 `APPEND_WINDOW_MAX`（55）與 `APPEND_WINDOW_MS`（60 000），建構 `SheetsClient` 時可用 `appendWindowMax`、`appendWindowMs` 覆寫。規則細節：401 之後的重送算一次新的起始、同樣受視窗限制；換不到 token 的失敗發生在取得名額之前，不佔配額；已經送出但失敗的那次照樣佔配額；前一筆不論成功或失敗都不會卡住後面的；讀表頭不受影響。
   - **實務影響**：**55 件內全速、超過才放慢**。全速＝不人為等待，每筆只是一次 Google 往返；放慢＝第 56 件起要等視窗放出名額（最多約 60 秒），之後再全速送，整體平均約每分鐘 55 件——這是為了不撞到 Google 配額而失敗。「55 件」是**過去 60 秒內累計**的件數，所有箱子、所有人共用同一份配額：例如一分鐘內連續關兩個 30 件的箱子，第二個箱子做到約第 26 件就會停頓一陣子。
-  - **⚠️ 前端沒有「同步中」的鎖定**：頁面的「正在同步到商品主檔…」提示約 2.5 秒就消失，確認對話框關閉後「完成此箱」鈕仍可按，直到全部寫完才會鎖箱。依裁定前端沒有加這個鎖定（`index.html` 只改了端點常數，外加關箱 LINE 通知的 `NotifyEngine` 與關箱流程裡的一次呼叫，以及全站登入的 `ApiClient` 與頂端使用者列）。所以請提醒現場：**按下確認後，等到出現「已同步 N 筆到商品主檔 ✓」再離開頁面或再按一次**——中途離開頁面，剩下的筆就不會送出；重複按會把同一箱再送一次（重複列）。超過 55 件的大箱子會在中途停頓一陣子（視前面花了多久而定，最多約 1 分鐘），更要等。
+  - **⚠️ 前端沒有「同步中」的鎖定**：頁面的「正在同步到商品主檔…」提示約 2.5 秒就消失，確認對話框關閉後「完成此箱」鈕仍可按，直到全部寫完才會鎖箱。依裁定前端沒有加這個鎖定（`index.html` 只改了端點常數，外加關箱 LINE 通知的 `NotifyEngine` 與關箱流程裡的一次呼叫，以及全站登入的 `ApiClient` 與頂端使用者列；2026-11-27 另加了商品總表查詢的 `ProductFlow` 與外箱明細列印的 `OuterBoxLabel`，見「掃描流程與外箱明細列印」）。所以請提醒現場：**按下確認後，等到出現「已同步 N 筆到商品主檔 ✓」再離開頁面或再按一次**——中途離開頁面，剩下的筆就不會送出；重複按會把同一箱再送一次（重複列）。超過 55 件的大箱子會在中途停頓一陣子（視前面花了多久而定，最多約 1 分鐘），更要等。
   - **等待與代理逾時**：視窗已滿時，單一請求最長要等約 60 秒（等最舊的起始離開視窗），剛好在一般反向代理 60 秒左右的逾時邊緣（排在後面的也不會等更久：每過一個視窗，最舊的那批起始會一起離開）；Coolify 反向代理的實際逾時未確認。等得比代理逾時還久，前端會先看到失敗、伺服器之後卻還是寫入，使用者重送就變成重複列。部署後請用一個超過 55 件的箱子實測一次。
   - **排隊上限**：排隊等名額（視窗已滿、還沒送出）的 append 超過 `APPEND_MAX_PENDING`（50）筆時，新的請求直接回 503「目前等待寫入的筆數過多」；已經取得名額、正在送出的不算。這個上限是為了避免異常流量讓請求與連線越積越多，**不是**等待時間的上限：排隊的人最多等約一個視窗（60 秒），與排在第幾個無關。正常使用時前端是逐筆等回應才送下一筆，排隊的人數頂多等於同時關大箱子的人數。
   - **已知限制**：(1) 排隊上限是**全域**的，沒有每個 IP 各自的佇列額度——單一來源在一分鐘內送出約 51～105 個請求（視窗已被用滿時只要 51 個：50 個排隊再加 1 個；視窗全空時要先用掉 55 個名額再排滿 50 個，共約 105 個；每分鐘 600 次的存檔額度都允許），就能讓全站的存檔暫時回 503（約一分鐘）；單純每分鐘送滿 55 筆也能用光全站的視窗配額，讓別人的存檔排隊等待；(2) client 中途斷線時，已排進佇列的請求仍會寫入（與 n8n 版相同）；(3) 佇列在記憶體裡，服務重啟或重新部署時，還沒寫進試算表的排隊中存檔會遺失（見「部署」的優雅關閉說明）；(4) 視窗內可以同時有多筆 append 在途，同時送出的多筆在試算表裡的列順序不保證與送出順序相同（前端單一裝置逐筆送出時不受影響）。
+- **商品總表讀不到時**：`/api/products/lookup` 有舊資料就沿用舊資料（log 一行警告）、沒有任何資料才回 502（表頭缺欄回 500）；讀取失敗後 10 秒內不重試上游；前端遇到失敗（斷線、錯誤、被限流）會跳出「無法查詢商品總表」讓人員手動輸入、清單標「未核對」，所以總表掛掉不會讓現場無法裝箱，但這些品名沒有經過總表核對。目錄只讀、不寫回總表；沒有服務帳號憑證時查詢回 503。見「試算表設定 → 商品資料庫」。
+- **列印外箱明細的限制**：字型指定 Noto Sans CJK TC／Noto Sans TC 但不載入外部字型，印的那台裝置沒裝就退回系統中文字型；建議用 Chrome 並維持「預設」邊界、不勾「頁首與頁尾」；已用電腦版 Chrome 轉 PDF 驗證，**iPhone Safari 與實體印表機尚未實測**。
 - **不開 CORS**：頁面與 API 同源。
 - **`/api/save` 的 `values.append` 不自動重試**：逾時或 5xx 時無法確定有沒有寫進去，重試可能造成重複列；失敗時前端會提示，請到試算表確認後再補送。唯一的例外是 401（授權過期、請求尚未執行）：換新 token 後重送一次，重送算一次新的起始、同樣受視窗配額限制。
 - log 不記請求內容（圖片、商品資料）與任何金鑰；上游失敗只記狀態碼與錯誤類型／代碼（Google 讀表頭失敗時另記其簡短錯誤訊息，方便判斷是分頁名稱還是權限問題；append 失敗不記訊息，因為可能回顯欄位值）。
@@ -439,11 +486,12 @@ curl -s -X POST localhost:8099/api/ocr -H 'content-type: application/json' -d '{
 ## 專案結構
 
 ```
-index.html              原本的前端頁面（OCR／存檔兩個端點常數改成 /api/ocr、/api/save；另多了 NotifyEngine 與關箱流程裡的一次呼叫，用來通知 LINE；全站登入後多了 ApiClient（所有 /api 請求共用：帶 X-Requested-With、401 導向登入頁）與頂端使用者列 UserBar；WIWI 品牌配色：只寫語意 token、header 有 Logo）
+index.html              原本的前端頁面（商品總表查詢與同箱累加 ProductFlow、外箱明細列印 OuterBoxLabel；OCR／存檔兩個端點常數改成 /api/ocr、/api/save；另多了 NotifyEngine 與關箱流程裡的一次呼叫，用來通知 LINE；全站登入後多了 ApiClient（所有 /api 請求共用：帶 X-Requested-With、401 導向登入頁）與頂端使用者列 UserBar；WIWI 品牌配色：只寫語意 token、header 有 Logo）
 public/assets/          WIWI 配色 token（wiwi-colors.css）與 Logo（wiwi-logo.svg、wiwi-logo-white.svg）：從 skill wiwi-web-colors 原樣複製，不手改；GET /assets/* 提供（見「品牌配色與靜態資源」）
 src/server.ts           啟動入口（讀環境變數、index.html 與 public/assets、開啟資料目錄，監聽 0.0.0.0:PORT）
 src/assets.ts           靜態資源：啟動時把 public/assets 讀進記憶體、GET /assets/* 只用檔名查表（不可能路徑穿越）、缺必要檔案就啟動失敗
-src/app.ts              Hono app：主頁與三支 API 的登入閘門、路由、限流（OCR／存檔／關箱通知／LINE webhook／設定 API 各自額度）、body 上限、錯誤處理
+src/app.ts              Hono app：主頁與四支 API（OCR／存檔／關箱通知／商品編號查詢）的登入閘門、路由、限流（OCR／存檔／關箱通知／商品編號查詢／LINE webhook／設定 API 各自額度）、body 上限、錯誤處理
+src/products.ts         商品總表查詢（POST /api/products/lookup）：讀「WIWI商品資料庫」（商品總表、雲端總表）、整份快取在記憶體（10 分鐘過期、查無時最多每 60 秒重抓、失敗退避 10 秒）、輸入驗證
 src/ocr.ts              OCR：prompt、請求組裝、OpenAI 呼叫（timeout、重試）、回應解析
 src/sheets.ts           存檔：欄位整理、合併品名、表頭對應、Sheets REST（讀表頭＋append）、append 滾動視窗配額
 src/google-auth.ts      服務帳號 JWT（RS256）換 token、憑證解析（JSON／base64）
@@ -463,7 +511,7 @@ src/rate-limit.ts       固定視窗限流、客戶端 IP 判斷、並行閘門�
 src/env.ts              環境變數載入
 src/common.ts           共用型別與工具（ServiceError、Logger、FetchLike）
 scripts/docker-entrypoint.sh  容器入口：修正 Volume 擁有者後用 su-exec 降權
-tests/                  vitest（含 assets.test.ts：靜態資源路由與路徑穿越；branding.test.ts：配色檔 sha256、CSS 只寫 token 且守住配色鐵律、頁面結構與 CSP；notify-engine.test.ts：直接從 index.html 取出 ApiClient、各引擎與 UserBar 在 Node 執行來測；server*.test.ts 真的啟動 src/server.ts；login-gate.test.ts：登入閘門、next 白名單、角色與權限、v2→v3）；tests/fixtures/n8n-golden.json 是 n8n 現行版的標準答案（產生腳本：tests/fixtures/generate-n8n-golden.mjs）
+tests/                  vitest（含 products.test.ts：商品總表查詢與快取；scan-flow.test.ts：掃描流程（同箱累加、查總表、查無／未核對、品名記憶）；outer-box-label.test.ts：外箱明細的合併、分頁與排版；assets.test.ts：靜態資源路由與路徑穿越；branding.test.ts：配色檔 sha256、CSS 只寫 token 且守住配色鐵律、頁面結構與 CSP；notify-engine.test.ts：直接從 index.html 取出 ApiClient、各引擎與 UserBar 在 Node 執行來測；server*.test.ts 真的啟動 src/server.ts；login-gate.test.ts：登入閘門、next 白名單、角色與權限、v2→v3）；tests/fixtures/n8n-golden.json 是 n8n 現行版的標準答案（產生腳本：tests/fixtures/generate-n8n-golden.mjs）
 docs/conventions/       按需讀的約定文件，效力與 CLAUDE.md 相同（CLAUDE.md 的路由表指向這裡）：auth-accounts.md（登入、帳號、設定頁、SSO）、branding.md（配色與靜態資源）、index-html.md（前端單頁）
 docs/legacy-n8n/        已退役的 n8n 工作流匯出（歷史參考）
 Dockerfile              兩階段建置，EXPOSE／預設 PORT=8080、DATA_DIR=/app/data，入口腳本降權

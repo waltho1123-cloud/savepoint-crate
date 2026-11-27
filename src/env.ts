@@ -13,6 +13,10 @@ export const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com";
 export const DEFAULT_OPENAI_MODEL = "gpt-5.6-luna";
 export const DEFAULT_GOOGLE_SHEET_ID = "1Wql_6lg_PQ1TT2xOF_5tv2AwA8Wy-PUWfeRPaVV-B_A";
 export const DEFAULT_GOOGLE_SHEET_NAME = "商品主檔";
+/** 商品總表（WIWI商品資料庫）的試算表 ID 與兩個分頁名稱：AI 只讀出商品編號，品名等欄位用編號到這裡查。 */
+export const DEFAULT_PRODUCT_SHEET_ID = "1cqjAGZP53FZCbfvGg78syO979Qe5G3JrGK6S3UJQ92s";
+export const DEFAULT_PRODUCT_MASTER_SHEET_NAME = "商品總表";
+export const DEFAULT_PRODUCT_CLOUD_SHEET_NAME = "雲端總表";
 export const DEFAULT_PORT = 8080;
 /** 本機預設的資料目錄（相對於啟動時的工作目錄）；容器裡由 Dockerfile 設成 /app/data（Coolify 的持久儲存掛在這裡）。 */
 export const DEFAULT_DATA_DIR = "./data";
@@ -27,6 +31,12 @@ export interface AppEnv {
   GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: string;
   GOOGLE_SHEET_ID: string;
   GOOGLE_SHEET_NAME: string;
+  /** 商品總表的試算表 ID（只讀；要把它共用給服務帳號的 client_email，檢視者即可）。 */
+  PRODUCT_SHEET_ID: string;
+  /** 商品總表的「商品總表」分頁名稱（查詢鍵 `商品編號+尺寸`、品名、性別、顏色、尺寸）。 */
+  PRODUCT_MASTER_SHEET_NAME: string;
+  /** 「雲端總表」分頁名稱（官方完整品名）。 */
+  PRODUCT_CLOUD_SHEET_NAME: string;
   /** LINE Messaging API 的 channel access token（推播與 webhook 回覆用）；空字串＝未設定。 */
   LINE_CHANNEL_ACCESS_TOKEN: string;
   /** 關箱通知的目標群組 ID（C 開頭）；空字串＝未設定。token 與群組 ID 兩者都有才會推播。 */
@@ -59,6 +69,9 @@ export function loadEnv(source: EnvSource = process.env): AppEnv {
     GOOGLE_SERVICE_ACCOUNT_CREDENTIALS: pick(source, "GOOGLE_SERVICE_ACCOUNT_CREDENTIALS", ""),
     GOOGLE_SHEET_ID: pick(source, "GOOGLE_SHEET_ID", DEFAULT_GOOGLE_SHEET_ID),
     GOOGLE_SHEET_NAME: pick(source, "GOOGLE_SHEET_NAME", DEFAULT_GOOGLE_SHEET_NAME),
+    PRODUCT_SHEET_ID: pick(source, "PRODUCT_SHEET_ID", DEFAULT_PRODUCT_SHEET_ID),
+    PRODUCT_MASTER_SHEET_NAME: pick(source, "PRODUCT_MASTER_SHEET_NAME", DEFAULT_PRODUCT_MASTER_SHEET_NAME),
+    PRODUCT_CLOUD_SHEET_NAME: pick(source, "PRODUCT_CLOUD_SHEET_NAME", DEFAULT_PRODUCT_CLOUD_SHEET_NAME),
     LINE_CHANNEL_ACCESS_TOKEN: pick(source, "LINE_CHANNEL_ACCESS_TOKEN", ""),
     LINE_GROUP_ID: pick(source, "LINE_GROUP_ID", ""),
     LINE_CHANNEL_SECRET: pick(source, "LINE_CHANNEL_SECRET", ""),
