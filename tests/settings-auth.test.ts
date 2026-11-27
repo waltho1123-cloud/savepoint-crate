@@ -893,7 +893,7 @@ describe("資料目錄不可用", () => {
     const login = await ctx.app.request("/login");
     expect(login.status).toBe(503);
     expect(await login.text()).toContain("請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data");
-    for (const path of ["/api/ocr", "/api/save", "/api/box-closed"]) {
+    for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/boxes/lookup"]) {
       const res = await call(ctx.app, "POST", path, { boxId: "B1", items: [], total: 0, successCount: 0, failedCount: 0 });
       expect(res.status, path).toBe(503);
       expect(await res.json()).toEqual({ success: false, error: "請在 Coolify 的持久化儲存（Persistent Storage）掛載 Volume 到 /app/data" });

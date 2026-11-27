@@ -443,6 +443,7 @@ body {
   color: var(--primary-dark);
 }
 .stats-empty { text-align: center; color: var(--text-muted); padding: 36px; }
+.stats-empty-hint { margin-top: 8px; font-size: .82rem; line-height: 1.5; }
 
 /* ===== Toast — 預設是反白（深字底＋白字），成功／失敗用狀態色字 + 淡底 ===== */
 .toast-container {
@@ -634,7 +635,7 @@ body {
 .item-qty-label { font-size: .78rem; color: var(--text-muted); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 
 /* 商品對話框的提示區塊（總表查無／無法查詢） */
-.dialog-wide { max-width: 520px; }
+.dialog-wide { max-width: 520px; max-height: calc(100vh - 24px); overflow-y: auto; }
 .dialog-alert { padding: 10px 12px; border-radius: var(--radius-sm); font-size: .88rem; line-height: 1.5; margin-bottom: 14px; }
 .dialog-alert-danger { background: var(--wiwi-danger-tint); color: var(--wiwi-danger); border: 1px solid var(--wiwi-danger); }
 .dialog-alert-warning { background: var(--wiwi-warning-tint); color: var(--wiwi-warning); border: 1px solid var(--wiwi-warning); }
@@ -661,6 +662,21 @@ body {
 .ob-tag { white-space: nowrap; flex: none; font-size: .72rem; font-weight: 700; padding: 1px 8px; border-radius: 20px; }
 .ob-tag-open { background: var(--wiwi-success-tint); color: var(--wiwi-success); border: 1px solid var(--wiwi-success); }
 .ob-tag-closed { background: var(--wiwi-surface-sunken); color: var(--text-muted); border: 1px solid var(--wiwi-border-strong); }
+.ob-tag-sheet { background: var(--wiwi-thermal-tint); color: var(--wiwi-thermal-text-strong); border: 1px solid var(--wiwi-border-strong); }
+.ob-pick-empty { color: var(--text-muted); font-size: .85rem; padding: 10px; text-align: center; border: 1px dashed var(--wiwi-border-strong); border-radius: var(--radius-sm); }
+
+/* 列印外箱明細：從商品主檔載入別台裝置的箱子（手機窄螢幕：日期欄與按鈕可換行，不造成水平捲動） */
+.ob-sheet { border: 1px solid var(--wiwi-border-strong); border-radius: var(--radius-sm); padding: 10px; margin-bottom: 12px; min-width: 0; }
+.ob-sheet .ob-sheet-hint { margin-bottom: 8px; font-size: .82rem; }
+.ob-sheet-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.ob-sheet-date {
+  flex: 1 1 150px; min-width: 0; max-width: 100%;
+  padding: 8px 10px; border: 1px solid var(--wiwi-border-strong); border-radius: var(--radius-sm);
+  font-size: 16px; background: var(--wiwi-surface); box-shadow: var(--neu-inset); color: var(--text);
+}
+.ob-sheet-date:focus { border-color: var(--wiwi-focus-ring); }
+.ob-sheet-status { margin-top: 8px; font-size: .85rem; line-height: 1.5; overflow-wrap: anywhere; color: var(--text-muted); }
+.ob-sheet-status.is-error { color: var(--wiwi-danger); }
 
 /* 列印外箱明細：A4 直式一頁兩箱（畫面與列印用同一份樣式，量高度才準；字型只用系統字型，不載入任何外部資源） */
 #outer-box-print { display: none; }
@@ -857,7 +873,7 @@ body {
             </tr>
           </thead>
           <tbody id="stats-tbody">
-            <tr><td colspan="8" class="stats-empty">尚無盤點資料</td></tr>
+            <tr><td colspan="8" class="stats-empty">尚無盤點資料<div class="stats-empty-hint no-print">這裡只顯示這台裝置掃描的資料；要印別台裝置掃的箱子，請按「列印外箱明細」從商品主檔載入。</div></td></tr>
           </tbody>
         </table>
       </div>
@@ -1546,6 +1562,178 @@ const OuterBoxLabel = {
   toggleOrder(order, boxId, checked) {
     const rest = order.filter(id => id !== boxId);
     return checked ? [...rest, boxId] : rest;
+  },
+
+  // ---- 從商品主檔載入別台裝置已完成的箱子（POST /api/boxes/lookup）----
+  // 載入的箱子只活在選擇視窗的記憶體裡：不進箱子清單、不寫入任何儲存。清單項目的鍵是 sheet:<日期>|<箱號>|<關箱時間>|<序>，不會與本機箱號相撞。
+  BOXES_LOOKUP_URL: '/api/boxes/lookup',
+  SHEET_ERROR_FALLBACK: '無法讀取商品主檔，請稍後再試',
+  SHEET_KEY_PREFIX: 'sheet:',
+  MAX_QTY: 9999,
+
+  _clampQty(value) {
+    const n = Math.floor(Number(value));
+    if (Number.isNaN(n)) return 1;
+    return Math.min(this.MAX_QTY, Math.max(1, n));
+  },
+
+  /** 台北時間（UTC+8）的今天，YYYY-MM-DD。nowMs 是 epoch 毫秒（可注入，測試用）。 */
+  taipeiToday(nowMs) {
+    return new Date(nowMs + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  },
+
+  /** 關箱時間 → 只顯示 HH:MM；空白或認不得的格式回空字串。 */
+  formatClosedTime(closedAt) {
+    const m = /(\d{1,2}):(\d{2})/.exec(this._text(closedAt));
+    return m ? m[1].padStart(2, '0') + ':' + m[2] : '';
+  },
+
+  sheetKey(date, boxId, closedAt, seq) {
+    return this.SHEET_KEY_PREFIX + date + '|' + boxId + '|' + closedAt + '|' + seq;
+  },
+
+  isSheetKey(key) {
+    return typeof key === 'string' && key.startsWith(this.SHEET_KEY_PREFIX);
+  },
+
+  /**
+   * 把 API 回來的箱子整理成選擇視窗用的項目（同一個箱號可以有很多筆，各有不同的鍵；數量一律 1～9999；沒有商品的箱子略過）。
+   * 回傳 [{ key, id, closedAt, status: 'sheet', items }]。
+   */
+  loadSheetBoxes(date, rawBoxes) {
+    const out = [];
+    (Array.isArray(rawBoxes) ? rawBoxes : []).forEach((raw, seq) => {
+      if (!raw || typeof raw !== 'object' || !Array.isArray(raw.items)) return;
+      const items = raw.items.filter(it => it && typeof it === 'object').map(it => ({
+        barcode: this._text(it.barcode),
+        productName: this._text(it.productName),
+        gender: this._text(it.gender),
+        color: this._text(it.color),
+        size: this._text(it.size),
+        mergedName: this._text(it.mergedName),
+        qty: this._clampQty(it.qty)
+      }));
+      if (items.length === 0) return;
+      const id = this._text(raw.boxId) || '（無箱號）';
+      const closedAt = this._text(raw.closedAt);
+      out.push({ key: this.sheetKey(date, this._text(raw.boxId), closedAt, seq), id, closedAt, status: 'sheet', items });
+    });
+    return out;
+  },
+
+  /** 從勾選順序拿掉指定的鍵（重新載入時拿掉舊的一批；其他勾選不動）。 */
+  dropKeys(order, keys) {
+    const drop = new Set(keys);
+    return order.filter(key => !drop.has(key));
+  },
+
+  /** 全選（pick 'all'）／只選已完成（pick 'closed'）：本機可選的箱號＋載入的箱子（載入的都算已完成）。回傳勾選順序（本機在前、載入的在後）。 */
+  pickAll(localBoxes, sheetBoxes, pick) {
+    const local = localBoxes.filter(b => this.isSelectable(b) && (pick === 'all' || b.status === 'closed')).map(b => b.id);
+    return [...local, ...sheetBoxes.filter(b => this.isSelectable(b)).map(b => b.key)];
+  },
+
+  /** 勾選順序（本機箱號或載入的鍵）→ [{ kind: 'local'|'sheet', box }]，找不到或空箱的略過。 */
+  resolveOrder(order, localBoxes, sheetBoxes) {
+    const out = [];
+    for (const key of order) {
+      const sheet = this.isSheetKey(key) ? sheetBoxes.find(b => b.key === key) : null;
+      const box = sheet || localBoxes.find(b => b.id === key);
+      if (box && this.isSelectable(box)) out.push({ kind: sheet ? 'sheet' : 'local', box });
+    }
+    return out;
+  },
+
+  /**
+   * 讀商品主檔裡別台裝置已完成的箱子。失敗一律回 { ok: false, error }（error 是可直接顯示的中文；API 沒給就用固定句），不丟例外。
+   * 成功回 { ok: true, boxes: loadSheetBoxes(...) }。
+   */
+  async fetchSheetBoxes(api, date) {
+    try {
+      const resp = await api.post(this.BOXES_LOOKUP_URL, { date });
+      let body = null;
+      try { body = await resp.json(); } catch (e) { body = null; }
+      if (!resp.ok || !body || body.success !== true) {
+        const error = body && typeof body.error === 'string' && body.error.trim() ? body.error.trim() : this.SHEET_ERROR_FALLBACK;
+        return { ok: false, error };
+      }
+      if (!body.data || !Array.isArray(body.data.boxes)) return { ok: false, error: this.SHEET_ERROR_FALLBACK };
+      return { ok: true, boxes: this.loadSheetBoxes(date, body.data.boxes) };
+    } catch (e) {
+      return { ok: false, error: this.SHEET_ERROR_FALLBACK };
+    }
+  },
+
+  /**
+   * 載入的一列印什麼品名：總表查得到、而且總表的品名／性別／顏色／尺寸（trim 後）與這一列完全相同 → 總表的官方品名；
+   * 其他（查不到、有任何一欄不同＝被人員改過、沒有編號、查詢失敗）→ 這一列的 mergedName，空白就用欄位組。
+   */
+  sheetRowName(rep, product) {
+    if (product && this._text(product.officialName)) {
+      const same = ['productName', 'gender', 'color', 'size'].every(f => this._text(product[f]) === this._text(rep[f]));
+      if (same) return this._text(product.officialName);
+    }
+    return this._text(rep.mergedName)
+      || this.buildMergedName(this._text(rep.productName), this._text(rep.gender), this._text(rep.color), this._text(rep.size));
+  },
+
+  /**
+   * 載入的箱子整理成要印的資料（與 prepare 同形：[{ id, rows: [{ barcode, name, qty }], total }]，另帶 key）。
+   * 同箱同編號合併、數量加總（上限 9999）、依編號排序；所有商品編號去重後批次查總表（一次最多 200 個）。查詢失敗不擋列印。
+   */
+  async prepareSheet(sheetBoxes, opts) {
+    const grouped = sheetBoxes.map(box => {
+      const map = new Map();
+      for (const item of box.items) {
+        const code = this._text(item.barcode);
+        if (!map.has(code)) map.set(code, { barcode: code, qty: 0, items: [] });
+        const group = map.get(code);
+        group.qty = Math.min(this.MAX_QTY, group.qty + this._clampQty(item.qty));
+        group.items.push(item);
+      }
+      const groups = Array.from(map.values()).sort((a, b) => a.barcode.localeCompare(b.barcode, 'en', { numeric: true }));
+      for (const group of groups) {
+        group.rep = group.items.find(it => this._text(it.mergedName) || this._text(it.productName)) || group.items[0];
+      }
+      return { box, groups };
+    });
+    const codes = [];
+    const seen = new Set();
+    for (const { groups } of grouped) {
+      for (const group of groups) {
+        if (group.barcode && !seen.has(group.barcode)) {
+          seen.add(group.barcode);
+          codes.push(group.barcode);
+        }
+      }
+    }
+    const catalog = new Map();
+    let lookupFailed = false;
+    for (let i = 0; i < codes.length; i += this.LOOKUP_CHUNK) {
+      let result = null;
+      try { result = await opts.lookup(codes.slice(i, i + this.LOOKUP_CHUNK)); } catch (e) { result = null; }
+      if (!result || !result.ok) {
+        lookupFailed = true;
+        continue;
+      }
+      for (const [code, product] of result.products) catalog.set(code, product);
+    }
+    const boxes = grouped.map(({ box, groups }) => {
+      const rows = groups.map(group => ({
+        barcode: group.barcode,
+        name: this.sheetRowName(group.rep, group.barcode ? catalog.get(group.barcode) : null),
+        qty: group.qty
+      }));
+      return { key: box.key, id: box.id, rows, total: rows.reduce((sum, row) => sum + row.qty, 0) };
+    });
+    return { boxes, lookupFailed };
+  },
+
+  /** 把本機箱子與載入的箱子各自整理好的結果，依勾選順序（resolveOrder 的結果）接回同一個陣列。 */
+  mergePrepared(chosen, localPrepared, sheetPrepared) {
+    let li = 0;
+    let si = 0;
+    return chosen.map(entry => (entry.kind === 'sheet' ? sheetPrepared[si++] : localPrepared[li++])).filter(Boolean);
   },
 
   /** 同一箱同一個編號合併成一列（數量加總），依商品編號由小到大。 */
@@ -2396,7 +2584,7 @@ function renderStats() {
   const summary = document.getElementById('stats-summary');
 
   if (state.boxes.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="8" class="stats-empty">尚無盤點資料</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="stats-empty">尚無盤點資料<div class="stats-empty-hint no-print">這裡只顯示這台裝置掃描的資料；要印別台裝置掃的箱子，請按「列印外箱明細」從商品主檔載入。</div></td></tr>';
     summary.textContent = '';
     return;
   }
@@ -2473,37 +2661,37 @@ document.getElementById('btn-reset-product-cache').addEventListener('click', () 
 });
 
 // ========== Outer Box Print Dialog ==========
-/** 列印外箱明細：選擇要印的箱子（空箱不能選；依勾選順序排版）→ 查官方品名 → 量高度分頁 → 列印。 */
+/**
+ * 列印外箱明細：選擇要印的箱子（空箱不能選；依勾選順序排版）→ 查官方品名 → 量高度分頁 → 列印。
+ * 視窗隨時開得起來（本機沒有箱子也可以）；另可「從商品主檔載入」別台裝置已完成的箱子。
+ * 載入的箱子只存在這個視窗的區域變數 sheetBoxes：不進箱子清單、不寫入任何儲存。
+ */
 function showOuterBoxDialog(mode, boxId) {
   const boxes = state.boxes;
-  if (boxes.length === 0) {
-    showToast('目前沒有任何箱子', 'error');
-    return;
-  }
   let order = OuterBoxLabel.defaultSelection(boxes, mode, boxId);
+  let sheetBoxes = [];
+  let sheetStatus = { kind: '', text: '' };
+  let sheetLoading = false;
   const backdrop = document.createElement('div');
   backdrop.className = 'dialog-backdrop';
-  const rowsHtml = boxes.map((box, i) => {
-    const selectable = OuterBoxLabel.isSelectable(box);
-    const sum = OuterBoxLabel.summarize(box);
-    return `<label class="ob-pick${selectable ? '' : ' disabled'}">
-      <input type="checkbox" data-box-id="${escHtml(box.id)}" data-index="${i}"${selectable ? '' : ' disabled'}>
-      <span class="ob-pick-id">${escHtml(box.id)}</span>
-      <span class="ob-tag ${box.status === 'closed' ? 'ob-tag-closed' : 'ob-tag-open'}">${box.status === 'closed' ? '已完成' : '進行中'}</span>
-      <span class="ob-pick-order"></span>
-      <span class="ob-pick-meta">${selectable ? `${sum.kinds} 種商品、${sum.pieces} 件` : '空箱（不能列印）'}</span>
-    </label>`;
-  }).join('');
   backdrop.innerHTML = `
     <div class="dialog dialog-wide">
       <h3>列印外箱明細</h3>
       <p>A4 直式，一頁上下各一箱，中間有裁切虛線。依勾選順序排版（數字是順序）。</p>
+      <div class="ob-sheet">
+        <p class="ob-sheet-hint">從商品主檔載入：別台裝置掃的箱子，只有已按「完成此箱」並同步成功的才載得到。</p>
+        <div class="ob-sheet-row">
+          <input type="date" class="ob-sheet-date" aria-label="載入哪一天的箱子" value="${escHtml(OuterBoxLabel.taipeiToday(Date.now()))}">
+          <button class="btn btn-outline btn-sm ob-sheet-load">載入</button>
+        </div>
+        <div class="ob-sheet-status" aria-live="polite"></div>
+      </div>
       <div class="ob-pick-tools">
         <button class="btn btn-outline btn-sm" data-pick="all">全選</button>
         <button class="btn btn-outline btn-sm" data-pick="closed">只選已完成</button>
         <button class="btn btn-outline btn-sm" data-pick="none">全不選</button>
       </div>
-      <div class="ob-pick-list">${rowsHtml}</div>
+      <div class="ob-pick-list"></div>
       <div class="dialog-actions">
         <button class="btn btn-outline btn-sm dialog-cancel">取消</button>
         <button class="btn btn-primary btn-sm dialog-confirm">列印</button>
@@ -2511,29 +2699,93 @@ function showOuterBoxDialog(mode, boxId) {
     </div>
   `;
   document.body.appendChild(backdrop);
-  const checkboxes = Array.from(backdrop.querySelectorAll('input[type="checkbox"]'));
+  const listEl = backdrop.querySelector('.ob-pick-list');
   const confirmBtn = backdrop.querySelector('.dialog-confirm');
+  const dateEl = backdrop.querySelector('.ob-sheet-date');
+  const loadBtn = backdrop.querySelector('.ob-sheet-load');
+  const statusEl = backdrop.querySelector('.ob-sheet-status');
+
+  // 清單 = 本機箱子 ＋ 從商品主檔載入的箱子；data-box-id 是勾選順序用的鍵（本機是箱號、載入的是 sheet:… 鍵）
+  const renderList = () => {
+    const localHtml = boxes.length === 0
+      ? '<div class="ob-pick-empty">這台裝置沒有箱子</div>'
+      : boxes.map((box, i) => {
+        const selectable = OuterBoxLabel.isSelectable(box);
+        const sum = OuterBoxLabel.summarize(box);
+        return `<label class="ob-pick${selectable ? '' : ' disabled'}">
+      <input type="checkbox" data-box-id="${escHtml(box.id)}" data-index="${i}"${selectable ? '' : ' disabled'}>
+      <span class="ob-pick-id">${escHtml(box.id)}</span>
+      <span class="ob-tag ${box.status === 'closed' ? 'ob-tag-closed' : 'ob-tag-open'}">${box.status === 'closed' ? '已完成' : '進行中'}</span>
+      <span class="ob-pick-order"></span>
+      <span class="ob-pick-meta">${selectable ? `${sum.kinds} 種商品、${sum.pieces} 件` : '空箱（不能列印）'}</span>
+    </label>`;
+      }).join('');
+    const sheetHtml = sheetBoxes.map(box => {
+      const sum = OuterBoxLabel.summarize(box);
+      const time = OuterBoxLabel.formatClosedTime(box.closedAt);
+      return `<label class="ob-pick">
+      <input type="checkbox" data-box-id="${escHtml(box.key)}">
+      <span class="ob-pick-id">${escHtml(box.id)}</span>
+      <span class="ob-tag ob-tag-sheet">商品主檔</span>
+      <span class="ob-pick-order"></span>
+      <span class="ob-pick-meta">${time ? escHtml(time) + '　' : ''}${sum.kinds} 種商品、${sum.pieces} 件</span>
+    </label>`;
+    }).join('');
+    listEl.innerHTML = localHtml + sheetHtml;
+  };
   const refresh = () => {
-    for (const cb of checkboxes) {
+    for (const cb of listEl.querySelectorAll('input[type="checkbox"]')) {
       const at = order.indexOf(cb.dataset.boxId);
       cb.checked = at >= 0;
       cb.parentElement.querySelector('.ob-pick-order').textContent = at >= 0 ? '#' + (at + 1) : '';
     }
     confirmBtn.disabled = order.length === 0;
+    statusEl.textContent = sheetStatus.text;
+    statusEl.classList.toggle('is-error', sheetStatus.kind === 'error');
+    loadBtn.disabled = sheetLoading;
+    loadBtn.textContent = sheetLoading ? '載入中…' : '載入';
   };
-  checkboxes.forEach(cb => cb.addEventListener('change', () => {
+  listEl.addEventListener('change', e => {
+    const cb = e.target;
+    if (!cb || !cb.dataset || cb.dataset.boxId === undefined) return;
     order = OuterBoxLabel.toggleOrder(order, cb.dataset.boxId, cb.checked);
     refresh();
-  }));
+  });
   backdrop.querySelectorAll('[data-pick]').forEach(btn => btn.addEventListener('click', () => {
     const pick = btn.dataset.pick;
-    order = pick === 'none' ? [] : boxes.filter(b => OuterBoxLabel.isSelectable(b) && (pick === 'all' || b.status === 'closed')).map(b => b.id);
+    order = pick === 'none' ? [] : OuterBoxLabel.pickAll(boxes, sheetBoxes, pick);
     refresh();
   }));
+  loadBtn.addEventListener('click', async () => {
+    const date = dateEl.value;
+    if (!date) {
+      sheetStatus = { kind: 'error', text: '請先選擇日期' };
+      refresh();
+      return;
+    }
+    sheetLoading = true;
+    sheetStatus = { kind: '', text: '' };
+    refresh();
+    const result = await OuterBoxLabel.fetchSheetBoxes(ApiClient, date);
+    sheetLoading = false;
+    if (!result.ok) {
+      sheetStatus = { kind: 'error', text: result.error };
+    } else {
+      // 取代先前載入的那一批：舊的從勾選順序拿掉，本機箱子的勾選不動；新載入的預設不勾
+      order = OuterBoxLabel.dropKeys(order, sheetBoxes.map(b => b.key));
+      sheetBoxes = result.boxes;
+      renderList();
+      sheetStatus = sheetBoxes.length === 0
+        ? { kind: '', text: '這一天在商品主檔沒有已完成的箱子' }
+        : { kind: '', text: `已載入 ${sheetBoxes.length} 箱` };
+    }
+    refresh();
+  });
+  renderList();
   refresh();
   backdrop.querySelector('.dialog-cancel').addEventListener('click', () => backdrop.remove());
   confirmBtn.addEventListener('click', async () => {
-    const chosen = order.map(id => BoxManager.getBox(id)).filter(b => b && OuterBoxLabel.isSelectable(b));
+    const chosen = OuterBoxLabel.resolveOrder(order, state.boxes, sheetBoxes);
     if (chosen.length === 0) return;
     confirmBtn.disabled = true;
     confirmBtn.textContent = '準備中…';
@@ -2550,10 +2802,19 @@ function showOuterBoxDialog(mode, boxId) {
   backdrop.addEventListener('click', e => { if (e.target === backdrop) backdrop.remove(); });
 }
 
+/** chosen: OuterBoxLabel.resolveOrder 的結果（本機箱子與載入的箱子，依勾選順序）。 */
 async function printOuterBoxes(chosen) {
-  const prepared = await OuterBoxLabel.prepare(chosen, { lookup: codes => ProductFlow.lookup(ApiClient, codes) });
-  if (prepared.lookupFailed) showToast('無法查詢官方品名，舊商品改用現有品名列印', 'error');
-  const measured = OuterBoxLabel.measure(document, prepared.boxes, escHtml);
+  const lookup = codes => ProductFlow.lookup(ApiClient, codes);
+  const locals = chosen.filter(c => c.kind === 'local').map(c => c.box);
+  const sheets = chosen.filter(c => c.kind === 'sheet').map(c => c.box);
+  const [localPrepared, sheetPrepared] = await Promise.all([
+    locals.length > 0 ? OuterBoxLabel.prepare(locals, { lookup }) : { boxes: [], lookupFailed: false },
+    sheets.length > 0 ? OuterBoxLabel.prepareSheet(sheets, { lookup }) : { boxes: [], lookupFailed: false }
+  ]);
+  if (localPrepared.lookupFailed) showToast('無法查詢官方品名，舊商品改用現有品名列印', 'error');
+  if (sheetPrepared.lookupFailed) showToast('無法查詢官方品名，商品主檔載入的箱子改用試算表上的品名列印', 'error');
+  const merged = OuterBoxLabel.mergePrepared(chosen, localPrepared.boxes, sheetPrepared.boxes);
+  const measured = OuterBoxLabel.measure(document, merged, escHtml);
   const pages = OuterBoxLabel.paginate(measured.boxes, measured.limits);
   PrintManager.printOuterBoxes(OuterBoxLabel.renderPages(pages, escHtml));
 }

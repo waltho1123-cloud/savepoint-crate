@@ -1,6 +1,6 @@
 # 約定：全站登入、帳號與設定頁（Volume）
 
-> 這份是 `CLAUDE.md`「不可破壞的約定」的一部分，**效力與 `CLAUDE.md` 相同**；2026-11-27 從 `CLAUDE.md` 逐字搬出（只加了小標題，內文沒有改寫）；同日新增商品查詢 API（`POST /api/products/lookup`）時把它補進登入閘門的清單。
+> 這份是 `CLAUDE.md`「不可破壞的約定」的一部分，**效力與 `CLAUDE.md` 相同**；2026-11-27 從 `CLAUDE.md` 逐字搬出（只加了小標題，內文沒有改寫）；同日新增商品查詢 API（`POST /api/products/lookup`）時把它補進登入閘門的清單；同日新增商品主檔讀回 API（`POST /api/boxes/lookup`，唯讀）時同樣補進。
 > **動到下列任何一項之前，把這份整份讀完再動手**：`src/auth.ts`、`src/auth-kit.ts`、`src/settings-store.ts`、`src/settings-routes.ts`、`src/settings-page.ts`、`src/login-routes.ts`、`src/account-routes.ts`、`src/accounts.ts`、`src/hub-sso.ts`、`src/line-settings.ts`；登入、session、帳號、角色、設定頁、`settings.json`、WIWI Hub 單一登入；以及**新增任何路由**。
 > 改了這裡描述的行為，就同步改這份文件；`CLAUDE.md` 的路由表與「底線」摘要也要跟著對一次。
 
@@ -18,7 +18,7 @@
 
 ## 閘門與權限
 
-**閘門與權限**：主頁 `GET /`、`/index.html` 沒登入 302 到 `/login?next=/`；`POST /api/ocr|save|box-closed|products/lookup` 要有效 session（任一角色，沒登入 401「請先登入」）＋ `X-Requested-With: XMLHttpRequest`（缺了 403；先查登入再查標頭；資料目錄不可用 503）；`/settings`、`/api/settings*`、`/api/accounts*` 要 role admin（`kit.requireAdmin`：沒登入 401、一般使用者 403「需要管理員權限」；頁面：沒登入 302 到 `/login?next=/settings`、一般使用者回 403 頁；**還沒有任何帳號時 `/settings` 公開顯示「輸入設定碼」的建立表單或升級表單**（設定碼本身只寫在啟動 log，頁面不顯示），各有自己的秘密擋著）；`/login` 還沒有任何帳號時顯示「請管理員先到設定頁」、已登入導向 `/`；`/api/me`、`/account`（唯讀）任一角色。**沒有任何「自己改密碼」的端點**（`POST /account/password`、`POST /settings/password` 不存在，回 404；`/account` 頁只有姓名、Email、角色、一行「密碼由管理員統一設定，需要變更請洽管理員」與「商品主檔（Google 試算表）」連結卡片（`renderAccountPage(ctx, me, sheets)`；`registerLoginRoutes` 的 `options.sheets`＝`describeSheets(env)`，啟動時算一次；精簡版只有連結、分頁與 ID，不顯示服務帳號），沒有表單）——**密碼只由管理員設定**（`POST /api/accounts/:id/password`，可對任何帳號含自己；`tests/settings-auth.test.ts` 的路由清單（走訪 `app.routes`，涵蓋 `/account`、`/account/*`、`/settings/*` 底下的非 GET 路由）與「沒有「改自己的密碼」的端點」那組 404 測試（明列 `/account/password`、`/settings/password`、`/api/account/password`、`/api/me/password` 等路徑，任何角色、任何方法）會擋住有人把它加回來）。新增路由時要決定它屬於哪一類，並更新 `tests/login-gate.test.ts` 的權限矩陣。
+**閘門與權限**：主頁 `GET /`、`/index.html` 沒登入 302 到 `/login?next=/`；`POST /api/ocr|save|box-closed|products/lookup|boxes/lookup` 要有效 session（任一角色，沒登入 401「請先登入」）＋ `X-Requested-With: XMLHttpRequest`（缺了 403；先查登入再查標頭；資料目錄不可用 503）；`/settings`、`/api/settings*`、`/api/accounts*` 要 role admin（`kit.requireAdmin`：沒登入 401、一般使用者 403「需要管理員權限」；頁面：沒登入 302 到 `/login?next=/settings`、一般使用者回 403 頁；**還沒有任何帳號時 `/settings` 公開顯示「輸入設定碼」的建立表單或升級表單**（設定碼本身只寫在啟動 log，頁面不顯示），各有自己的秘密擋著）；`/login` 還沒有任何帳號時顯示「請管理員先到設定頁」、已登入導向 `/`；`/api/me`、`/account`（唯讀）任一角色。**沒有任何「自己改密碼」的端點**（`POST /account/password`、`POST /settings/password` 不存在，回 404；`/account` 頁只有姓名、Email、角色、一行「密碼由管理員統一設定，需要變更請洽管理員」與「商品主檔（Google 試算表）」連結卡片（`renderAccountPage(ctx, me, sheets)`；`registerLoginRoutes` 的 `options.sheets`＝`describeSheets(env)`，啟動時算一次；精簡版只有連結、分頁與 ID，不顯示服務帳號），沒有表單）——**密碼只由管理員設定**（`POST /api/accounts/:id/password`，可對任何帳號含自己；`tests/settings-auth.test.ts` 的路由清單（走訪 `app.routes`，涵蓋 `/account`、`/account/*`、`/settings/*` 底下的非 GET 路由）與「沒有「改自己的密碼」的端點」那組 404 測試（明列 `/account/password`、`/settings/password`、`/api/account/password`、`/api/me/password` 等路徑，任何角色、任何方法）會擋住有人把它加回來）。新增路由時要決定它屬於哪一類，並更新 `tests/login-gate.test.ts` 的權限矩陣。
 
 ## WIWI Hub 單一登入（SSO）
 

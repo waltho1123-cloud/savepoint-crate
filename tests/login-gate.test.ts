@@ -437,6 +437,7 @@ describe("角色與權限（一般使用者 vs 管理員 vs 沒登入）", () =>
     ["OCR", "POST", "/api/ocr", { image: SAMPLE_IMAGE }, 401, "pass", "pass"],
     ["存檔", "POST", "/api/save", {}, 401, "pass", "pass"],
     ["商品編號查詢（任一角色；測試的假 Google 讀不到總表，結果是 502，不是 401／403）", "POST", "/api/products/lookup", { barcodes: ["1801112756"] }, 401, "pass", "pass"],
+    ["商品主檔讀回（任一角色；唯讀；測試的假 Google 讀不到資料，結果由端點自己決定，不是 401／403）", "POST", "/api/boxes/lookup", { date: "2026/11/27" }, 401, "pass", "pass"],
     ["關箱通知", "POST", "/api/box-closed", { boxId: "B", items: [], total: 0, successCount: 0, failedCount: 0 }, 401, 200, 200],
     ["自助改密碼（已移除：任何人都是 404）", "POST", "/account/password", { currentPassword: "wrong-password-123", newPassword: NEW_PASSWORD }, 404, 404, 404],
     ["重設一般使用者的密碼（管理員：200；一般使用者打自己的 id：403）", "POST", `/api/accounts/${USER}/password`, { newPassword: NEW_PASSWORD }, 401, 403, 200],
@@ -652,7 +653,7 @@ describe("全站登入的其他細節", () => {
 
   it("OCR／存檔／關箱通知：未登入的錯誤回應是 JSON（含 nosniff 以外不帶任何多餘資訊），不會洩漏帳號是否存在", async () => {
     const ctx = await makeApp();
-    for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup"]) {
+    for (const path of ["/api/ocr", "/api/save", "/api/box-closed", "/api/products/lookup", "/api/boxes/lookup"]) {
       const res = await call(ctx.app, "POST", path, {}, { cookie: "" });
       expect(res.status).toBe(401);
       expect(await res.json()).toEqual({ success: false, error: "請先登入" });

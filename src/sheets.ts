@@ -319,12 +319,37 @@ export class SheetsClient {
     return typeof updatedRange === "string" && updatedRange !== "" ? { updatedRange } : {};
   }
 
-  private async getHeader(): Promise<string[]> {
+  /** 分頁名稱（唯讀查詢組 A1 範圍用）。 */
+  get sheetTitle(): string {
+    return this.sheetName;
+  }
+
+  /** 唯讀：取得第 1 列表頭（走既有的 5 分鐘快取；不改動快取規則）。 */
+  readHeader(): Promise<string[]> {
+    return this.getHeader(true);
+  }
+
+  /**
+   * 唯讀：讀一個 A1 範圍（原始值＋日期時間用序號，列方向）。不受 append 視窗配額限制、不自動重試（401 換 token 重送一次除外，
+   * 由 request 處理）。回傳 values 二維陣列（Google 會省略尾端空白，沒有資料時是空陣列）。
+   */
+  async readValues(a1Range: string): Promise<unknown[][]> {
+    const url =
+      `${SHEETS_API}/${encodeURIComponent(this.spreadsheetId)}/values/${encodeURIComponent(a1Range)}` +
+      "?valueRenderOption=UNFORMATTED_VALUE&dateTimeRenderOption=SERIAL_NUMBER&majorDimension=ROWS";
+    const json = (await this.request("GET", url, undefined, undefined, true)) as { values?: unknown } | null;
+    const values = json?.values;
+    if (values === undefined) return [];
+    if (!Array.isArray(values)) throw new ServiceError(502, "Google 試算表回應格式不正確");
+    return values.map((row): unknown[] => (Array.isArray(row) ? row : []));
+  }
+
+  private async getHeader(redactUpstream = false): Promise<string[]> {
     if (this.headerCache && this.now() - this.headerCache.fetchedAt < this.headerTtlMs) {
       return this.headerCache.header;
     }
     if (!this.headerInflight) {
-      this.headerInflight = this.fetchHeader()
+      this.headerInflight = this.fetchHeader(redactUpstream)
         .then((header) => {
           this.headerCache = { header, fetchedAt: this.now() };
           return header;
@@ -336,10 +361,10 @@ export class SheetsClient {
     return this.headerInflight;
   }
 
-  private async fetchHeader(): Promise<string[]> {
+  private async fetchHeader(redactUpstream = false): Promise<string[]> {
     const range = `${quoteSheetName(this.sheetName)}!1:1`;
     const url = `${SHEETS_API}/${encodeURIComponent(this.spreadsheetId)}/values/${encodeURIComponent(range)}`;
-    const json = (await this.request("GET", url)) as { values?: unknown } | null;
+    const json = (await this.request("GET", url, undefined, undefined, redactUpstream)) as { values?: unknown } | null;
     const values = json?.values;
     const firstRow: unknown = Array.isArray(values) ? values[0] : undefined;
     return Array.isArray(firstRow) ? firstRow.map((cell) => String(cell ?? "")) : [];
@@ -418,6 +443,8 @@ export class SheetsClient {
     url: string,
     body?: unknown,
     acquireStart?: () => Promise<void>,
+    /** true：log 只記狀態碼，連 Google 的錯誤訊息也不記（商品主檔讀回用：log 不可含上游內文）。 */
+    redactUpstream = false,
   ): Promise<unknown> {
     for (let attempt = 1; attempt <= 2; attempt++) {
       const token = await this.tokenProvider.getToken();
@@ -445,9 +472,11 @@ export class SheetsClient {
       } | null;
       // 讀表頭（GET）的請求沒有使用者資料，Google 的錯誤訊息可以放心記錄（例如 Unable to parse range：分頁名稱不對）；
       // append（POST）的錯誤訊息可能回顯請求裡的欄位值（例如 Invalid values[0][4]: …），所以只記 status 代碼。
-      const detail = [errorBody?.error?.status, method === "GET" ? errorBody?.error?.message : undefined]
-        .filter((part): part is string => typeof part === "string")
-        .join(" ");
+      const detail = redactUpstream
+        ? ""
+        : [errorBody?.error?.status, method === "GET" ? errorBody?.error?.message : undefined]
+            .filter((part): part is string => typeof part === "string")
+            .join(" ");
       this.log.error(`[sheets] ${method} 失敗：HTTP ${res.status} ${detail}`.trim().slice(0, 300));
 
       if (res.status === 401 && attempt === 1) {
